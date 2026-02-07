@@ -1,0 +1,9 @@
+{
+  "name": "gemini-bridge-mcp",
+  "version": "0.2.0",
+  "description": "MCP server for context offloading via Gemini CLI",
+  "type": "module",
+  "bin": {
+    "gemini-bridge-mcp": "./server.mjs"
+  }
+}
