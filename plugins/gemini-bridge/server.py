@@ -85,7 +85,7 @@ def find_gemini() -> str:
     path = shutil.which("gemini")
     if not path:
         raise FileNotFoundError(
-            "gemini CLI not found in PATH. Install: npm install -g @anthropic-ai/gemini-cli"
+            "gemini CLI not found in PATH. Install: npm install -g @anthropic/gemini-cli"
         )
     return path
 
@@ -98,14 +98,13 @@ def build_prompt(mode: str, focus: str | None = None) -> str:
 
 
 def run_gemini(prompt: str, path: str) -> str:
-    """Execute gemini CLI in plan mode and return the response text."""
+    """Execute gemini CLI in yolo mode and return the response text."""
     gemini = find_gemini()
     cmd = [
         gemini,
         "-p", prompt,
-        "--approval-mode", "plan",
+        "--yolo",
         "--output-format", "json",
-        path,
     ]
 
     result = subprocess.run(
