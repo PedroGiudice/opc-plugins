@@ -8,6 +8,22 @@ import json
 import sys
 import subprocess
 import shutil
+import os
+from datetime import datetime
+
+# ---------------------------------------------------------------------------
+# File-based debug logging (writes to /tmp/gemini-bridge.log)
+# ---------------------------------------------------------------------------
+
+_LOG_FILE = "/tmp/gemini-bridge.log"
+
+def _log(msg: str) -> None:
+    """Append a timestamped message to the debug log file."""
+    try:
+        with open(_LOG_FILE, "a") as f:
+            f.write(f"[{datetime.now().isoformat()}] [PID={os.getpid()}] {msg}\n")
+    except Exception:
+        pass  # Never crash on logging
 
 # ---------------------------------------------------------------------------
 # Prompt templates per exploration mode
@@ -85,7 +101,7 @@ def find_gemini() -> str:
     path = shutil.which("gemini")
     if not path:
         raise FileNotFoundError(
-            "gemini CLI not found in PATH. Install: npm install -g @anthropic/gemini-cli"
+            "gemini CLI not found in PATH. Install: npm install -g @google/gemini-cli"
         )
     return path
 
@@ -97,8 +113,8 @@ def build_prompt(mode: str, focus: str | None = None) -> str:
     return template.format(focus=focus or "", focus_line=focus_line)
 
 
-def run_gemini(prompt: str, path: str) -> str:
-    """Execute gemini CLI in yolo mode and return the response text."""
+def run_gemini(prompt: str, path: str) -> dict:
+    """Execute gemini CLI in yolo mode and return structured result."""
     gemini = find_gemini()
     cmd = [
         gemini,
@@ -115,17 +131,43 @@ def run_gemini(prompt: str, path: str) -> str:
         cwd=path,
     )
 
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        return f"Gemini CLI error (exit {result.returncode}):\n{stderr}"
+    stderr = result.stderr.strip()
 
-    # Try to extract just the response from JSON output
+    if result.returncode != 0:
+        return {
+            "status": "error",
+            "text": f"Gemini CLI error (exit {result.returncode}):\n{stderr}",
+            "stderr": stderr,
+        }
+
+    # Try to extract response and stats from JSON output
     try:
         data = json.loads(result.stdout)
-        return data.get("response", result.stdout)
+        response_text = data.get("response", result.stdout)
+        stats = data.get("stats", {})
+
+        # Extract tool call count from stats for validation
+        tool_tokens = 0
+        for model_stats in stats.get("models", {}).values():
+            tool_tokens += model_stats.get("tokens", {}).get("tool", 0)
+
+        # Check for signs of hallucination: no tool tokens = no files read
+        tool_errors = [l for l in stderr.split("\n") if "Error executing tool" in l]
+
+        return {
+            "status": "completed",
+            "text": response_text,
+            "stats": stats,
+            "tool_tokens": tool_tokens,
+            "tool_errors": tool_errors,
+            "stderr_summary": stderr[:500] if stderr else None,
+        }
     except json.JSONDecodeError:
-        # Fallback: return raw output
-        return result.stdout.strip()
+        return {
+            "status": "completed",
+            "text": result.stdout.strip(),
+            "stderr_summary": stderr[:500] if stderr else None,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +213,7 @@ EXPLORE_TOOL = {
 
 def execute_explore(args: dict) -> dict:
     """Execute the explore tool and return MCP result."""
+    _log(f"EXPLORE called with args: {json.dumps(args)}")
     path = args.get("path", ".")
     mode = args.get("mode", "onboarding")
     focus = args.get("focus")
@@ -191,8 +234,27 @@ def execute_explore(args: dict) -> dict:
 
     try:
         prompt = build_prompt(mode, focus)
-        result = run_gemini(prompt, path)
-        return {"content": [{"type": "text", "text": result}]}
+        gemini_result = run_gemini(prompt, path)
+
+        text = gemini_result.get("text", "")
+        status = gemini_result.get("status", "unknown")
+
+        # Build metadata footer for transparency
+        meta_parts = [f"\n\n---\n_Gemini Bridge | mode: {mode} | status: {status}_"]
+
+        if gemini_result.get("tool_errors"):
+            meta_parts.append(f"_Tool errors: {'; '.join(gemini_result['tool_errors'][:5])}_")
+
+        if gemini_result.get("stderr_summary"):
+            # Only include if there's something beyond normal startup messages
+            stderr = gemini_result["stderr_summary"]
+            if "Error" in stderr or "error" in stderr:
+                meta_parts.append(f"_Stderr: {stderr[:200]}_")
+
+        output = text + "\n".join(meta_parts)
+        is_error = status == "error"
+
+        return {"content": [{"type": "text", "text": output}], "isError": is_error}
     except FileNotFoundError as e:
         return {"content": [{"type": "text", "text": str(e)}], "isError": True}
     except subprocess.TimeoutExpired:
@@ -297,24 +359,43 @@ def handle_request(request: dict) -> dict | None:
 
 def main() -> None:
     """MCP server main loop: read requests, dispatch, write responses."""
+    _log("SERVER STARTED")
+    _log(f"Python: {sys.version}")
+    _log(f"CWD: {os.getcwd()}")
+    _log(f"stdin isatty: {sys.stdin.isatty()}, stdout isatty: {sys.stdout.isatty()}")
+
+    msg_count = 0
     while True:
         try:
             request = read_message()
             if request is None:
-                break  # EOF or connection closed
+                _log("read_message returned None (EOF). Exiting.")
+                break
+
+            msg_count += 1
+            method = request.get("method", "???")
+            req_id = request.get("id", "no-id")
+            _log(f"MSG #{msg_count}: method={method} id={req_id}")
 
             response = handle_request(request)
             if response is not None:
                 write_message(response)
+                _log(f"RESPONSE sent for method={method} id={req_id}")
+            else:
+                _log(f"No response for method={method} (notification)")
 
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            _log(f"JSON decode error: {e}")
             continue
         except KeyboardInterrupt:
+            _log("KeyboardInterrupt. Exiting.")
             break
         except Exception as e:
-            # Log to stderr (visible in debug mode), don't crash
+            _log(f"EXCEPTION: {e}")
             sys.stderr.write(f"gemini-bridge error: {e}\n")
             sys.stderr.flush()
+
+    _log(f"SERVER EXITING after {msg_count} messages")
 
 
 if __name__ == "__main__":
