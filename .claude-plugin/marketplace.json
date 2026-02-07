@@ -1,0 +1,20 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "opc-plugins",
+  "description": "Custom Claude Code plugins by opc. Context offloading, tooling, automation.",
+  "owner": {
+    "name": "opc"
+  },
+  "plugins": [
+    {
+      "name": "gemini-bridge",
+      "description": "Context offloading via Gemini CLI. Exposes exploration tools that delegate heavy reading/analysis to Gemini CLI, preserving Claude's context window.",
+      "version": "0.1.0",
+      "author": {
+        "name": "opc"
+      },
+      "source": "./plugins/gemini-bridge",
+      "category": "development"
+    }
+  ]
+}
