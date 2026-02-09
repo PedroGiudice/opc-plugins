@@ -94,10 +94,14 @@ function findGemini() {
   }
 }
 
-function runGemini(prompt, path) {
+function runGemini(prompt, path, sessionId = null) {
   return new Promise((resolve) => {
     const gemini = findGemini();
-    const child = spawn(gemini, ["-p", prompt, "--yolo", "--output-format", "json"], {
+    const args = ["-p", prompt, "--yolo", "--output-format", "json"];
+    if (sessionId) {
+      args.push("--resume", sessionId);
+    }
+    const child = spawn(gemini, args, {
       cwd: path,
       stdio: ["pipe", "pipe", "pipe"],
       timeout: 300_000,
@@ -128,13 +132,14 @@ function runGemini(prompt, path) {
         resolve({
           status: "completed",
           text: responseText,
+          session_id: data.session_id || null,
           stats,
           tool_tokens: toolTokens,
           tool_errors: toolErrors,
           stderr_summary: stderr.slice(0, 500) || null,
         });
       } catch {
-        resolve({ status: "completed", text: stdout.trim(), stderr_summary: stderr.slice(0, 500) || null });
+        resolve({ status: "completed", text: stdout.trim(), session_id: null, stderr_summary: stderr.slice(0, 500) || null });
       }
     });
 
@@ -167,6 +172,10 @@ const EXPLORE_TOOL = {
         type: "string",
         description: "What to focus on. Required for targeted/verify/research. Optional for onboarding.",
       },
+      session_id: {
+        type: "string",
+        description: "UUID of a previous Gemini session to resume. Enables multi-round exploration within the same context.",
+      },
     },
     required: ["path", "mode"],
   },
@@ -179,6 +188,7 @@ async function executeExplore(args) {
   const path = args.path || ".";
   const mode = args.mode || "onboarding";
   const focus = args.focus;
+  const sessionId = args.session_id || null;
 
   if (!TEMPLATES[mode]) {
     return { content: [{ type: "text", text: `Unknown mode: ${mode}. Use: onboarding, targeted, verify, research` }], isError: true };
@@ -190,9 +200,13 @@ async function executeExplore(args) {
 
   try {
     const prompt = buildPrompt(mode, focus);
-    const result = await runGemini(prompt, path);
+    const result = await runGemini(prompt, path, sessionId);
     const text = result.text || "";
     const status = result.status || "unknown";
+    const sid = result.session_id || "";
+
+    let output = sid ? `SESSION_ID: ${sid}\n\n` : "";
+    output += text;
 
     let meta = `\n\n---\n_Gemini Bridge | mode: ${mode} | status: ${status}_`;
     if (result.tool_errors?.length) {
@@ -202,7 +216,7 @@ async function executeExplore(args) {
       meta += `\n_Stderr: ${result.stderr_summary.slice(0, 200)}_`;
     }
 
-    return { content: [{ type: "text", text: text + meta }], isError: status === "error" };
+    return { content: [{ type: "text", text: output + meta }], isError: status === "error" };
   } catch (e) {
     return { content: [{ type: "text", text: `Error: ${e.message}` }], isError: true };
   }
@@ -226,7 +240,7 @@ function handleRequest(request) {
       result: {
         protocolVersion: "2024-11-05",
         capabilities: { tools: {} },
-        serverInfo: { name: "gemini-bridge", version: "0.3.0" },
+        serverInfo: { name: "gemini-bridge", version: "0.4.0" },
       },
     };
   }
