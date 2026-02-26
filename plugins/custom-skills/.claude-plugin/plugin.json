@@ -1,0 +1,5 @@
+{
+  "name": "custom-skills",
+  "description": "Skills customizadas: deploy, tauri, infra, legal, memoria, pickup-and-context",
+  "version": "1.0.0"
+}

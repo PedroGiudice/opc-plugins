@@ -27,6 +27,34 @@ Task(gemini-bridge-explorer, prompt="
 ")
 ```
 
+## Deep Explore
+
+Quando precisar de analise profunda (nao apenas panorama):
+
+```
+Task(gemini-bridge-explorer, prompt="
+  Deep explore /caminho/absoluto/do/projeto
+  Preciso entender: [descricao detalhada do que precisa]
+  Contexto: [o que voce ja sabe, se algo]
+")
+```
+
+O explorer fara 2-5 rounds automaticamente:
+1. Panorama geral (onboarding)
+2. Profundidade nos gaps detectados (targeted)
+3. Refinamento se necessario (targeted/verify)
+
+Retorna resultado consolidado e estruturado.
+
+### Quando usar deep vs simples
+
+| Situacao | Tipo | Exemplo |
+|----------|------|---------|
+| Primeiro contato com projeto | Deep | "Deep explore /projeto" |
+| Entender modulo antes de editar | Deep | "Deep explore, preciso entender auth" |
+| Busca pontual | Simples | "Explore, mode=research, busque padroes X" |
+| Verificacao rapida | Simples | "Explore, mode=verify, cheque se Y funciona" |
+
 ## Quando NAO Delegar
 
 - Busca pontual especifica → Grep/Glob resolve
@@ -42,3 +70,4 @@ O beneficio e triplo:
 1. Sua janela de contexto e preservada
 2. O resultado vem denso e formatado
 3. O Gemini tem 1M tokens de contexto para trabalho pesado
+4. Em modo deep, o Gemini acumula contexto entre rounds via sessao persistente
