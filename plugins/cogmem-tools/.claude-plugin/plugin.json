@@ -1,0 +1,6 @@
+{
+  "name": "cogmem-tools",
+  "version": "0.1.0",
+  "description": "MCP tools para memoria cognitiva (busca, insercao, contexto) e agente explorador de codigo",
+  "author": { "name": "opc" }
+}
