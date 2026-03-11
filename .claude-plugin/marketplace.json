@@ -25,6 +25,16 @@
       },
       "source": "./plugins/legal-team",
       "category": "productivity"
+    },
+    {
+      "name": "cogmem-tools",
+      "description": "MCP tools para memoria cognitiva (busca, insercao, contexto) e agente explorador de codigo.",
+      "version": "0.1.0",
+      "author": {
+        "name": "opc"
+      },
+      "source": "./plugins/cogmem-tools",
+      "category": "development"
     }
   ]
 }
