@@ -1,0 +1,6 @@
+{
+  "stj-vec-tools": {
+    "command": "node",
+    "args": ["${CLAUDE_PLUGIN_ROOT}/server.mjs"]
+  }
+}

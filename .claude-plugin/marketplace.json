@@ -35,6 +35,26 @@
       },
       "source": "./plugins/cogmem-tools",
       "category": "development"
+    },
+    {
+      "name": "stj-vec-tools",
+      "description": "MCP tools para busca vetorial na base de jurisprudencia do STJ. Busca hibrida, consulta de documentos e filtros disponiveis.",
+      "version": "0.1.0",
+      "author": {
+        "name": "opc"
+      },
+      "source": "./plugins/stj-vec-tools",
+      "category": "productivity"
+    },
+    {
+      "name": "legal-vec-tools",
+      "description": "MCP tools para busca hibrida (dense + sparse + RRF) na base de legislacao brasileira (CF, CC, CPC, CDC, CLT, CP, CPP, ECA).",
+      "version": "0.1.0",
+      "author": {
+        "name": "opc"
+      },
+      "source": "./plugins/legal-vec-tools",
+      "category": "productivity"
     }
   ]
 }
