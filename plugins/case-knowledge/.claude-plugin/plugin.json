@@ -1,0 +1,8 @@
+{
+  "name": "case-knowledge",
+  "version": "0.1.0",
+  "description": "MCP tools para busca vetorial hibrida em bases de conhecimento de casos juridicos (Case Knowledge System). Busca semantica + lexical em knowledge.db por caso.",
+  "author": {
+    "name": "opc"
+  }
+}
