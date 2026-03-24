@@ -55,6 +55,16 @@
       },
       "source": "./plugins/legal-vec-tools",
       "category": "productivity"
+    },
+    {
+      "name": "case-knowledge",
+      "description": "MCP tools para busca vetorial hibrida em bases de conhecimento de casos juridicos. Busca semantica + lexical em knowledge.db por caso.",
+      "version": "0.1.0",
+      "author": {
+        "name": "opc"
+      },
+      "source": "./plugins/case-knowledge",
+      "category": "productivity"
     }
   ]
 }
