@@ -12,11 +12,21 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import yaml from "js-yaml";
 
-const API_BASE = process.env.CASE_KNOWLEDGE_API_BASE || "http://127.0.0.1:8422/api";
-const CASES_BASE = process.env.CASE_KNOWLEDGE_CASES_BASE || "/home/opc/case-docs/cases";
+function defaultApiBase() {
+  if (process.platform === "win32") return "http://100.123.73.128:8422/api";
+  return "http://127.0.0.1:8422/api";
+}
+
+function defaultCasesBase() {
+  if (process.platform === "win32") return join(process.env.USERPROFILE || "C:\\Users\\pedro", "cases");
+  return "/home/opc/case-docs/cases";
+}
+
+const API_BASE = process.env.CASE_KNOWLEDGE_API_BASE || defaultApiBase();
+const CASES_BASE = process.env.CASE_KNOWLEDGE_CASES_BASE || defaultCasesBase();
 const REQUEST_TIMEOUT_MS = 60_000;
 const MAX_RETRIES = 3;
 const RETRY_DELAYS = [500, 1500, 3000];
@@ -74,12 +84,12 @@ function detectCase() {
   const cwd = resolve(process.cwd());
   const base = resolve(CASES_BASE);
 
-  if (!cwd.startsWith(base + "/") && cwd !== base) {
+  if (!cwd.startsWith(base + sep) && cwd !== base) {
     return null;
   }
 
   const relative = cwd.slice(base.length + 1);
-  const caseName = relative.split("/")[0];
+  const caseName = relative.split(sep)[0];
 
   if (!caseName) {
     return null;
@@ -135,7 +145,9 @@ server.tool(
     "doc_order (ordem canonica da peca no processo), " +
     "data_juntada (data real de juntada nos autos), " +
     "posicao_relativa (posicao do chunk dentro do documento, 0.0-1.0), " +
-    "tipo_conteudo (peca, copia_externa, documento_pre_processual). " +
+    "tipo_conteudo (peca, copia_externa, documento_pre_processual), " +
+    "page_start/page_end (paginas do documento original que o chunk cobre), " +
+    "parent_peca (peca-pai quando o chunk e de um anexo). " +
     "Use agrupar=true para diversidade de documentos nos resultados " +
     "(evita que um documento grande monopolize). " +
     "NAO usar cross-reference a menos que o usuario peca explicitamente.",
@@ -144,12 +156,18 @@ server.tool(
     limit: z.number().int().min(1).max(50).default(10)
       .describe("Numero maximo de resultados (default 10, max 50)"),
     peca: z.string().optional()
-      .describe("Filtrar por peca processual: inicial, contestacao, replica, decisao, sentenca, " +
-        "acordao, agravo, apelacao, embargos_declaracao, peticoes_diversas, documento_tecnico, integra_autos"),
+      .describe("Filtrar por peca processual: inicial, contestacao, replica, peticao_diversa, " +
+        "embargos_declaracao, agravo, apelacao, recurso_ordinario, contrarrazoes, sentenca, acordao, " +
+        "decisao_interlocutoria, despacho, ato_ordinatorio, certidao, mandado, ata_audiencia, " +
+        "procuracao, guia_custas, contrato, documento_pessoal, comprovante, laudo, outros_anexos"),
+    parent_peca: z.string().optional()
+      .describe("Filtrar por peca-pai (ex: 'p3' para anexos da peca na pagina 3). Formato: pN onde N e o numero da pagina da peca principal."),
     fase: z.string().optional()
       .describe("Filtrar por fase processual: conhecimento, instrucao, recursal, execucao"),
     documento: z.string().optional()
       .describe("Filtrar por nome do documento de origem"),
+    numero_processo: z.string().optional()
+      .describe("Filtrar por numero de processo CNJ (NNNNNNN-DD.YYYY.J.TR.OOOO)"),
     agrupar: z.boolean().optional().default(false)
       .describe("Agrupar resultados por documento (search_groups). " +
         "Quando true, retorna top N documentos distintos com ate 3 chunks cada, " +
@@ -160,13 +178,13 @@ server.tool(
         "'veja no caso X'). Valor 'relacionados' expande para os casos listados no case.yaml. " +
         "Nomes especificos buscam naquela collection. NUNCA usar espontaneamente."),
   },
-  async ({ query, limit, peca, fase, documento, agrupar, casos }) => {
+  async ({ query, limit, peca, parent_peca, fase, documento, numero_processo, agrupar, casos }) => {
     try {
       if (!CASE) {
         throw new Error("Sessao nao esta dentro de um caso. Navegue para cases/<nome> antes.");
       }
 
-      const body = { query, limit, peca, fase, documento, agrupar };
+      const body = { query, limit, peca, parent_peca, fase, documento, numero_processo, agrupar };
 
       // Search current case
       const searches = [apiPost(`/cases/${CASE.name}/search`, body)];
@@ -369,6 +387,27 @@ server.tool(
       return { content: [{ type: "text", text: content }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Erro ao ler manifesto: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// Tool: metadata
+server.tool(
+  "metadata",
+  "Retorna metadados extraidos do caso atual: partes (autor/reu), advogados, " +
+    "numero do processo, tipo de acao, valor da causa, contratos, pedido principal, " +
+    "dispositivos de decisoes e ultimos andamentos. " +
+    "Use no inicio da sessao para entender o caso.",
+  {},
+  async () => {
+    try {
+      if (!CASE) {
+        throw new Error("Sessao nao esta dentro de um caso.");
+      }
+      const data = await apiGet(`/cases/${CASE.name}/metadata`);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Erro ao obter metadata: ${err.message}` }], isError: true };
     }
   }
 );
