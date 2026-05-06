@@ -33,6 +33,21 @@ description: |
   </example>
 model: sonnet
 color: magenta
+tools:
+  - Read
+  - SendMessage
+  - TaskUpdate
+  - TaskGet
+  - TaskList
+  - mcp__plugin_stj-vec-tools_stj-vec-tools__search
+  - mcp__plugin_stj-vec-tools_stj-vec-tools__document
+  - mcp__plugin_stj-vec-tools_stj-vec-tools__filters
+  - mcp__plugin_legal-vec-tools_legal-vec-tools__search
+  - mcp__plugin_legal-vec-tools_legal-vec-tools__document
+  - mcp__plugin_legal-vec-tools_legal-vec-tools__recommend
+  - mcp__plugin_legal-vec-tools_legal-vec-tools__sources
+  - mcp__plugin_cogmem-tools_cogmem-tools__search
+  - mcp__plugin_cogmem-tools_cogmem-tools__context
 ---
 
 # Legal Researcher

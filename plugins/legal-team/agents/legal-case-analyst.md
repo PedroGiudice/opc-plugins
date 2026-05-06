@@ -34,6 +34,21 @@ description: |
   </example>
 model: opus
 color: magenta
+tools:
+  - Read
+  - SendMessage
+  - TaskUpdate
+  - TaskGet
+  - TaskList
+  - mcp__plugin_case-knowledge_case-knowledge__search
+  - mcp__plugin_case-knowledge_case-knowledge__contexto
+  - mcp__plugin_case-knowledge_case-knowledge__stats
+  - mcp__plugin_case-knowledge_case-knowledge__list_cases
+  - mcp__plugin_case-knowledge_case-knowledge__info
+  - mcp__plugin_case-knowledge_case-knowledge__manifesto
+  - mcp__plugin_case-knowledge_case-knowledge__metadata
+  - mcp__plugin_cogmem-tools_cogmem-tools__search
+  - mcp__plugin_cogmem-tools_cogmem-tools__context
 ---
 
 # Legal Case Analyst

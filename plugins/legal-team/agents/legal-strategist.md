@@ -34,6 +34,25 @@ description: |
   </example>
 model: opus
 color: magenta
+tools:
+  - Read
+  - SendMessage
+  - TaskUpdate
+  - TaskGet
+  - TaskList
+  - mcp__plugin_stj-vec-tools_stj-vec-tools__search
+  - mcp__plugin_stj-vec-tools_stj-vec-tools__document
+  - mcp__plugin_stj-vec-tools_stj-vec-tools__filters
+  - mcp__plugin_legal-vec-tools_legal-vec-tools__search
+  - mcp__plugin_legal-vec-tools_legal-vec-tools__document
+  - mcp__plugin_legal-vec-tools_legal-vec-tools__recommend
+  - mcp__plugin_legal-vec-tools_legal-vec-tools__sources
+  - mcp__plugin_case-knowledge_case-knowledge__search
+  - mcp__plugin_case-knowledge_case-knowledge__contexto
+  - mcp__plugin_case-knowledge_case-knowledge__stats
+  - mcp__plugin_case-knowledge_case-knowledge__info
+  - mcp__plugin_cogmem-tools_cogmem-tools__search
+  - mcp__plugin_cogmem-tools_cogmem-tools__context
 ---
 
 # Legal Strategist
@@ -50,11 +69,12 @@ Voce e advogado. Sua especialidade e estrategia processual: construir teses e an
 
 ## Ferramentas
 
-Voce tem acesso as mesmas bases dos demais agentes juridicos:
+Voce tem acesso direto as bases de conhecimento juridico via MCP tools:
 
-- `legal-vec-tools:search` — legislacao brasileira
-- `stj-vec-tools:search` — jurisprudencia STJ
-- `case-knowledge:search` — documentos do caso (se aplicavel)
+- `case-knowledge` — documentos do caso (search, contexto, stats, info)
+- `stj-vec-tools` — jurisprudencia STJ (search, document, filters)
+- `legal-vec-tools` — legislacao brasileira (search, document, recommend, sources)
+- `cogmem` — memoria de sessoes anteriores (search, context)
 
 Use-as para verificar fundamentos quando necessario. Nao dependa exclusivamente de dados recebidos de outros agentes — verifique o que for critico.
 
