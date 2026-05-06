@@ -1,6 +1,0 @@
-{
-  "gemini-bridge": {
-    "command": "node",
-    "args": ["${CLAUDE_PLUGIN_ROOT}/wrapper.mjs"]
-  }
-}

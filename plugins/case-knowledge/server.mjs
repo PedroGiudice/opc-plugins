@@ -140,7 +140,8 @@ server.tool(
   "Busca semantica (dense) nos documentos do caso atual via Qdrant. " +
     "O caso e determinado automaticamente pelo diretorio da sessao. " +
     "Suporta filtros por peca processual (inicial, contestacao, acordao, etc.), " +
-    "fase (conhecimento, instrucao, recursal) e documento especifico. " +
+    "fase (conhecimento, instrucao, recursal), documento especifico e " +
+    "categoria (para docs nao-processuais: pesquisa, contrato, parecer, relatorio, etc.). " +
     "Resultados incluem campos cronologicos quando disponiveis: " +
     "doc_order (ordem canonica da peca no processo), " +
     "data_juntada (data real de juntada nos autos), " +
@@ -168,6 +169,9 @@ server.tool(
       .describe("Filtrar por nome do documento de origem"),
     numero_processo: z.string().optional()
       .describe("Filtrar por numero de processo CNJ (NNNNNNN-DD.YYYY.J.TR.OOOO)"),
+    categoria: z.string().optional()
+      .describe("Filtrar por categoria do documento (para docs nao-processuais): " +
+        "pesquisa, contrato, parecer, relatorio, modelo, minuta, correspondencia, etc."),
     agrupar: z.boolean().optional().default(false)
       .describe("Agrupar resultados por documento (search_groups). " +
         "Quando true, retorna top N documentos distintos com ate 3 chunks cada, " +
@@ -178,13 +182,13 @@ server.tool(
         "'veja no caso X'). Valor 'relacionados' expande para os casos listados no case.yaml. " +
         "Nomes especificos buscam naquela collection. NUNCA usar espontaneamente."),
   },
-  async ({ query, limit, peca, parent_peca, fase, documento, numero_processo, agrupar, casos }) => {
+  async ({ query, limit, peca, parent_peca, fase, documento, numero_processo, categoria, agrupar, casos }) => {
     try {
       if (!CASE) {
         throw new Error("Sessao nao esta dentro de um caso. Navegue para cases/<nome> antes.");
       }
 
-      const body = { query, limit, peca, parent_peca, fase, documento, numero_processo, agrupar };
+      const body = { query, limit, peca, parent_peca, fase, documento, numero_processo, categoria, agrupar };
 
       // Search current case
       const searches = [apiPost(`/cases/${CASE.name}/search`, body)];

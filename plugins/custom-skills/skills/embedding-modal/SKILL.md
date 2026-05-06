@@ -21,7 +21,7 @@ Pipeline para gerar embeddings dense + sparse via Modal GPU (L4) usando FlagEmbe
 | Sparse | Lexical weights (token_id: weight) |
 | Volume dados | `case-knowledge-data` |
 | Volume modelo | `stj-vec-models` |
-| Scripts | `/home/opc/lex-vector/stj-vec/tools/case-benchmark/` |
+| Scripts | `/home/opc/stj-vec/tools/case-benchmark/` |
 | Throughput | ~79 emb/s (L4), ~45 emb/s (T4) |
 | Custo tipico | ~$0.005 por 638 chunks |
 
@@ -34,7 +34,7 @@ Pipeline para gerar embeddings dense + sparse via Modal GPU (L4) usando FlagEmbe
 Transforma arquivo de texto em JSONL de chunks (max 512 tokens, overlap 64).
 
 ```bash
-python3 /home/opc/lex-vector/stj-vec/tools/case-benchmark/01_chunk_export.py \
+python3 /home/opc/stj-vec/tools/case-benchmark/01_chunk_export.py \
   <ARQUIVO_INPUT> \
   <OUTPUT_DIR>/chunks.jsonl
 ```
@@ -48,7 +48,7 @@ Output: JSONL com `{id, content}` por linha.
 modal volume put case-knowledge-data <OUTPUT_DIR>/chunks.jsonl chunks/
 
 # Rodar embedding (L4 GPU, dense + sparse)
-modal run /home/opc/lex-vector/stj-vec/tools/case-benchmark/02_modal_embed.py \
+modal run /home/opc/stj-vec/tools/case-benchmark/02_modal_embed.py \
   --source chunks
 ```
 
@@ -63,7 +63,7 @@ modal volume get case-knowledge-data embeddings/chunks.json <OUTPUT_DIR>/embeddi
 modal volume get case-knowledge-data embeddings/chunks.sparse.json <OUTPUT_DIR>/embeddings/
 
 # Import para knowledge.db (dense + sparse)
-python3 /home/opc/lex-vector/stj-vec/tools/case-benchmark/03_import_embeddings.py \
+python3 /home/opc/stj-vec/tools/case-benchmark/03_import_embeddings.py \
   --input <OUTPUT_DIR>/embeddings \
   --db <CASE_DIR>/knowledge.db
 ```
@@ -91,8 +91,8 @@ O MCP server `search-case` faz:
 2. **Sparse**: tokeniza query com XLM-RoBERTa tokenizer -> lookup na sparse_index -> soma pesos
 3. **Fusao**: Reciprocal Rank Fusion (RRF) com peso 50/50
 
-Server: `/home/opc/lex-vector/stj-vec/tools/search-case/server.py`
-Wrapper: `/home/opc/lex-vector/stj-vec/tools/search-case/wrapper.mjs`
+Server: `/home/opc/stj-vec/tools/search-case/server.py`
+Wrapper: `/home/opc/stj-vec/tools/search-case/wrapper.mjs`
 
 ---
 

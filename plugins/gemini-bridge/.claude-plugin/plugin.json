@@ -1,5 +1,0 @@
-{
-  "name": "gemini-bridge",
-  "version": "0.1.0",
-  "description": "Context offloading via Gemini CLI. Expoe tools de exploracao que delegam ao Gemini CLI."
-}

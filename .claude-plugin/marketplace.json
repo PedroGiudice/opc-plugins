@@ -7,19 +7,8 @@
   },
   "plugins": [
     {
-      "name": "gemini-bridge",
-      "description": "Context offloading via Gemini CLI. Exposes exploration tools that delegate heavy reading/analysis to Gemini CLI, preserving Claude's context window.",
-      "version": "0.1.0",
-      "author": {
-        "name": "opc"
-      },
-      "source": "./plugins/gemini-bridge",
-      "category": "development"
-    },
-    {
       "name": "legal-team",
       "description": "Agent team juridico brasileiro com 3 agentes especializados.",
-      "version": "0.1.0",
       "author": {
         "name": "opc"
       },
@@ -29,7 +18,6 @@
     {
       "name": "cogmem-tools",
       "description": "MCP tools para memoria cognitiva (busca, insercao, contexto) e agente explorador de codigo.",
-      "version": "0.1.0",
       "author": {
         "name": "opc"
       },
@@ -39,7 +27,6 @@
     {
       "name": "stj-vec-tools",
       "description": "MCP tools para busca vetorial na base de jurisprudencia do STJ. Busca hibrida, consulta de documentos e filtros disponiveis.",
-      "version": "0.1.0",
       "author": {
         "name": "opc"
       },
@@ -49,7 +36,6 @@
     {
       "name": "legal-vec-tools",
       "description": "MCP tools para busca hibrida (dense + sparse + RRF) na base de legislacao brasileira (CF, CC, CPC, CDC, CLT, CP, CPP, ECA).",
-      "version": "0.1.0",
       "author": {
         "name": "opc"
       },
@@ -58,8 +44,7 @@
     },
     {
       "name": "case-knowledge",
-      "description": "MCP tools para busca vetorial hibrida em bases de conhecimento de casos juridicos. Busca semantica + lexical em knowledge.db por caso.",
-      "version": "0.1.0",
+      "description": "MCP tools para busca vetorial em bases de conhecimento de casos juridicos. Busca semantica em documentos processuais e nao-processuais por caso.",
       "author": {
         "name": "opc"
       },
