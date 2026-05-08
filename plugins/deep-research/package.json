@@ -1,0 +1,18 @@
+{
+  "name": "deep-research",
+  "version": "0.1.0",
+  "description": "MCP server for Gemini Deep Research API",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@google/genai": "^1.33.0",
+    "zod": "^4.4.3"
+  }
+}

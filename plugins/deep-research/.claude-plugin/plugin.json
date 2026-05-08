@@ -1,0 +1,9 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "deep-research",
+  "version": "0.1.0",
+  "description": "Gemini Deep Research como tools MCP nativas. Pesquisa agentiva profunda (lê páginas inteiras, itera, cruza fontes, cita) com collaborative planning. Inclui agente dedicado deep-researcher.",
+  "author": {
+    "name": "opc"
+  }
+}
