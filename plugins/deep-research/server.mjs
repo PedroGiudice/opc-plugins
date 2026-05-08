@@ -186,7 +186,7 @@ function asMcpError(err) {
 }
 
 const server = new McpServer(
-  { name: "deep-research", version: "0.1.0" },
+  { name: "deep-research", version: "0.1.1" },
   { capabilities: { tools: {} } }
 );
 
