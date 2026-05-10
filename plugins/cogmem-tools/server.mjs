@@ -251,6 +251,35 @@ server.tool(
   }
 );
 
+// Tool: recommend
+server.tool(
+  "recommend",
+  "Dados chunk_ids relevantes (positive) e opcionalmente irrelevantes (negative), " +
+  "encontra chunks vetorialmente similares aos positivos e diferentes dos negativos. " +
+  "Util para expandir resultados a partir de um chunk especifico, encontrar " +
+  "mais do mesmo tipo, ou refinar busca por exemplos. Usa Qdrant recommend_points " +
+  "(estrategia AverageVector).",
+  {
+    positive: z.array(z.string()).min(1).describe("Chunk IDs relevantes (obrigatorio)"),
+    negative: z.array(z.string()).optional().default([]).describe("Chunk IDs irrelevantes (opcional)"),
+    repo_path: z.string().optional().describe("Filtrar por repo"),
+    limit: z.number().optional().default(5).describe("Maximo de resultados (default 5)"),
+  },
+  async ({ positive, negative, repo_path, limit }) => {
+    try {
+      const payload = { action: "recommend", positive, negative, limit };
+      if (repo_path) payload.repo_path = repo_path;
+      const response = await sendToDaemon(payload);
+      return formatResult(response);
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: err.message }],
+        isError: true,
+      };
+    }
+  }
+);
+
 // Tool: insert
 server.tool(
   "insert",
