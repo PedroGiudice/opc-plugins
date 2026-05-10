@@ -204,6 +204,29 @@ server.tool(
   }
 );
 
+// Tool: get_session
+server.tool(
+  "get_session",
+  "Retorna todos os chunks de uma sessao em ordem cronologica. " +
+  "Use para reconstituir a conversa completa de uma sessao identificada via " +
+  "list_sessions ou search.",
+  {
+    session_id: z.string().describe("ID da sessao (UUID, vem de list_sessions ou search)"),
+  },
+  async ({ session_id }) => {
+    try {
+      const payload = { action: "get_chunks_by_session", session_id };
+      const response = await sendToDaemon(payload);
+      return formatResult(response);
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: err.message }],
+        isError: true,
+      };
+    }
+  }
+);
+
 // Tool: insert
 server.tool(
   "insert",
