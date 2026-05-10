@@ -153,6 +153,32 @@ server.tool(
   }
 );
 
+// Tool: code_search
+server.tool(
+  "code_search",
+  "Busca semantica em chunks de codigo indexados (collection cogmem_code). " +
+  "Suporta filtro por repo_path. Retorna trechos com file_path, symbol_name, " +
+  "language, start_line/end_line, score.",
+  {
+    query: z.string().describe("Texto/conceito a buscar no codigo"),
+    repo_path: z.string().optional().describe("Filtrar por repo (caminho absoluto)"),
+    limit: z.number().optional().default(5).describe("Maximo de resultados (default 5)"),
+  },
+  async ({ query, repo_path, limit }) => {
+    try {
+      const payload = { action: "code_search", query, limit };
+      if (repo_path) payload.repo_path = repo_path;
+      const response = await sendToDaemon(payload);
+      return formatResult(response);
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: err.message }],
+        isError: true,
+      };
+    }
+  }
+);
+
 // Tool: insert
 server.tool(
   "insert",
