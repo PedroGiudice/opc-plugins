@@ -280,6 +280,61 @@ server.tool(
   }
 );
 
+// Tool: facet
+server.tool(
+  "facet",
+  "Conta valores distintos em uma chave de payload do cogmem_chunks " +
+  "(Qdrant facet API). Util para 'distribuicao por tool_used', " +
+  "'sessoes por repo', 'subagents mais usados'. Chaves indexadas: " +
+  "repo_path, role, tool_used, mcp_tool, subagent, skill_used, source, " +
+  "session_id, project.",
+  {
+    key: z.enum([
+      "repo_path", "role", "tool_used", "mcp_tool",
+      "subagent", "skill_used", "source", "session_id", "project",
+    ]).describe("Chave de payload (Keyword indexed)"),
+    repo_path: z.string().optional().describe("Escopar contagem a um repo"),
+    limit: z.number().optional().default(50).describe("Max valores distintos (default 50)"),
+  },
+  async ({ key, repo_path, limit }) => {
+    try {
+      const payload = { action: "facet", key, limit };
+      if (repo_path) payload.repo_path = repo_path;
+      const response = await sendToDaemon(payload);
+      return formatResult(response);
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: err.message }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool: index_codebase
+server.tool(
+  "index_codebase",
+  "Indexa (ou re-indexa) um repositorio na collection cogmem_code. " +
+  "Walks recursivo no repo, ast-grep para extrair simbolos, embed via TEI, " +
+  "upsert no Qdrant. Idempotente via content_hash — arquivos sem mudanca " +
+  "sao skipped. Retorna {indexed_files, skipped_files, deleted_files, total_chunks}.",
+  {
+    repo_path: z.string().describe("Caminho absoluto do repo a indexar"),
+  },
+  async ({ repo_path }) => {
+    try {
+      const payload = { action: "index_codebase", repo_path };
+      const response = await sendToDaemon(payload);
+      return formatResult(response);
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: err.message }],
+        isError: true,
+      };
+    }
+  }
+);
+
 // Tool: insert
 server.tool(
   "insert",
