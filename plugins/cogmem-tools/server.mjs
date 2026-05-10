@@ -115,20 +115,32 @@ const server = new McpServer({
 server.tool(
   "search",
   "Busca na memoria cognitiva de sessoes anteriores. " +
-  "Busca hibrida: dense (BGE-M3 1024d) + sparse (BM25 FTS5) + fusao RRF. " +
-  "Scores RRF tipicamente entre 0.01-0.03 (ranking relativo importa, nao valor absoluto). " +
+  "Busca hibrida: dense (BGE-M3 1024d) + sparse (FTS5/RRF) com payload do Qdrant. " +
+  "Suporta filtros estruturados (combinaveis) sobre os campos do payload. " +
   "Use para recuperar contexto de sessoes passadas antes de explorar arquivos.",
   {
     query: z.string().describe("Texto de busca"),
     limit: z.number().optional().default(5).describe("Maximo de resultados (default 5)"),
     threshold: z.number().optional().default(0.3).describe("Score minimo RRF (default 0.3)"),
-    days: z.number().optional().describe("Filtro temporal em dias (opcional)"),
+    days: z.number().optional().describe("Filtro temporal em dias (opcional, default 30 no daemon)"),
+    repo_path: z.string().optional().describe("Filtrar por repo (caminho absoluto)"),
+    role: z.enum(["user", "assistant"]).optional().describe("Filtrar por role do turno"),
+    tool_used: z.string().optional().describe("Filtrar por tool builtin (Read, Edit, Bash, ...)"),
+    mcp_tool: z.string().optional().describe("Filtrar por MCP tool (mcp__plugin_xxx__yyy)"),
+    subagent: z.string().optional().describe("Filtrar por subagent acionado (ai-ml-engineer, etc.)"),
+    skill_used: z.string().optional().describe("Filtrar por skill ativada (superpowers:xxx, etc.)"),
+    is_sidechain: z.boolean().optional().describe("Filtrar sidechains (subagent transcripts)"),
+    session_id: z.string().optional().describe("Filtrar por session_id especifico"),
   },
-  async ({ query, limit, threshold, days }) => {
+  async (params) => {
     try {
-      const payload = { action: "search", query, limit, threshold };
-      if (days !== undefined) {
-        payload.days = days;
+      const payload = { action: "search" };
+      for (const k of [
+        "query", "limit", "threshold", "days",
+        "repo_path", "role", "tool_used", "mcp_tool",
+        "subagent", "skill_used", "is_sidechain", "session_id",
+      ]) {
+        if (params[k] !== undefined) payload[k] = params[k];
       }
       const response = await sendToDaemon(payload);
       return formatResult(response);
