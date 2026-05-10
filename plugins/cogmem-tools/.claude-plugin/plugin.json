@@ -1,6 +1,6 @@
 {
   "name": "cogmem-tools",
-  "version": "0.1.0",
-  "description": "MCP tools para memoria cognitiva (busca, insercao, contexto) e agente explorador de codigo",
+  "version": "0.2.0",
+  "description": "MCP tools para memoria cognitiva: busca hibrida com filtros estruturados, recommend, facet, code search, sessions e index. 10 tools sobre o daemon Rust + Qdrant.",
   "author": { "name": "opc" }
 }
