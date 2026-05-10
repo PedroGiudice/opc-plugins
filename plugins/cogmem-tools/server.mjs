@@ -179,6 +179,31 @@ server.tool(
   }
 );
 
+// Tool: list_sessions
+server.tool(
+  "list_sessions",
+  "Lista sessoes registradas (cogmem_sessions) filtradas por janela temporal " +
+  "e/ou repo. Retorna metadata de cada sessao: id, started_at, ended_at, " +
+  "chunk_count, total_tokens, files_touched, tools_used.",
+  {
+    days: z.number().optional().default(7).describe("Janela em dias (default 7)"),
+    repo_path: z.string().optional().describe("Filtrar por repo (caminho absoluto)"),
+  },
+  async ({ days, repo_path }) => {
+    try {
+      const payload = { action: "get_sessions", days };
+      if (repo_path) payload.repo_path = repo_path;
+      const response = await sendToDaemon(payload);
+      return formatResult(response);
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: err.message }],
+        isError: true,
+      };
+    }
+  }
+);
+
 // Tool: insert
 server.tool(
   "insert",
