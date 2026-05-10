@@ -227,6 +227,30 @@ server.tool(
   }
 );
 
+// Tool: orient
+server.tool(
+  "orient",
+  "Retorna as ultimas N sessoes de um repo, sem janela temporal. " +
+  "Saida em formato textual ('Memory: <repo>\\n\\nUltimas N sessoes:\\n1. ts...'). " +
+  "Mais leve que list_sessions; ideal para overview rapido de um repo.",
+  {
+    repo_path: z.string().describe("Repo (caminho absoluto)"),
+    limit: z.number().optional().default(3).describe("Quantas sessoes retornar (default 3)"),
+  },
+  async ({ repo_path, limit }) => {
+    try {
+      const payload = { action: "orient", repo_path, limit };
+      const response = await sendToDaemon(payload);
+      return formatResult(response);
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: err.message }],
+        isError: true,
+      };
+    }
+  }
+);
+
 // Tool: insert
 server.tool(
   "insert",
