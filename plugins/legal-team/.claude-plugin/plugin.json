@@ -1,5 +1,5 @@
 {
   "name": "legal-team",
-  "description": "Agent team juridico brasileiro. 3 agentes especializados (researcher, case-analyst, strategist) coordenados pelo main agent com output style legal-main-agent.",
-  "version": "0.1.0"
+  "description": "Agent team juridico brasileiro. 4 agentes especializados (researcher, case-analyst, strategist, peca-classifier) coordenados pelo main agent com output style legal-main-agent.",
+  "version": "0.2.0"
 }
