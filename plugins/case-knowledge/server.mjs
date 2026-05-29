@@ -153,9 +153,12 @@ server.tool(
     "(evita que um documento grande monopolize). " +
     "NAO usar cross-reference a menos que o usuario peca explicitamente.",
   {
-    query: z.string().describe("Texto para busca em linguagem natural"),
+    query: z.union([z.string(), z.array(z.string()).min(1).max(20)])
+      .describe("Texto para busca em linguagem natural. " +
+        "Aceita string (1 query) ou array de strings (batch de ate 20 queries em uma chamada). " +
+        "Use array quando precisar de varias buscas relacionadas — paraleliza server-side e economiza round trips."),
     limit: z.number().int().min(1).max(50).default(10)
-      .describe("Numero maximo de resultados (default 10, max 50)"),
+      .describe("Numero maximo de resultados por query (default 10, max 50)"),
     peca: z.string().optional()
       .describe("Filtrar por peca processual: inicial, contestacao, replica, peticao_diversa, " +
         "embargos_declaracao, agravo, apelacao, recurso_ordinario, contrarrazoes, sentenca, acordao, " +
@@ -188,12 +191,24 @@ server.tool(
         throw new Error("Sessao nao esta dentro de um caso. Navegue para cases/<nome> antes.");
       }
 
+      const isBatch = Array.isArray(query);
       const body = { query, limit, peca, parent_peca, fase, documento, numero_processo, categoria, agrupar };
 
-      // Search current case
-      const searches = [apiPost(`/cases/${CASE.name}/search`, body)];
+      // Batch mode: 1 chamada na API com array de queries (Qdrant search_batch nativo).
+      // Cross-reference em batch nao e suportado.
+      if (isBatch) {
+        if (casos && casos.length > 0) {
+          throw new Error("Cross-reference (casos) nao e suportado em batch. Use uma query por vez.");
+        }
+        const data = await apiPost(`/cases/${CASE.name}/search`, body);
+        if (!data.batch || data.batch.length === 0) {
+          return { content: [{ type: "text", text: "Nenhum resultado encontrado." }] };
+        }
+        return { content: [{ type: "text", text: JSON.stringify(data.batch, null, 2) }] };
+      }
 
-      // Cross-reference
+      // Single mode (mantem cross-reference)
+      const searches = [apiPost(`/cases/${CASE.name}/search`, body)];
       const extraCasos = resolveCasos(casos);
       for (const caseName of extraCasos) {
         searches.push(
@@ -412,6 +427,273 @@ server.tool(
       return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Erro ao obter metadata: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// Tool: recommend
+server.tool(
+  "recommend",
+  "Dado chunk_ids de resultados relevantes (positivos) e opcionalmente irrelevantes (negativos), " +
+    "encontra chunks vetorialmente similares aos positivos e diferentes dos negativos. " +
+    "Util para expandir resultados de busca, encontrar mais do mesmo tipo de conteudo, " +
+    "ou refinar uma pesquisa a partir de exemplos. " +
+    "Aceita batch via 'queries' — multiplas combinacoes positive/negative em uma chamada (Qdrant recommend_batch).",
+  {
+    positive: z.array(z.string()).optional()
+      .describe("Chunk IDs relevantes (single mode). Use isto OU 'queries', nao ambos."),
+    negative: z.array(z.string()).optional()
+      .describe("Chunk IDs irrelevantes (single mode, opcional)"),
+    queries: z.array(z.object({
+      positive: z.array(z.string()).min(1),
+      negative: z.array(z.string()).optional().default([]),
+    })).max(20).optional()
+      .describe("Batch mode: ate 20 pares positive/negative em uma chamada. " +
+        "Use quando precisar de varios recommends relacionados — paraleliza server-side."),
+    peca: z.string().optional()
+      .describe("Filtrar por peca processual"),
+    limit: z.number().int().min(1).max(20).default(5)
+      .describe("Numero maximo de resultados por query (default 5, max 20)"),
+  },
+  async ({ positive, negative, queries, peca, limit }) => {
+    try {
+      if (!CASE) {
+        throw new Error("Sessao nao esta dentro de um caso.");
+      }
+      const isBatch = Array.isArray(queries) && queries.length > 0;
+      if (!isBatch && (!positive || positive.length === 0)) {
+        throw new Error("Forneca 'positive' (single) ou 'queries' (batch).");
+      }
+
+      const body = { limit };
+      if (peca) body.peca = peca;
+      if (isBatch) {
+        body.queries = queries;
+      } else {
+        body.positive = positive;
+        if (negative && negative.length > 0) body.negative = negative;
+      }
+
+      const res = await fetchWithRetry(`${API_BASE}/cases/${CASE.name}/recommend`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
+      const data = await res.json();
+
+      if (isBatch) {
+        return {
+          content: [{ type: "text", text: JSON.stringify(data.batch, null, 2) }],
+        };
+      }
+
+      const lines = data.map(
+        (r) =>
+          `[${r.score.toFixed(3)}] chunk_id=${r.chunk_id} ci:${r.chunk_index} ` +
+          `peca=${r.peca || "?"} | ${r.content.slice(0, 200)}...`
+      );
+      return {
+        content: [
+          { type: "text", text: lines.join("\n\n") || "Nenhum resultado." },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Erro no recommend: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool: facet — analytics nativa de payload
+server.tool(
+  "facet",
+  "Conta valores distintos em um campo do payload (Qdrant facet API). " +
+    "Util para perguntas tipo 'quantos chunks de cada peca', 'quais documentos existem', " +
+    "'distribuicao de fases processuais'. Suporta filtro por peca para escopear.",
+  {
+    key: z.string().describe("Campo do payload (peca, fase, documento, sistema_assinatura, etc.)"),
+    limit: z.number().int().min(1).max(200).default(50)
+      .describe("Numero maximo de valores distintos retornados"),
+    peca: z.string().optional().describe("Filtrar por peca antes de contar"),
+  },
+  async ({ key, limit, peca }) => {
+    try {
+      if (!CASE) throw new Error("Sessao nao esta dentro de um caso.");
+      const data = await apiPost(`/cases/${CASE.name}/facet`, { key, limit, peca });
+      const lines = data.hits.map((h) => `${h.value}: ${h.count}`);
+      return { content: [{ type: "text", text: lines.join("\n") || "Nenhum valor encontrado." }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Erro no facet: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// Tool: comparar — search_matrix_pairs (detecta duplicatas, similaridade)
+server.tool(
+  "comparar",
+  "Calcula similaridade entre amostra de chunks do caso (Qdrant search_matrix_pairs). " +
+    "Util para: detectar duplicatas/copias, encontrar argumentos repetidos entre pecas, " +
+    "comparar inicial vs replica para identificar pontos rebatidos vs incontroversos. " +
+    "Retorna pares (a, b, score) ordenados por similaridade.",
+  {
+    sample: z.number().int().min(10).max(1000).default(200)
+      .describe("Numero de pontos amostrados para comparacao (default 200)"),
+    limit: z.number().int().min(1).max(100).default(20)
+      .describe("Numero de pares mais similares a retornar"),
+    peca: z.string().optional().describe("Restringir comparacao a uma peca"),
+    documento: z.string().optional().describe("Restringir comparacao a um documento"),
+  },
+  async ({ sample, limit, peca, documento }) => {
+    try {
+      if (!CASE) throw new Error("Sessao nao esta dentro de um caso.");
+      const data = await apiPost(`/cases/${CASE.name}/comparar`, { sample, limit, peca, documento });
+      const lines = data.pairs.map((p) => `[${p.score.toFixed(3)}] ${p.a} <-> ${p.b}`);
+      return { content: [{ type: "text", text: lines.join("\n") || "Nenhum par encontrado." }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Erro no comparar: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// Tool: discover — busca guiada por contexto positive/negative
+server.tool(
+  "discover",
+  "Busca guiada por pares de exemplos (positive_target, negative_target) (Qdrant discover API). " +
+    "Diferente de recommend (busca similar a positivos), o discover busca NA DIRECAO positiva, " +
+    "EVITANDO a negativa. Use para desambiguacao: ex 'argumentos da Autora, NAO da Re'. " +
+    "Cada par define uma direcao semantica; o resultado e influenciado por todos os pares.",
+  {
+    target: z.string().optional()
+      .describe("Query alvo (texto que sera embedado) OU chunk_id especifico"),
+    target_chunk_id: z.string().optional()
+      .describe("Chunk_id especifico como alvo (alternativa a target). Use se ja tem o chunk."),
+    context_pairs: z.array(z.tuple([z.string(), z.string()])).min(1).max(10)
+      .describe("Lista de pares [positive_chunk_id, negative_chunk_id]. " +
+        "Cada par define uma direcao: o positivo eh o que voce quer, o negativo o que evita."),
+    peca: z.string().optional().describe("Filtrar resultados por peca"),
+    limit: z.number().int().min(1).max(20).default(5),
+  },
+  async ({ target, target_chunk_id, context_pairs, peca, limit }) => {
+    try {
+      if (!CASE) throw new Error("Sessao nao esta dentro de um caso.");
+      const body = { context_pairs, limit };
+      if (peca) body.peca = peca;
+      if (target_chunk_id) body.target_chunk_id = target_chunk_id;
+      else if (target) body.target_query = target;
+
+      const data = await apiPost(`/cases/${CASE.name}/discover`, body);
+      const lines = data.map(
+        (r) => `[${r.score.toFixed(3)}] ci:${r.chunk_index} peca=${r.peca || "?"} | ${r.content.slice(0, 200)}...`
+      );
+      return { content: [{ type: "text", text: lines.join("\n\n") || "Nenhum resultado." }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Erro no discover: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// Tool: buscar_cronologico — recall amplo + rerank cronologico
+server.tool(
+  "buscar_cronologico",
+  "Busca semantica com rerank cronologico (Qdrant Query API com prefetch). " +
+    "Stage 1: recall amplo por similaridade (default 100 candidatos). " +
+    "Stage 2: reordena por data_juntada (mais recentes primeiro). " +
+    "Use quando precisa dos chunks mais RECENTES sobre um tema, nao apenas os mais SIMILARES. " +
+    "Ex: 'argumentos sobre tutela em ordem cronologica de juntada'.",
+  {
+    query: z.string().describe("Texto da busca semantica"),
+    recall_limit: z.number().int().min(20).max(500).default(100)
+      .describe("Tamanho do recall amplo (default 100)"),
+    limit: z.number().int().min(1).max(50).default(10)
+      .describe("Numero final de resultados apos rerank"),
+    peca: z.string().optional(),
+    order_field: z.enum(["doc_order", "posicao_relativa", "chunk_index"]).default("doc_order")
+      .describe("Campo de ordenacao (precisa range index): " +
+        "doc_order (ordem canonica do documento — proxy cronologico), " +
+        "posicao_relativa (posicao do chunk dentro do doc, 0.0-1.0), " +
+        "chunk_index (indice sequencial). " +
+        "Nao aceita data_juntada (indexada como Keyword)."),
+    ascending: z.boolean().default(false)
+      .describe("Ordem crescente (default false = mais recentes primeiro)"),
+  },
+  async ({ query, recall_limit, limit, peca, order_field, ascending }) => {
+    try {
+      if (!CASE) throw new Error("Sessao nao esta dentro de um caso.");
+      const data = await apiPost(`/cases/${CASE.name}/buscar_cronologico`, {
+        query, recall_limit, limit, peca, order_field, ascending,
+      });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Erro: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// Tool: buscar_interseccao — chunks que aparecem nos top de DUAS queries
+server.tool(
+  "buscar_interseccao",
+  "Busca por intersecao semantica de DUAS queries (Qdrant Query API com prefetch). " +
+    "Stage 1: top N candidatos para query_a. " +
+    "Stage 2: re-rankeia esses candidatos pela query_b. " +
+    "Resultado: chunks que aparecem bem nas DUAS queries. " +
+    "MUITO mais preciso que filtrar resultados de uma busca simples por outro tema. " +
+    "Ex: 'tutela de urgencia' + 'danos materiais' = chunks que tratam dos DOIS topicos juntos, " +
+    "nao chunks que mencionam um e tangenciam o outro.",
+  {
+    query_a: z.string().describe("Primeira query (recall amplo)"),
+    query_b: z.string().describe("Segunda query (rerank dos candidatos da query_a)"),
+    recall_limit: z.number().int().min(20).max(500).default(100)
+      .describe("Tamanho do recall amplo na query_a"),
+    limit: z.number().int().min(1).max(50).default(10)
+      .describe("Numero final de resultados"),
+    peca: z.string().optional(),
+  },
+  async ({ query_a, query_b, recall_limit, limit, peca }) => {
+    try {
+      if (!CASE) throw new Error("Sessao nao esta dentro de um caso.");
+      const data = await apiPost(`/cases/${CASE.name}/buscar_interseccao`, {
+        query_a, query_b, recall_limit, limit, peca,
+      });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Erro: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// Tool: buscar_diversificado — recall amplo + groups (1 chunk por grupo)
+server.tool(
+  "buscar_diversificado",
+  "Busca semantica com diversificacao por documento/peca (Qdrant Query API com query_groups). " +
+    "Stage 1: recall amplo. " +
+    "Stage 2: agrupa por campo (default 'documento'), retorna 1 chunk por grupo. " +
+    "Garante diversidade — evita que um documento grande monopolize os resultados. " +
+    "Diferente de search agrupar=true (one-stage), aqui o recall e mais amplo. " +
+    "Ex: 'inadimplemento contratual' diversificado = N documentos distintos que tratam do tema.",
+  {
+    query: z.string().describe("Texto da busca"),
+    recall_limit: z.number().int().min(50).max(500).default(200)
+      .describe("Tamanho do recall amplo (default 200)"),
+    groups: z.number().int().min(1).max(30).default(10)
+      .describe("Numero de grupos distintos retornados"),
+    chunks_per_group: z.number().int().min(1).max(5).default(1)
+      .describe("Chunks por grupo (default 1 — maxima diversidade)"),
+    group_by: z.enum(["documento", "peca"]).default("documento")
+      .describe("Campo de agrupamento (default documento)"),
+    peca: z.string().optional(),
+  },
+  async ({ query, recall_limit, groups, chunks_per_group, group_by, peca }) => {
+    try {
+      if (!CASE) throw new Error("Sessao nao esta dentro de um caso.");
+      const data = await apiPost(`/cases/${CASE.name}/buscar_diversificado`, {
+        query, recall_limit, groups, chunks_per_group, group_by, peca,
+      });
+      return { content: [{ type: "text", text: JSON.stringify(data.groups, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Erro: ${err.message}` }], isError: true };
     }
   }
 );
