@@ -1,7 +1,7 @@
 {
   "name": "stj-vec-tools",
-  "version": "0.1.0",
-  "description": "MCP tools para busca vetorial na base de jurisprudencia do STJ. Expoe ferramentas de busca, consulta de documentos e listagem de filtros disponiveis.",
+  "version": "0.3.0",
+  "description": "MCP tools para busca vetorial na base de jurisprudencia do STJ. Expoe busca densa, busca com reranking por formula calibrada, consulta de documentos e listagem de filtros.",
   "author": {
     "name": "opc"
   }
