@@ -47,6 +47,13 @@ tools:
   - mcp__plugin_case-knowledge_case-knowledge__info
   - mcp__plugin_case-knowledge_case-knowledge__manifesto
   - mcp__plugin_case-knowledge_case-knowledge__metadata
+  - mcp__plugin_case-knowledge_case-knowledge__facet
+  - mcp__plugin_case-knowledge_case-knowledge__discover
+  - mcp__plugin_case-knowledge_case-knowledge__recommend
+  - mcp__plugin_case-knowledge_case-knowledge__comparar
+  - mcp__plugin_case-knowledge_case-knowledge__buscar_cronologico
+  - mcp__plugin_case-knowledge_case-knowledge__buscar_diversificado
+  - mcp__plugin_case-knowledge_case-knowledge__buscar_interseccao
   - mcp__plugin_cogmem-tools_cogmem-tools__search
   - mcp__plugin_cogmem-tools_cogmem-tools__context
 ---
