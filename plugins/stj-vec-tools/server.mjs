@@ -2,7 +2,10 @@
 /**
  * MCP server for STJ vector search.
  *
- * Proxy for the Rust search API (stj-vec-search) running on localhost:8421.
+ * Proxy for the Rust search API (stj-vec-search). O servico roda SO na VM
+ * (extractlab) na porta 8421. O default aponta para o FQDN MagicDNS da tailnet,
+ * alcancavel tanto da propria VM quanto de qualquer maquina da tailnet.
+ * Override por STJ_VEC_API_BASE para outros ambientes.
  * Exposes 4 tools: search, search_formula, document, filters.
  *
  * Transport: stdio (required for Claude Code plugins)
@@ -17,7 +20,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-const API_BASE = process.env.STJ_VEC_API_BASE || "http://127.0.0.1:8421/api";
+// O servico stj-vec-search roda SO na VM (extractlab). Clientes remotos (cmr-002,
+// etc) batiam no default antigo 127.0.0.1 do PROPRIO host e recebiam "fetch failed".
+// O FQDN MagicDNS resolve para a VM em qualquer maquina da tailnet, inclusive a
+// propria VM. Override por STJ_VEC_API_BASE para ambientes fora da tailnet.
+const API_BASE =
+  process.env.STJ_VEC_API_BASE || "http://extractlab.cormorant-alpha.ts.net:8421/api";
 const REQUEST_TIMEOUT_MS = 60_000;
 const MAX_RETRIES = 3;
 const RETRY_DELAYS = [500, 1500, 3000]; // ms
