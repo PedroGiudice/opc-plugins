@@ -7,13 +7,28 @@ import {
   buildHookOutput,
 } from "./memoria-context.mjs";
 
-test("caseSlugFromCwd: Windows, Unix, fora de caso", () => {
-  assert.equal(caseSlugFromCwd("C:\\Users\\pedro\\cases\\oxigenio-retificacao"), "oxigenio-retificacao");
-  assert.equal(caseSlugFromCwd("C:\\Users\\pedro\\cases\\bianka-salesforce\\base"), "bianka-salesforce");
-  assert.equal(caseSlugFromCwd("/home/opc/case-docs/cases/0058810-23.2022.8.16.6000"), "0058810-23.2022.8.16.6000");
-  assert.equal(caseSlugFromCwd("/home/opc/legal-cogmem"), null);
-  assert.equal(caseSlugFromCwd("C:\\Users\\pedro\\cases"), null);
-  assert.equal(caseSlugFromCwd(""), null);
+test("caseSlugFromCwd: gate por CASES_BASE (alinhado ao detectCase do server.mjs)", () => {
+  const winBase = "C:\\Users\\pedro\\cases";
+  assert.equal(
+    caseSlugFromCwd("C:\\Users\\pedro\\cases\\oxigenio-retificacao", winBase),
+    "oxigenio-retificacao",
+  );
+  assert.equal(
+    caseSlugFromCwd("C:\\Users\\pedro\\cases\\bianka-salesforce\\base", winBase),
+    "bianka-salesforce",
+  );
+  const nixBase = "/home/opc/case-docs/cases";
+  assert.equal(
+    caseSlugFromCwd("/home/opc/case-docs/cases/0058810-23.2022.8.16.6000", nixBase),
+    "0058810-23.2022.8.16.6000",
+  );
+  // fora da base canonica: outro dir `cases` NAO ativa mais o hook
+  assert.equal(caseSlugFromCwd("/tmp/qualquer/cases/foo", nixBase), null);
+  assert.equal(caseSlugFromCwd("/home/opc/legal-cogmem", nixBase), null);
+  // a raiz da base nao e um caso
+  assert.equal(caseSlugFromCwd("C:\\Users\\pedro\\cases", winBase), null);
+  assert.equal(caseSlugFromCwd("C:\\Users\\pedro\\cases\\", winBase), null);
+  assert.equal(caseSlugFromCwd("", nixBase), null);
 });
 
 test("shouldSkipPrompt: filtros do cogmem.sh", () => {

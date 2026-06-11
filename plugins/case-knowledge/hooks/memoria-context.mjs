@@ -10,6 +10,7 @@
  * LEGAL_COGMEM_API_BASE.
  */
 
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const MEM_API_BASE =
@@ -24,13 +25,31 @@ const TRIVIAL = new Set([
   "ótimo", "beleza",
 ]);
 
-/** Slug do caso = componente apos "cases" no cwd (Windows ou Unix). */
-export function caseSlugFromCwd(cwd) {
-  if (!cwd) return null;
-  const comps = cwd.replaceAll("\\", "/").split("/").filter(Boolean);
-  const idx = comps.indexOf("cases");
-  if (idx === -1) return null;
-  return comps[idx + 1] ?? null;
+/** Base canonica dos casos — mesma env e defaults do detectCase() do
+ * server.mjs (CMR-95 item 5). */
+export function defaultCasesBase() {
+  if (process.platform === "win32")
+    return join(process.env.USERPROFILE || "C:\\Users\\pedro", "cases");
+  return "/home/opc/case-docs/cases";
+}
+
+const CASES_BASE = process.env.CASE_KNOWLEDGE_CASES_BASE || defaultCasesBase();
+
+/**
+ * Slug do caso = primeiro componente do cwd RELATIVO a CASES_BASE.
+ * Antes aceitava qualquer componente `cases` no path; alinhado ao gate
+ * detectCase() do server.mjs — cwd fora da base nao e caso (e nao gera
+ * trafego pro daemon). Comparacao string-based com separadores
+ * normalizados: roda em Windows (cmr-002) e Unix (VM) sem node:path
+ * platform-specific.
+ */
+export function caseSlugFromCwd(cwd, base = CASES_BASE) {
+  if (!cwd || !base) return null;
+  const norm = (p) => p.replaceAll("\\", "/").replace(/\/+$/, "");
+  const c = norm(cwd);
+  const b = norm(base);
+  if (c === b || !c.startsWith(b + "/")) return null;
+  return c.slice(b.length + 1).split("/")[0] || null;
 }
 
 /** Filtros do cogmem.sh: curto, slash command, resposta trivial. */
