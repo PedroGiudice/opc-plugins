@@ -118,7 +118,9 @@ function resolveCasos(casos) {
   const resolved = new Set();
   for (const c of casos) {
     if (c === "relacionados") {
-      const related = CASE_CONFIG?.processos_relacionados || [];
+      // casos_relacionados e o nome atual; processos_relacionados e o nome
+      // antigo (enganoso: contem nomes de pasta, nao numeros de processo).
+      const related = CASE_CONFIG?.casos_relacionados || CASE_CONFIG?.processos_relacionados || [];
       for (const r of related) resolved.add(r);
     } else {
       resolved.add(c);
@@ -400,8 +402,9 @@ server.tool(
       `Diretorio: ${CASE.dir}`,
       `API: ${API_BASE}`,
     ];
-    if (CASE_CONFIG?.processos_relacionados?.length) {
-      lines.push(`Processos relacionados: ${CASE_CONFIG.processos_relacionados.join(", ")}`);
+    const relacionados = CASE_CONFIG?.casos_relacionados || CASE_CONFIG?.processos_relacionados;
+    if (relacionados?.length) {
+      lines.push(`Processos relacionados: ${relacionados.join(", ")}`);
     }
     const manifestoExists = existsSync(join(CASE.dir, "documentos.yaml"));
     lines.push(`Cronologia enriquecida: ${manifestoExists ? "sim (manifesto disponivel)" : "nao"}`);
