@@ -15,6 +15,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import yaml from "js-yaml";
 import { memoriaSearch } from "./memoria.mjs";
+import { renderLines, buildCappedPayload, capContextChunks } from "./format.mjs";
 
 function defaultApiBase() {
   if (process.platform === "win32") return "http://100.123.73.128:8422/api";
@@ -31,6 +32,19 @@ const CASES_BASE = process.env.CASE_KNOWLEDGE_CASES_BASE || defaultCasesBase();
 const REQUEST_TIMEOUT_MS = 60_000;
 const MAX_RETRIES = 3;
 const RETRY_DELAYS = [500, 1500, 3000];
+
+/** Teto de chars do output de tools de retrieval (~19k tokens, sob o
+ * limite de 25k tokens de output de tool MCP do Claude Code). */
+const OUTPUT_CAP_CHARS = 60_000;
+
+function degradeNotice(degraded) {
+  if (!degraded) return "";
+  const parts = [];
+  if (degraded.content_chars > 0) parts.push(`preview reduzido para ${degraded.content_chars} chars`);
+  if (degraded.kept !== null) parts.push(`resultados cortados para top ${degraded.kept} por lista`);
+  return `[aviso: output excederia o limite de tokens — ${parts.join("; ")}. ` +
+    `Refine com filtros, limit menor ou leia chunks especificos via contexto.]\n\n`;
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -154,6 +168,11 @@ server.tool(
     "parent_peca (peca-pai quando o chunk e de um anexo). " +
     "Use agrupar=true para diversidade de documentos nos resultados " +
     "(evita que um documento grande monopolize). " +
+    "IMPORTANTE: o campo content de cada resultado e um PREVIEW (default 1200 chars; " +
+    "content_truncated=true e content_len indicam truncamento). " +
+    "Para ler um chunk na INTEGRA (ex: transcrever ementa completa), use a tool " +
+    "contexto(documento, chunk_index) — ela retorna o texto completo — ou repita a " +
+    "busca com content_chars=0 e limit baixo. " +
     "NAO usar cross-reference a menos que o usuario peca explicitamente.",
   {
     query: z.union([z.string(), z.array(z.string()).min(1).max(20)])
@@ -187,8 +206,12 @@ server.tool(
         "Usar SOMENTE quando o usuario pedir explicitamente (ex: 'busca nos relacionados', " +
         "'veja no caso X'). Valor 'relacionados' expande para os casos listados no case.yaml. " +
         "Nomes especificos buscam naquela collection. NUNCA usar espontaneamente."),
+    content_chars: z.number().int().min(0).max(20000).default(1200)
+      .describe("Tamanho do preview de content por resultado, em chars (default 1200). " +
+        "0 = retorna content integral SEM truncar — use com limit baixo (<=3) para nao " +
+        "estourar o limite de output. Para leitura pontual na integra prefira a tool contexto."),
   },
-  async ({ query, limit, peca, parent_peca, fase, documento, numero_processo, categoria, agrupar, casos }) => {
+  async ({ query, limit, peca, parent_peca, fase, documento, numero_processo, categoria, agrupar, casos, content_chars }) => {
     try {
       if (!CASE) {
         throw new Error("Sessao nao esta dentro de um caso. Navegue para cases/<nome> antes.");
@@ -207,7 +230,17 @@ server.tool(
         if (!data.batch || data.batch.length === 0) {
           return { content: [{ type: "text", text: "Nenhum resultado encontrado." }] };
         }
-        return { content: [{ type: "text", text: JSON.stringify(data.batch, null, 2) }] };
+        const lists = data.batch.map((b) => b.results || []);
+        const { text, degraded } = buildCappedPayload({
+          lists,
+          render: (pls) =>
+            data.batch
+              .map((b, i) => `=== query: ${b.query} ===\n${renderLines(pls[i])}`)
+              .join("\n\n"),
+          contentChars: content_chars,
+          globalCap: OUTPUT_CAP_CHARS,
+        });
+        return { content: [{ type: "text", text: degradeNotice(degraded) + text }] };
       }
 
       // Single mode (mantem cross-reference)
@@ -226,10 +259,20 @@ server.tool(
         if (groups.length === 0) {
           return { content: [{ type: "text", text: "Nenhum resultado encontrado." }] };
         }
-        const text = extraCasos.length > 0
-          ? `Cross-reference: caso atual + [${extraCasos.join(", ")}]\n\n${JSON.stringify(groups, null, 2)}`
-          : JSON.stringify(groups, null, 2);
-        return { content: [{ type: "text", text }] };
+        const lists = groups.map((g) => g.hits || []);
+        const { text, degraded } = buildCappedPayload({
+          lists,
+          render: (pls) =>
+            groups
+              .map((g, i) => `=== documento: ${g.group_id} ===\n${renderLines(pls[i])}`)
+              .join("\n\n"),
+          contentChars: content_chars,
+          globalCap: OUTPUT_CAP_CHARS,
+        });
+        const header = extraCasos.length > 0
+          ? `Cross-reference: caso atual + [${extraCasos.join(", ")}]\n\n`
+          : "";
+        return { content: [{ type: "text", text: degradeNotice(degraded) + header + text }] };
       }
 
       const merged = allResults.flatMap((r) => r.results || []).sort((a, b) => b.score - a.score);
@@ -239,11 +282,17 @@ server.tool(
         return { content: [{ type: "text", text: "Nenhum resultado encontrado." }] };
       }
 
-      const text = extraCasos.length > 0
-        ? `Cross-reference: caso atual + [${extraCasos.join(", ")}]\n\n${JSON.stringify(results, null, 2)}`
-        : JSON.stringify(results, null, 2);
+      const { text, degraded } = buildCappedPayload({
+        lists: [results],
+        render: (pls) => renderLines(pls[0]),
+        contentChars: content_chars,
+        globalCap: OUTPUT_CAP_CHARS,
+      });
 
-      return { content: [{ type: "text", text }] };
+      const header = extraCasos.length > 0
+        ? `Cross-reference: caso atual + [${extraCasos.join(", ")}]\n\n`
+        : "";
+      return { content: [{ type: "text", text: degradeNotice(degraded) + header + text }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Erro na busca: ${err.message}` }], isError: true };
     }
