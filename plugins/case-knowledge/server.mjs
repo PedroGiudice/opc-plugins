@@ -14,6 +14,7 @@ import { z } from "zod";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import yaml from "js-yaml";
+import { memoriaSearch } from "./memoria.mjs";
 
 function defaultApiBase() {
   if (process.platform === "win32") return "http://100.123.73.128:8422/api";
@@ -243,6 +244,35 @@ server.tool(
       return { content: [{ type: "text", text }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Erro na busca: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// Tool: memoria_search
+server.tool(
+  "memoria_search",
+  "Busca na MEMORIA DAS SESSOES de trabalho deste caso (decisoes, raciocinio, " +
+    "o que ja foi feito) — legal-cogmem. Diferente de `search`, que busca nos " +
+    "DOCUMENTOS do caso (autos, contratos). Use para perguntas como 'o que ja " +
+    "decidimos sobre X neste caso?'.",
+  {
+    query: z.string().min(3).describe("Pergunta em linguagem natural"),
+    limit: z.number().int().min(1).max(20).optional()
+      .describe("Max resultados (default 5)"),
+    days: z.number().int().min(1).optional()
+      .describe("Janela temporal em dias (default 30)"),
+    threshold: z.number().min(0).max(1).optional()
+      .describe("Score minimo (default do daemon)"),
+  },
+  async (params) => {
+    try {
+      if (!CASE) {
+        throw new Error("Sessao nao esta dentro de um caso. Navegue para cases/<nome> antes.");
+      }
+      const text = await memoriaSearch(params, CASE);
+      return { content: [{ type: "text", text }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Erro na busca de memoria: ${err.message}` }], isError: true };
     }
   }
 );
