@@ -43,13 +43,27 @@ export function md5hex(buf) {
   return createHash("md5").update(buf).digest("hex");
 }
 
+// Whitelist client-side de nome de caso (espelha valid_case_name do
+// servidor): alfanumerico ASCII no inicio, depois `.` `_` `-` permitidos.
+// Bloqueia path traversal por construcao (sem `/`, `\` ou prefixo `.`).
+const VALID_CASE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
 /**
  * Decide acoes a partir do manifest remoto e do estado local.
- * localState: { caseName: { fileName: md5hex } } — so dirs nao-excluidos.
+ * localState: { caseName: { fileName: md5hex } } — TODOS os dirs locais;
+ * exclusoes (_archive, _template, scripts, dotdirs) sao tratadas aqui.
  * Retorna { mkdir: [name], download: [{name, files}], orphans: [name] }.
+ *
+ * Defesa client-side: a invariante "so escreve nos arquivos de briefing"
+ * e garantida AQUI (quem decide o que tocar no disco), nao so no servidor
+ * — nome remoto invalido/reservado e arquivo fora de BRIEFING_FILES sao
+ * descartados do plano.
+ *
+ * Matching de nome e case-insensitive (NTFS): se a VM renomear a caixa de
+ * um caso, o cliente reusa o dir local existente em vez de criar duplicata
+ * e arquivar o antigo (que carregaria o trabalho local do advogado junto).
  */
 export function planActions(manifestCases, localState) {
-  const remoteNames = new Set(manifestCases.map((c) => c.name));
   const plan = { mkdir: [], download: [], orphans: [] };
 
   // Defesa em profundidade: manifest vazio significa quase certamente erro
@@ -57,17 +71,30 @@ export function planActions(manifestCases, localState) {
   // for legitimo (todos os casos arquivados), mover a mao.
   if (manifestCases.length === 0) return plan;
 
+  // Indice lowercase do estado local para matching NTFS-safe.
+  const localByLower = new Map();
+  for (const name of Object.keys(localState)) {
+    localByLower.set(name.toLowerCase(), name);
+  }
+
+  const remoteLower = new Set();
   for (const c of manifestCases) {
-    const local = localState[c.name];
+    if (!VALID_CASE_NAME.test(c.name) || isExcluded(c.name)) continue;
+    remoteLower.add(c.name.toLowerCase());
+
+    // Reusa o dir local existente quando so a caixa difere.
+    const localName = localByLower.get(c.name.toLowerCase());
+    const local = localName !== undefined ? localState[localName] : undefined;
     if (!local) plan.mkdir.push(c.name);
     const needs = Object.entries(c.files)
+      .filter(([file]) => BRIEFING_FILES.includes(file))
       .filter(([file, info]) => !local || local[file] !== info.md5)
       .map(([file]) => file);
-    if (needs.length > 0) plan.download.push({ name: c.name, files: needs });
+    if (needs.length > 0) plan.download.push({ name: localName ?? c.name, files: needs });
   }
 
   for (const name of Object.keys(localState)) {
-    if (!remoteNames.has(name) && !isExcluded(name)) plan.orphans.push(name);
+    if (!remoteLower.has(name.toLowerCase()) && !isExcluded(name)) plan.orphans.push(name);
   }
   return plan;
 }
@@ -172,8 +199,8 @@ async function main() {
   }
 
   const summary =
-    `ok mkdir=${plan.mkdir.length} arquivos_atualizados=${updated} ` +
-    `orfaos_arquivados=${archived}` +
+    `${errors.length ? "erro" : "ok"} mkdir=${plan.mkdir.length} ` +
+    `arquivos_atualizados=${updated} orfaos_arquivados=${archived}` +
     (errors.length ? ` ERROS: ${errors.join(" | ")}` : "");
   appendLog(casesBase, summary);
 }
