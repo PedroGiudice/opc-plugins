@@ -80,3 +80,107 @@ export function archiveTarget(name, taken, now = new Date()) {
   if (!taken.has(candidate)) return candidate;
   return `${name}-${now.toISOString().replace(/[-:T]/g, "").slice(0, 14)}`;
 }
+
+// ---------- I/O ----------
+
+function readLocalState(casesBase) {
+  const state = {};
+  if (!existsSync(casesBase)) return state;
+  for (const entry of readdirSync(casesBase, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const files = {};
+    for (const f of BRIEFING_FILES) {
+      const p = join(casesBase, entry.name, f);
+      if (existsSync(p)) files[f] = md5hex(readFileSync(p));
+    }
+    state[entry.name] = files;
+  }
+  return state;
+}
+
+/** Escrita atomica: tmp + rename (rename sobrescreve no Windows via MoveFileEx). */
+function writeAtomic(path, content) {
+  const tmp = `${path}.sync-tmp`;
+  writeFileSync(tmp, content, "utf-8");
+  renameSync(tmp, path);
+}
+
+async function fetchJson(url) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status} em ${url}`);
+  return await res.json();
+}
+
+function appendLog(casesBase, line) {
+  try {
+    appendFileSync(join(casesBase, ".sync.log"), `${new Date().toISOString()} ${line}\n`);
+  } catch {
+    // log nunca derruba o sync
+  }
+}
+
+async function main() {
+  const apiBase = process.env.CASE_KNOWLEDGE_API_BASE || defaultApiBase();
+  const casesBase = process.env.CASE_KNOWLEDGE_CASES_BASE || defaultCasesBase();
+  mkdirSync(casesBase, { recursive: true });
+
+  let manifest;
+  try {
+    manifest = await fetchJson(`${apiBase}/cases/sync-manifest`);
+  } catch (err) {
+    appendLog(casesBase, `erro manifest: ${err.message}`);
+    return; // proximo ciclo e o retry
+  }
+
+  const plan = planActions(manifest.cases || [], readLocalState(casesBase));
+  let updated = 0;
+  const errors = [];
+
+  for (const name of plan.mkdir) {
+    mkdirSync(join(casesBase, name), { recursive: true });
+  }
+
+  for (const { name, files } of plan.download) {
+    try {
+      const briefing = await fetchJson(`${apiBase}/cases/${encodeURIComponent(name)}/briefing`);
+      for (const f of files) {
+        const remote = briefing.files?.[f];
+        if (!remote) continue; // sumiu entre manifest e fetch; proximo ciclo resolve
+        writeAtomic(join(casesBase, name, f), remote.content);
+        updated++;
+      }
+    } catch (err) {
+      errors.push(`${name}: ${err.message}`);
+    }
+  }
+
+  let archived = 0;
+  if (plan.orphans.length > 0) {
+    const archiveDir = join(casesBase, "_archive");
+    mkdirSync(archiveDir, { recursive: true });
+    const taken = new Set(readdirSync(archiveDir));
+    for (const name of plan.orphans) {
+      try {
+        const target = archiveTarget(name, taken);
+        renameSync(join(casesBase, name), join(archiveDir, target));
+        taken.add(target);
+        archived++;
+      } catch (err) {
+        errors.push(`orfao ${name}: ${err.message}`);
+      }
+    }
+  }
+
+  const summary =
+    `ok mkdir=${plan.mkdir.length} arquivos_atualizados=${updated} ` +
+    `orfaos_arquivados=${archived}` +
+    (errors.length ? ` ERROS: ${errors.join(" | ")}` : "");
+  appendLog(casesBase, summary);
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    // ultima linha de defesa: nunca propagar exit != 0 pro scheduler
+    try { appendLog(process.env.CASE_KNOWLEDGE_CASES_BASE || defaultCasesBase(), `erro fatal: ${err.message}`); } catch {}
+  });
+}
