@@ -201,3 +201,48 @@ test("capContextChunks: central gigante sozinho nunca e removido", () => {
   assert.equal(out[0].chunk_index, 5);
   assert.equal(out[0].content.length, 100000); // central jamais truncado
 });
+
+// --- Endurecimento de bordas (code review pos-Task 3) ---
+
+test("truncateContent: sem espacos e maxChars pequeno nao perde conteudo alem do corte", () => {
+  const content = "a".repeat(3000);
+  const r = truncateContent(content, 50);
+  assert.equal(r.truncated, true);
+  assert.ok(r.text.length <= 50 + 4, `len=${r.text.length}`);
+  const body = r.text.slice(0, -" […]".length);
+  assert.equal(body, content.slice(0, 50), "corte seco deve preservar o prefixo inteiro");
+});
+
+test("truncateContent: maxChars NaN retorna intacto sem truncar", () => {
+  const content = "x".repeat(100);
+  const r = truncateContent(content, NaN);
+  assert.equal(r.text, content);
+  assert.equal(r.truncated, false);
+});
+
+test("buildCappedPayload: lists vazio nao lanca, degraded null", () => {
+  const { text, degraded } = buildCappedPayload({
+    lists: [],
+    render: (pls) => "[]",
+    contentChars: 1200,
+    globalCap: 60000,
+  });
+  assert.equal(degraded, null);
+  assert.equal(text, "[]");
+});
+
+test("buildCappedPayload: lista interna vazia nao lanca", () => {
+  const { text } = buildCappedPayload({
+    lists: [[]],
+    render: (pls) => renderLines(pls[0]),
+    contentChars: 1200,
+    globalCap: 60000,
+  });
+  assert.equal(text, "[]");
+});
+
+test("capContextChunks: array vazio retorna vazio sem reduzir", () => {
+  const { chunks, reduced } = capContextChunks([], 5, 60000);
+  assert.deepEqual(chunks, []);
+  assert.equal(reduced, false);
+});

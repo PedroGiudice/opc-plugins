@@ -13,15 +13,21 @@ const WORD_BOUNDARY_LOOKBACK = 80;
 /**
  * Trunca `content` em ate `maxChars`, recuando ate a ultima fronteira de
  * palavra (espaco) se houver uma a menos de WORD_BOUNDARY_LOOKBACK chars
- * do corte. maxChars <= 0 desativa o truncamento.
+ * do corte. maxChars <= 0, NaN ou nao-finito desativa o truncamento.
  */
 export function truncateContent(content, maxChars) {
-  if (typeof content !== "string" || maxChars <= 0 || content.length <= maxChars) {
+  if (
+    typeof content !== "string" ||
+    !Number.isFinite(maxChars) ||
+    maxChars <= 0 ||
+    content.length <= maxChars
+  ) {
     return { text: content, truncated: false };
   }
   let cut = content.slice(0, maxChars);
   const lastSpace = cut.lastIndexOf(" ");
-  if (lastSpace >= maxChars - WORD_BOUNDARY_LOOKBACK) {
+  // lastSpace > 0 evita slice negativo (sem espaco) ou vazio (espaco no idx 0)
+  if (lastSpace > 0 && lastSpace >= maxChars - WORD_BOUNDARY_LOOKBACK) {
     cut = cut.slice(0, lastSpace);
   }
   return { text: cut + SUFFIX, truncated: true };
