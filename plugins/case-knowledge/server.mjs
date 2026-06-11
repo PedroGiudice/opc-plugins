@@ -333,7 +333,10 @@ server.tool(
   "contexto",
   "Expande o contexto ao redor de um chunk retornado por search. " +
     "Dado um documento e chunk_index, retorna chunks vizinhos (anteriores e posteriores) " +
-    "do mesmo documento em ordem sequencial. Util para ler o texto ao redor de um resultado.",
+    "do mesmo documento em ordem sequencial. Util para ler o texto ao redor de um resultado. " +
+    "Retorna os chunks COMPLETOS (sem preview) — e o caminho canonico para ler " +
+    "na integra um resultado do search. Janelas grandes podem ser reduzidas " +
+    "automaticamente para caber no limite de output (o central nunca e cortado).",
   {
     documento: z.string().describe("Nome do documento (campo 'documento' do resultado de busca)"),
     chunk_index: z.number().int()
@@ -357,7 +360,9 @@ server.tool(
         return { content: [{ type: "text", text: "Nenhum chunk encontrado nessa janela." }] };
       }
 
-      const formatted = chunks
+      const { chunks: capped, reduced } = capContextChunks(chunks, chunk_index, OUTPUT_CAP_CHARS);
+
+      const formatted = capped
         .map((c) => {
           const marker = c.chunk_index === chunk_index ? " [CENTRAL]" : "";
           return `--- chunk ${c.chunk_index}${marker} ---\n${c.content}`;
@@ -366,8 +371,12 @@ server.tool(
 
       const from = Math.max(0, chunk_index - janela);
       const to = chunk_index + janela;
+      const notice = reduced
+        ? `[aviso: janela reduzida de ${chunks.length} para ${capped.length} chunks ` +
+          `para caber no limite de output. O chunk central esta integro.]\n`
+        : "";
       const header = `Documento: ${documento}\nChunks ${from}-${to} (central: ${chunk_index})\n\n`;
-      return { content: [{ type: "text", text: header + formatted }] };
+      return { content: [{ type: "text", text: notice + header + formatted }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Erro ao expandir contexto: ${err.message}` }], isError: true };
     }
