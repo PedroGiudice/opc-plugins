@@ -29,6 +29,12 @@ test("caseSlugFromCwd: gate por CASES_BASE (alinhado ao detectCase do server.mjs
   assert.equal(caseSlugFromCwd("C:\\Users\\pedro\\cases", winBase), null);
   assert.equal(caseSlugFromCwd("C:\\Users\\pedro\\cases\\", winBase), null);
   assert.equal(caseSlugFromCwd("", nixBase), null);
+  // sibling-prefix: cases-old NAO e a base cases (classe de bug do startsWith)
+  assert.equal(caseSlugFromCwd("/home/opc/case-docs/cases-old/foo", nixBase), null);
+  // base de env var com trailing slash funciona
+  assert.equal(caseSlugFromCwd("/home/opc/case-docs/cases/meu-caso", "/home/opc/case-docs/cases/"), "meu-caso");
+  // cwd Windows com forward slashes (ferramentas que normalizam separador)
+  assert.equal(caseSlugFromCwd("C:/Users/pedro/cases/meu-caso/base", winBase), "meu-caso");
 });
 
 test("shouldSkipPrompt: filtros do cogmem.sh", () => {
