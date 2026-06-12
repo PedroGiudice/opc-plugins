@@ -37,10 +37,14 @@ const RETRY_DELAYS = [500, 1500, 3000];
  * limite de 25k tokens de output de tool MCP do Claude Code). */
 const OUTPUT_CAP_CHARS = 60_000;
 
-function degradeNotice(degraded) {
+function degradeNotice(degraded, requestedChars) {
   if (!degraded) return "";
   const parts = [];
-  if (degraded.content_chars > 0) parts.push(`preview reduzido para ${degraded.content_chars} chars`);
+  // content_chars do degraded e o valor FINAL usado; so e "reduzido" se
+  // ficou abaixo do que o caller pediu (com requested <= 200 nao ha degrau).
+  if (degraded.content_chars > 0 && degraded.content_chars < requestedChars) {
+    parts.push(`preview reduzido para ${degraded.content_chars} chars`);
+  }
   if (degraded.kept !== null) parts.push(`resultados cortados para top ${degraded.kept} por lista`);
   return `[aviso: output excederia o limite de tokens — ${parts.join("; ")}. ` +
     `Refine com filtros, limit menor ou leia chunks especificos via contexto.]\n\n`;
@@ -148,7 +152,7 @@ function resolveCasos(casos) {
 
 const server = new McpServer({
   name: "case-knowledge",
-  version: "1.0.0",
+  version: "0.4.0",
 });
 
 // Tool: search
@@ -240,7 +244,7 @@ server.tool(
           contentChars: content_chars,
           globalCap: OUTPUT_CAP_CHARS,
         });
-        return { content: [{ type: "text", text: degradeNotice(degraded) + text }] };
+        return { content: [{ type: "text", text: degradeNotice(degraded, content_chars) + text }] };
       }
 
       // Single mode (mantem cross-reference)
@@ -272,7 +276,7 @@ server.tool(
         const header = extraCasos.length > 0
           ? `Cross-reference: caso atual + [${extraCasos.join(", ")}]\n\n`
           : "";
-        return { content: [{ type: "text", text: degradeNotice(degraded) + header + text }] };
+        return { content: [{ type: "text", text: degradeNotice(degraded, content_chars) + header + text }] };
       }
 
       const merged = allResults.flatMap((r) => r.results || []).sort((a, b) => b.score - a.score);
@@ -292,7 +296,7 @@ server.tool(
       const header = extraCasos.length > 0
         ? `Cross-reference: caso atual + [${extraCasos.join(", ")}]\n\n`
         : "";
-      return { content: [{ type: "text", text: degradeNotice(degraded) + header + text }] };
+      return { content: [{ type: "text", text: degradeNotice(degraded, content_chars) + header + text }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Erro na busca: ${err.message}` }], isError: true };
     }
@@ -369,8 +373,9 @@ server.tool(
         })
         .join("\n\n");
 
-      const from = Math.max(0, chunk_index - janela);
-      const to = chunk_index + janela;
+      // Range real entregue (pos-cap), nao o range teorico pedido.
+      const from = capped[0].chunk_index;
+      const to = capped[capped.length - 1].chunk_index;
       const notice = reduced
         ? `[aviso: janela reduzida de ${chunks.length} para ${capped.length} chunks ` +
           `para caber no limite de output. O chunk central esta integro.]\n`
