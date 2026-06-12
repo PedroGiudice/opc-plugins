@@ -35,20 +35,29 @@ export function defaultCasesBase() {
 
 const CASES_BASE = process.env.CASE_KNOWLEDGE_CASES_BASE || defaultCasesBase();
 
+/** Path com drive letter Windows (apos normalizacao para `/`). */
+const WIN_DRIVE = /^[a-z]:(\/|$)/i;
+
 /**
  * Slug do caso = primeiro componente do cwd RELATIVO a CASES_BASE.
- * Antes aceitava qualquer componente `cases` no path; alinhado ao gate
- * detectCase() do server.mjs — cwd fora da base nao e caso (e nao gera
- * trafego pro daemon). Comparacao string-based com separadores
- * normalizados: roda em Windows (cmr-002) e Unix (VM) sem node:path
- * platform-specific.
+ * Alinhado ao gate detectCase() do server.mjs — cwd fora da base nao e
+ * caso (e nao gera trafego pro daemon). Comparacao string-based com
+ * separadores normalizados: roda em Windows (cmr-002) e Unix (VM).
+ * NTFS e case-insensitive: quando AMBOS os paths tem drive letter, a
+ * comparacao e em lowercase (CMR-99 item 1) — casing divergente entre
+ * process.cwd e USERPROFILE nao pode desabilitar o gate silenciosamente.
+ * O slug retornado preserva o casing ORIGINAL do path (vira nome de
+ * collection case-sensitive no daemon). Paths POSIX seguem case-sensitive.
  */
 export function caseSlugFromCwd(cwd, base = CASES_BASE) {
   if (!cwd || !base) return null;
   const norm = (p) => p.replaceAll("\\", "/").replace(/\/+$/, "");
   const c = norm(cwd);
   const b = norm(base);
-  if (c === b || !c.startsWith(b + "/")) return null;
+  const insensitive = WIN_DRIVE.test(c) && WIN_DRIVE.test(b);
+  const cc = insensitive ? c.toLowerCase() : c;
+  const bb = insensitive ? b.toLowerCase() : b;
+  if (cc === bb || !cc.startsWith(bb + "/")) return null;
   return c.slice(b.length + 1).split("/")[0] || null;
 }
 

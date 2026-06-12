@@ -35,6 +35,13 @@ test("caseSlugFromCwd: gate por CASES_BASE (alinhado ao detectCase do server.mjs
   assert.equal(caseSlugFromCwd("/home/opc/case-docs/cases/meu-caso", "/home/opc/case-docs/cases/"), "meu-caso");
   // cwd Windows com forward slashes (ferramentas que normalizam separador)
   assert.equal(caseSlugFromCwd("C:/Users/pedro/cases/meu-caso/base", winBase), "meu-caso");
+  // NTFS e case-insensitive: casing divergente (cwd vs USERPROFILE) nao
+  // pode desabilitar o gate silenciosamente (CMR-99 item 1)
+  assert.equal(caseSlugFromCwd("c:\\users\\PEDRO\\cases\\meu-caso", winBase), "meu-caso");
+  // o slug preserva o casing ORIGINAL do path (collection case-sensitive)
+  assert.equal(caseSlugFromCwd("C:\\Users\\pedro\\cases\\MeuCaso\\sub", winBase), "MeuCaso");
+  // paths POSIX continuam case-sensitive
+  assert.equal(caseSlugFromCwd("/home/opc/CASE-DOCS/cases/foo", nixBase), null);
 });
 
 test("shouldSkipPrompt: filtros do cogmem.sh", () => {

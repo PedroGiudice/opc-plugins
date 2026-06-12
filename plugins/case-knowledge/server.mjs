@@ -95,15 +95,25 @@ async function apiGet(path) {
   return await res.json();
 }
 
+/** Path com drive letter Windows (separador nativo ou `/`). */
+const WIN_DRIVE = /^[a-z]:(\\|\/|$)/i;
+
 /**
  * Derive case context from cwd.
  * Relaxed: does NOT require base/ to exist locally (API validates collection).
+ * NTFS e case-insensitive: com drive letter nos dois paths, a comparacao e
+ * em lowercase (CMR-99 item 1, mesma regra do caseSlugFromCwd do hook).
+ * O nome do caso preserva o casing original do path.
  */
 function detectCase() {
   const cwd = resolve(process.cwd());
   const base = resolve(CASES_BASE);
 
-  if (!cwd.startsWith(base + sep) && cwd !== base) {
+  const insensitive = WIN_DRIVE.test(cwd) && WIN_DRIVE.test(base);
+  const cwdF = insensitive ? cwd.toLowerCase() : cwd;
+  const baseF = insensitive ? base.toLowerCase() : base;
+
+  if (!cwdF.startsWith(baseF + sep) && cwdF !== baseF) {
     return null;
   }
 
