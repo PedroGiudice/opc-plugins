@@ -1,6 +1,6 @@
 {
   "name": "legal-vec-tools",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP tools para busca hibrida (dense + sparse + RRF) na base de legislacao brasileira. Expoe busca semantica e consulta de documentos no legal-knowledge-base (CF, CC, CPC, CDC, CLT, CP, CPP, ECA).",
   "author": {
     "name": "opc"

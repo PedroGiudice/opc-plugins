@@ -2,7 +2,8 @@
 /**
  * MCP server for legal-knowledge-base vector search.
  *
- * Proxy for the Rust search API (legal-vec-api) running on localhost:8423.
+ * Proxy for the Rust search API (legal-vec-api) on the VM, reachable over the
+ * tailnet at 100.123.73.128:8423.
  * Tools: search (hybrid + filters), document (by doc_id), recommend (similar articles),
  *        sources (collection stats).
  *
@@ -13,8 +14,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
+// legal-vec-api roda na VM; o default aponta pro IP tailnet, alcancavel de
+// qualquer cliente na tailnet. O default antigo 127.0.0.1 batia no loopback do
+// PROPRIO cliente (fetch failed em maquinas remotas). Padrao uniforme com os
+// demais plugins; override via LEGAL_VEC_API_BASE. Ver case-docs/docs/infraestrutura-dados.md.
 const API_BASE =
-  process.env.LEGAL_VEC_API_BASE || "http://127.0.0.1:8423/api";
+  process.env.LEGAL_VEC_API_BASE || "http://100.123.73.128:8423/api";
 const REQUEST_TIMEOUT_MS = 60_000;
 const MAX_RETRIES = 3;
 const RETRY_DELAYS = [500, 1500, 3000]; // ms
