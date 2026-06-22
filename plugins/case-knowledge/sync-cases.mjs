@@ -182,6 +182,25 @@ function writeAtomic(path, content) {
   renameSync(tmp, path);
 }
 
+const STATE_FILE = ".sync-state.json";
+
+export function readBaselineFrom(casesBase) {
+  const p = join(casesBase, STATE_FILE);
+  if (!existsSync(p)) return {};
+  try {
+    return JSON.parse(readFileSync(p, "utf-8"));
+  } catch {
+    return {}; // estado corrompido: trata como bootstrap, nao derruba o sync
+  }
+}
+
+function writeBaseline(casesBase, baseline) {
+  const path = join(casesBase, STATE_FILE);
+  const tmp = `${path}.sync-tmp`;
+  writeFileSync(tmp, JSON.stringify(baseline), "utf-8");
+  renameSync(tmp, path);
+}
+
 async function fetchJson(url) {
   const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
   if (!res.ok) throw new Error(`HTTP ${res.status} em ${url}`);
@@ -209,9 +228,13 @@ async function main() {
     return; // proximo ciclo e o retry
   }
 
-  const plan = planActions(manifest.cases || [], readLocalState(casesBase));
+  const manifestCases = manifest.cases || [];
+  const localState = readLocalState(casesBase);
+  const baseline = readBaselineFrom(casesBase);
+  const plan = planActions(manifestCases, localState, baseline);
   let updated = 0;
   const errors = [];
+  const succeeded = new Set();
 
   for (const name of plan.mkdir) {
     mkdirSync(join(casesBase, name), { recursive: true });
@@ -224,6 +247,9 @@ async function main() {
         const remote = briefing.files?.[f];
         if (!remote) continue; // sumiu entre manifest e fetch; proximo ciclo resolve
         writeAtomic(join(casesBase, name, f), remote.content);
+        // Chave deve usar nome do dir local (plan.download[].name = targetName),
+        // igual ao que computeBaseline usa em `${localName} ${file}`. NTFS-safe.
+        succeeded.add(`${name} ${f}`);
         updated++;
       }
     } catch (err) {
@@ -248,9 +274,21 @@ async function main() {
     }
   }
 
+  // Persiste o baseline (md5 da versao da VM por arquivo sincronizado).
+  try {
+    writeBaseline(casesBase, computeBaseline(manifestCases, localState, baseline, succeeded));
+  } catch (err) {
+    errors.push(`baseline: ${err.message}`);
+  }
+
+  // Loga edicoes locais preservadas (visibilidade para reconciliar a mao).
+  for (const { name, file } of plan.conflicts) {
+    appendLog(casesBase, `conflito preservado: ${name}/${file} editado localmente diverge da VM (nao sobrescrito)`);
+  }
+
   const summary =
     `${errors.length ? "erro" : "ok"} mkdir=${plan.mkdir.length} ` +
-    `arquivos_atualizados=${updated} orfaos_arquivados=${archived}` +
+    `arquivos_atualizados=${updated} orfaos_arquivados=${archived} conflitos=${plan.conflicts.length}` +
     (errors.length ? ` ERROS: ${errors.join(" | ")}` : "");
   appendLog(casesBase, summary);
 }
