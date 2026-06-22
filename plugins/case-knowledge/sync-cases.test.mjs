@@ -77,7 +77,7 @@ test("manifest vazio NUNCA gera orfaos (defesa contra bug/erro servidor)", () =>
 });
 
 test("isExcluded cobre dotfiles e pastas reservadas", () => {
-  for (const n of ["_archive", "_template", "scripts", ".claude", ".sync.log"]) {
+  for (const n of ["_archive", "_template", "scripts", ".claude", ".sync.log", ".sync-state.json"]) {
     assert.ok(isExcluded(n), n);
   }
   assert.ok(!isExcluded("bianka-salesforce"));
