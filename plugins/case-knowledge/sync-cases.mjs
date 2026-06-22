@@ -112,6 +112,43 @@ export function planActions(manifestCases, localState, baseline = {}) {
   return plan;
 }
 
+/**
+ * Novo baseline a persistir apos aplicar o plano. Reflete o md5 da VM para
+ * arquivos agora sincronizados (baixados com sucesso OU ja iguais a VM);
+ * preserva o baseline anterior para conflitos (a versao da VM de quando o
+ * usuario editou); remove orfaos (casos ausentes do manifest).
+ *
+ * succeeded: Set de chaves `${name} ${file}` baixadas com sucesso neste ciclo.
+ */
+export function computeBaseline(manifestCases, localState, prevBaseline, succeeded) {
+  const next = {};
+  const localByLower = new Map();
+  for (const name of Object.keys(localState)) {
+    localByLower.set(name.toLowerCase(), name);
+  }
+
+  for (const c of manifestCases) {
+    if (!VALID_CASE_NAME.test(c.name) || isExcluded(c.name)) continue;
+    const localName = localByLower.get(c.name.toLowerCase()) ?? c.name;
+    const local = localState[localName];
+    const prev = prevBaseline[localName] ?? prevBaseline[c.name] ?? {};
+    const entry = {};
+    for (const [file, info] of Object.entries(c.files)) {
+      if (!BRIEFING_FILES.includes(file)) continue;
+      const key = `${localName} ${file}`;
+      if (succeeded.has(key)) {
+        entry[file] = info.md5; // baixado -> agora igual a VM
+      } else if (local?.[file] === info.md5) {
+        entry[file] = info.md5; // ja sincronizado -> adota
+      } else if (prev[file] !== undefined) {
+        entry[file] = prev[file]; // conflito/falha -> mantem
+      }
+    }
+    if (Object.keys(entry).length > 0) next[localName] = entry;
+  }
+  return next;
+}
+
 /** Nome de destino em _archive/, sufixando -YYYYMMDD em colisao. */
 export function archiveTarget(name, taken, now = new Date()) {
   if (!taken.has(name)) return name;

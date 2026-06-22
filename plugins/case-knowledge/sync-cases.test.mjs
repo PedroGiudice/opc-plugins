@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { planActions, isExcluded, archiveTarget } from "./sync-cases.mjs";
+import { planActions, computeBaseline, isExcluded, archiveTarget } from "./sync-cases.mjs";
 
 test("caso novo: mkdir + download de todos os arquivos do manifest", () => {
   const manifest = [
@@ -122,4 +122,35 @@ test("archiveTarget sufixa com data em colisao", () => {
   const taken = new Set(["morto"]);
   assert.equal(archiveTarget("livre", taken), "livre");
   assert.match(archiveTarget("morto", taken), /^morto-\d{8}$/);
+});
+
+test("computeBaseline: arquivo baixado vira md5 da VM", () => {
+  const manifest = [{ name: "alpha", status: "active", files: { "CLAUDE.md": { md5: "VM" } } }];
+  const local = { alpha: { "CLAUDE.md": "OLD" } };
+  const succeeded = new Set(["alpha CLAUDE.md"]);
+  const next = computeBaseline(manifest, local, {}, succeeded);
+  assert.deepEqual(next, { alpha: { "CLAUDE.md": "VM" } });
+});
+
+test("computeBaseline: arquivo ja sincronizado (local==vm) adota o md5 da VM", () => {
+  const manifest = [{ name: "alpha", status: "active", files: { "CLAUDE.md": { md5: "VM" } } }];
+  const local = { alpha: { "CLAUDE.md": "VM" } };
+  const next = computeBaseline(manifest, local, {}, new Set());
+  assert.deepEqual(next, { alpha: { "CLAUDE.md": "VM" } });
+});
+
+test("computeBaseline: conflito mantem o baseline anterior (nao avanca)", () => {
+  const manifest = [{ name: "alpha", status: "active", files: { "CLAUDE.md": { md5: "VM" } } }];
+  const local = { alpha: { "CLAUDE.md": "EDITADO" } };
+  const prev = { alpha: { "CLAUDE.md": "BAIXADO_ANTES" } };
+  const next = computeBaseline(manifest, local, prev, new Set());
+  assert.deepEqual(next, { alpha: { "CLAUDE.md": "BAIXADO_ANTES" } });
+});
+
+test("computeBaseline: orfao (sumiu do manifest) e removido do baseline", () => {
+  const manifest = [{ name: "alpha", status: "active", files: { "CLAUDE.md": { md5: "VM" } } }];
+  const local = { alpha: { "CLAUDE.md": "VM" }, morto: { "CLAUDE.md": "x" } };
+  const prev = { alpha: { "CLAUDE.md": "VM" }, morto: { "CLAUDE.md": "x" } };
+  const next = computeBaseline(manifest, local, prev, new Set());
+  assert.deepEqual(next, { alpha: { "CLAUDE.md": "VM" } });
 });
