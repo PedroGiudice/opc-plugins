@@ -63,11 +63,20 @@ test("arquivo local extra (trabalho do advogado) e invisivel ao plano", () => {
   assert.deepEqual(plan.download, []);
 });
 
-test("orfao detectado; exclusoes nunca viram orfao", () => {
+test("orfao detectado (estava no baseline = sincronizado, sumiu da VM); exclusoes nunca viram orfao", () => {
   const manifest = [{ name: "alpha", status: "active", files: {} }];
   const local = { alpha: {}, morto: {}, _archive: {}, _template: {}, scripts: {}, ".claude": {} };
-  const plan = planActions(manifest, local);
+  const baseline = { morto: { "CLAUDE.md": "x" } }; // morto foi sincronizado antes
+  const plan = planActions(manifest, local, baseline);
   assert.deepEqual(plan.orphans, ["morto"]);
+});
+
+test("pasta criada localmente (ausente do baseline) NUNCA vira orfao", () => {
+  const manifest = [{ name: "alpha", status: "active", files: {} }];
+  const local = { alpha: {}, "glenmark-rd-incineracao": {} };
+  const baseline = { alpha: { "CLAUDE.md": "x" } }; // alpha sincronizado; glenmark nunca
+  const plan = planActions(manifest, local, baseline);
+  assert.deepEqual(plan.orphans, []);
 });
 
 test("manifest vazio NUNCA gera orfaos (defesa contra bug/erro servidor)", () => {

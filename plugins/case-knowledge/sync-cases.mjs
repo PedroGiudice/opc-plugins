@@ -106,8 +106,15 @@ export function planActions(manifestCases, localState, baseline = {}) {
     if (needs.length > 0) plan.download.push({ name: targetName, files: needs });
   }
 
+  // Um dir local ausente do manifest so e orfao se o sync ja o trouxe antes
+  // (presente no baseline) -> caso removido na VM, limpeza legitima. Um dir que
+  // o sync nunca sincronizou (ausente do baseline) e trabalho local do usuario
+  // (ex: contrato jogado em ~/cases para revisao): NAO tocar. O espelho mexe so
+  // no que e dele.
+  const baselineLower = new Set(Object.keys(baseline).map((k) => k.toLowerCase()));
   for (const name of Object.keys(localState)) {
-    if (!remoteLower.has(name.toLowerCase()) && !isExcluded(name)) plan.orphans.push(name);
+    if (remoteLower.has(name.toLowerCase()) || isExcluded(name)) continue;
+    if (baselineLower.has(name.toLowerCase())) plan.orphans.push(name);
   }
   return plan;
 }
