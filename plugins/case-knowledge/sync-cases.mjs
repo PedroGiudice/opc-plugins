@@ -63,12 +63,11 @@ const VALID_CASE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
  * um caso, o cliente reusa o dir local existente em vez de criar duplicata
  * e arquivar o antigo (que carregaria o trabalho local do advogado junto).
  */
-export function planActions(manifestCases, localState) {
-  const plan = { mkdir: [], download: [], orphans: [] };
+export function planActions(manifestCases, localState, baseline = {}) {
+  const plan = { mkdir: [], download: [], orphans: [], conflicts: [] };
 
   // Defesa em profundidade: manifest vazio significa quase certamente erro
-  // no servidor (a VM tem 20+ casos ativos), nunca "arquive tudo". Se um dia
-  // for legitimo (todos os casos arquivados), mover a mao.
+  // no servidor (a VM tem 20+ casos ativos), nunca "arquive tudo".
   if (manifestCases.length === 0) return plan;
 
   // Indice lowercase do estado local para matching NTFS-safe.
@@ -82,15 +81,29 @@ export function planActions(manifestCases, localState) {
     if (!VALID_CASE_NAME.test(c.name) || isExcluded(c.name)) continue;
     remoteLower.add(c.name.toLowerCase());
 
-    // Reusa o dir local existente quando so a caixa difere.
+    // Reusa o dir local existente quando so a caixa difere (NTFS).
     const localName = localByLower.get(c.name.toLowerCase());
     const local = localName !== undefined ? localState[localName] : undefined;
+    const base = (localName !== undefined ? baseline[localName] : undefined) ?? baseline[c.name];
+    const targetName = localName ?? c.name;
     if (!local) plan.mkdir.push(c.name);
-    const needs = Object.entries(c.files)
-      .filter(([file]) => BRIEFING_FILES.includes(file))
-      .filter(([file, info]) => !local || local[file] !== info.md5)
-      .map(([file]) => file);
-    if (needs.length > 0) plan.download.push({ name: localName ?? c.name, files: needs });
+
+    const needs = [];
+    for (const [file, info] of Object.entries(c.files)) {
+      if (!BRIEFING_FILES.includes(file)) continue;
+      const localMd5 = local?.[file];
+      const baseMd5 = base?.[file];
+      if (localMd5 === undefined) {
+        needs.push(file); // arquivo novo no cliente
+      } else if (localMd5 === info.md5) {
+        // ja sincronizado: nada a fazer
+      } else if (baseMd5 !== undefined && localMd5 === baseMd5) {
+        needs.push(file); // VM mudou, local intocado desde o ultimo download
+      } else {
+        plan.conflicts.push({ name: targetName, file }); // edicao local -> preserva
+      }
+    }
+    if (needs.length > 0) plan.download.push({ name: targetName, files: needs });
   }
 
   for (const name of Object.keys(localState)) {

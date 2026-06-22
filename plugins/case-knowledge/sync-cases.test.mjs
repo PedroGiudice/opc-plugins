@@ -22,13 +22,36 @@ test("md5 igual: nenhuma acao", () => {
   assert.deepEqual(plan.download, []);
 });
 
-test("md5 divergente: baixa so o arquivo que mudou", () => {
+test("VM atualizou (local == baseline): baixa so o arquivo que mudou", () => {
   const manifest = [
     { name: "alpha", status: "active", files: { "CLAUDE.md": { md5: "aa" }, "case.yaml": { md5: "NEW" } } },
   ];
   const local = { alpha: { "CLAUDE.md": "aa", "case.yaml": "OLD" } };
-  const plan = planActions(manifest, local);
+  const baseline = { alpha: { "CLAUDE.md": "aa", "case.yaml": "OLD" } };
+  const plan = planActions(manifest, local, baseline);
   assert.deepEqual(plan.download, [{ name: "alpha", files: ["case.yaml"] }]);
+  assert.deepEqual(plan.conflicts, []);
+});
+
+test("usuario editou local (local != baseline): preserva, vira conflito, nao baixa", () => {
+  const manifest = [
+    { name: "alpha", status: "active", files: { "CLAUDE.md": { md5: "VM" } } },
+  ];
+  const local = { alpha: { "CLAUDE.md": "EDITADO" } };
+  const baseline = { alpha: { "CLAUDE.md": "BAIXADO_ANTES" } };
+  const plan = planActions(manifest, local, baseline);
+  assert.deepEqual(plan.download, []);
+  assert.deepEqual(plan.conflicts, [{ name: "alpha", file: "CLAUDE.md" }]);
+});
+
+test("bootstrap (sem baseline) + divergencia: conflito conservador, nao destroi local", () => {
+  const manifest = [
+    { name: "alpha", status: "active", files: { "CLAUDE.md": { md5: "VM" } } },
+  ];
+  const local = { alpha: { "CLAUDE.md": "LOCAL" } };
+  const plan = planActions(manifest, local, {});
+  assert.deepEqual(plan.download, []);
+  assert.deepEqual(plan.conflicts, [{ name: "alpha", file: "CLAUDE.md" }]);
 });
 
 test("arquivo local extra (trabalho do advogado) e invisivel ao plano", () => {
@@ -88,7 +111,8 @@ test("caixa divergente (NTFS): casa com dir local existente, nunca orfao", () =>
     { name: "Alpha", status: "active", files: { "CLAUDE.md": { md5: "NEW" } } },
   ];
   const local = { alpha: { "CLAUDE.md": "OLD" } };
-  const plan = planActions(manifest, local);
+  const baseline = { alpha: { "CLAUDE.md": "OLD" } };
+  const plan = planActions(manifest, local, baseline);
   assert.deepEqual(plan.mkdir, []);
   assert.deepEqual(plan.download, [{ name: "alpha", files: ["CLAUDE.md"] }]);
   assert.deepEqual(plan.orphans, []);
