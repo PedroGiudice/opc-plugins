@@ -11,95 +11,104 @@ description: >
 
 # Legal Knowledge Access
 
-Protocolos de acesso, estrategias de query e troubleshooting para as 4 bases de
-conhecimento juridico. Referencia obrigatoria para qualquer agente que precise
-buscar informacao juridica.
+Protocolos de acesso, estratégias de query e troubleshooting para as bases de
+conhecimento jurídico. Referência obrigatória para qualquer agente que precise
+buscar informação jurídica.
 
-## Bases Disponiveis
+> **Acesso é por MCP tools dos plugins** — não por comandos de shell. As tools
+> funcionam tanto na VM quanto na cmr-002 (plugins instalados via marketplace
+> `opc-plugins`). Os antigos caminhos por `curl`/`cargo`/`nc`/`sqlite3` estão
+> **desativados**: o servidor STJ `:3100` e o TEI `:8080` não existem mais, o
+> embedding hoje é ONNX in-process, e os dados migraram de SQLite para Qdrant.
 
-| Base | Conteudo | Tamanho | Interface |
-|------|----------|---------|-----------|
-| case-knowledge | Documentos do caso ativo | Por caso | MCP tool / CLI |
-| stj-vec | Acordaos STJ | 13.48M chunks | HTTP API :3100 |
-| legal-knowledge-base | Legislacao brasileira | 85k chunks | CLI Rust |
-| cogmem | Memoria de sessoes | 2735+ chunks | Unix socket |
+## Bases Disponíveis
+
+| Base | Conteúdo | Plugin MCP |
+|------|----------|------------|
+| case-knowledge | Documentos do caso ativo (resolvido pelo cwd) | `case-knowledge` |
+| stj-vec | Acórdãos do STJ | `stj-vec-tools` |
+| legal-knowledge-base | Legislação brasileira | `legal-vec-tools` |
+| cogmem | Memória de sessões | `cogmem-tools` |
+| doutrina | Livros/textos (archive.org) | skill `/archive-search` |
 
 ## Protocolos de Acesso
 
-### 1. Case Knowledge
+### 1. Case Knowledge (documentos do caso ativo)
 
-**MCP tool (preferivel):**
-```
-search_case("responsabilidade civil")
-```
+Plugin `case-knowledge`. Resolve o caso pelo **cwd** (a sessão precisa estar
+dentro de `cases/<slug>/`). Faz proxy para a `case-knowledge-api`
+(`127.0.0.1:8422` na VM; `100.123.73.128:8422` via Tailscale na cmr-002), sobre
+as collections `case-{slug}` no Qdrant.
 
-**CLI:**
-```bash
-cd ~/.claude/case-knowledge && cargo run --release -- search "responsabilidade civil"
-```
+- `case-knowledge:search` — busca híbrida; filtros `peca`, `fase`, `documento`, `categoria`
+- `case-knowledge:contexto` — chunks completos, sem truncamento
+- `case-knowledge:stats`, `:info`, `:list_cases`, `:manifesto`, `:metadata`
+- `case-knowledge:buscar_cronologico`, `:buscar_interseccao`, `:buscar_diversificado`
+- `case-knowledge:memoria_search` — memória de sessões do caso (legal-cogmem)
 
-**Response format:** JSON array com campos `content`, `source`, `score`, `metadata`.
+A memória do caso é injetada automaticamente a cada prompt (hook). Fora de um
+caso, só `list_cases` opera; as demais retornam erro.
 
-**Quando usar:** questoes sobre fatos do caso, pecas processuais, provas, pericias.
+**Quando usar:** fatos do caso, peças processuais, provas, perícias.
 
-### 2. STJ Jurisprudencia
+### 2. STJ Jurisprudência
 
-**HTTP API:**
-```bash
-curl -s -X POST http://localhost:3100/search \
-  -H "Content-Type: application/json" \
-  -d '{"query":"dano moral quantum indenizatorio","limit":10}'
-```
+Plugin `stj-vec-tools`.
 
-**Parametros opcionais:** `limit` (default 10, max 50).
+- `stj-vec-tools:search` — busca densa
+- `stj-vec-tools:search_formula` — busca com re-rank jurídico (boost por seção/citação); preferir para fundamentação
+- `stj-vec-tools:filters` — valores de filtro válidos (ministro, classe, órgão julgador, ano)
+- `stj-vec-tools:document` — acórdão completo por `doc_id`
 
-**Response format:** JSON com array `results`, cada item tem `content`, `score`, `metadata` (numero do acordao, relator, data, turma).
+**Response:** itens com `content`, `score`, metadados (número do acórdão, relator,
+data, órgão julgador).
 
-**Quando usar:** fundamentacao em jurisprudencia, verificacao de posicionamento do STJ, teses consolidadas, temas repetitivos.
+**Quando usar:** fundamentação jurisprudencial, posicionamento do STJ, teses
+consolidadas, temas repetitivos.
 
-### 3. Legal Knowledge Base (Legislacao)
+### 3. Legal Knowledge Base (Legislação)
 
-**CLI:**
-```bash
-cd ~/.claude/legal-knowledge-base/ingest && \
-  cargo run --release -- -c legal-vec.toml search "usucapiao extraordinario"
-```
+Plugin `legal-vec-tools`.
 
-**Diplomas disponiveis:** CF/88, CC/2002, CPC/2015, CPP, CP, CLT, CDC, ECA, CTN, leis esparsas.
+- `legal-vec-tools:search` — busca por dispositivo ou tema
+- `legal-vec-tools:document` — dispositivo específico por `doc_id`
 
-**Response format:** texto dos chunks com score de relevancia e metadados (diploma, artigo).
+**Diplomas:** CF/88, CC/2002, CPC/2015, CPP, CP, CLT, CDC, ECA, CTN e leis esparsas.
 
-**Quando usar:** texto normativo exato, fundamentacao legal, verificacao de artigos.
+**Quando usar:** texto normativo exato, fundamentação legal, verificação de artigos.
 
-### 4. Cogmem (Memoria de Sessoes)
+### 4. Cogmem (Memória de Sessões)
 
-**Unix socket:**
-```bash
-echo '{"action":"search","params":{"query":"estrategia recursal","limit":5}}' | \
-  nc -U /tmp/claude-cogmem.sock
-```
+Plugin `cogmem-tools`.
 
-**Response format:** JSON com `results` array, campos `content`, `score`, `source`.
+- `cogmem-tools:search` — sessões anteriores, decisões, pesquisas já feitas
+- `cogmem-tools:context` — attention state + chunks relevantes
 
-**Quando usar:** retomar contexto de sessoes anteriores, decisoes ja tomadas, pesquisas ja feitas.
+**Quando usar:** retomar contexto de trabalho anterior. Para memória **do caso**,
+usar `case-knowledge:memoria_search` (é por-caso).
 
-## Estrategias de Query Juridica
+### 5. Doutrina (archive-search)
 
-### Termos Tecnicos vs. Linguagem Natural
+Skill `/archive-search` — livros e textos no archive.org. Usar para fundamentação
+doutrinária e obras clássicas.
 
-Preferir termos tecnicos juridicos nas queries:
+## Estratégias de Query Jurídica
+
+### Termos Técnicos vs. Linguagem Natural
+
+Preferir termos técnicos jurídicos nas queries:
 
 | Em vez de | Usar |
 |-----------|------|
 | "prazo pra recorrer" | "prazo recursal" |
-| "pagar divida" | "adimplemento obrigacional" |
-| "dono do imovel" | "proprietario" ou "titular do dominio" |
-| "contrato quebrado" | "inadimplemento contratual" ou "resolucao contratual" |
-| "demitido sem justa causa" | "dispensa imotivada" ou "rescisao sem justa causa" |
+| "pagar dívida" | "adimplemento obrigacional" |
+| "dono do imóvel" | "proprietário" ou "titular do domínio" |
+| "contrato quebrado" | "inadimplemento contratual" ou "resolução contratual" |
+| "demitido sem justa causa" | "dispensa imotivada" ou "rescisão sem justa causa" |
 
-### Sinonimos e Variantes
+### Sinônimos e Variantes
 
-Executar multiplas queries quando o termo tem variantes:
+Executar múltiplas queries quando o termo tem variantes:
 
 ```
 Query 1: "responsabilidade civil objetiva"
@@ -107,191 +116,101 @@ Query 2: "responsabilidade sem culpa"
 Query 3: "teoria do risco"
 ```
 
-### Queries Compostas
+O overlap lexical entre a pergunta e o texto-fonte é baixo no jurídico — busca
+puramente literal falha. Expandir siglas e sinônimos é regra, não exceção.
 
-Para temas complexos, decompor em queries atomicas:
+### Queries Compostas (decomposição)
+
+Para temas complexos, decompor em queries atômicas, cada uma na base certa:
 
 ```
-Tema: "Prescricao em acao de reparacao de danos por acidente de trabalho"
-Query 1: "prescricao reparacao danos" (legal-knowledge-base)
-Query 2: "prescricao acidente trabalho" (STJ)
-Query 3: "prazo prescricional art 7 XXIX CF" (legal-knowledge-base)
+Tema: "Prescrição em ação de reparação de danos por acidente de trabalho"
+Query 1: legal-vec-tools:search       "prescrição reparação de danos"
+Query 2: stj-vec-tools:search_formula "prescrição acidente de trabalho"
+Query 3: legal-vec-tools:search       "prazo prescricional art 7 XXIX CF"
 ```
+
+Decomposição multi-perspectiva (explodir a pergunta em ângulos complementares e
+cruzar resultados) supera uma única reformulação.
 
 ## Templates para Teammates
 
-### Template: Pesquisador de Jurisprudencia
+### Template: Pesquisador de Jurisprudência
 
 ```
-Voce e um pesquisador juridico especializado em jurisprudencia do STJ.
+Você é um pesquisador jurídico especializado em jurisprudência do STJ.
 
 TAREFA: Pesquisar posicionamento do STJ sobre [TEMA].
 
-ACESSO A BASE:
-curl -s -X POST http://localhost:3100/search \
-  -H "Content-Type: application/json" \
-  -d '{"query":"[QUERY]","limit":15}'
+ACESSO À BASE (MCP tools):
+- stj-vec-tools:search_formula  (preferir; re-rank jurídico)
+- stj-vec-tools:filters         (para descobrir ministro/classe/órgão)
+- stj-vec-tools:document        (acórdão completo por doc_id)
 
 Execute ao menos 3 queries com termos variados.
 
 OUTPUT ESPERADO:
-1. Posicao majoritaria (com numeros dos acordaos)
-2. Posicoes divergentes (se houver)
+1. Posição majoritária (com números dos acórdãos)
+2. Posições divergentes (se houver)
 3. Temas repetitivos relacionados
-4. Sumulas aplicaveis
+4. Súmulas aplicáveis
 ```
 
-### Template: Pesquisador de Legislacao
+### Template: Pesquisador de Legislação
 
 ```
-Voce e um pesquisador juridico especializado em legislacao.
+Você é um pesquisador jurídico especializado em legislação.
 
-TAREFA: Localizar fundamentacao legal para [TEMA].
+TAREFA: Localizar fundamentação legal para [TEMA].
 
-ACESSO A BASE:
-cd ~/.claude/legal-knowledge-base/ingest && \
-  cargo run --release -- -c legal-vec.toml search "[QUERY]"
+ACESSO À BASE (MCP tools):
+- legal-vec-tools:search    (busca por dispositivo/tema)
+- legal-vec-tools:document  (dispositivo por doc_id)
 
-Execute ao menos 2 queries. Verificar CF, codigo especifico e leis esparsas.
+Execute ao menos 2 queries. Verificar CF, código específico e leis esparsas.
 
 OUTPUT ESPERADO:
-1. Dispositivos legais aplicaveis (artigo completo)
+1. Dispositivos legais aplicáveis (artigo completo)
 2. Hierarquia normativa entre eles
-3. Alteracoes legislativas recentes (se identificaveis)
+3. Alterações legislativas recentes (se identificáveis)
 ```
 
-### Template: Antagonista (Antitese)
+### Template: Antagonista (Antítese)
 
 ```
-Voce e um advogado da parte contraria. Sua funcao e encontrar os MELHORES
+Você é um advogado da parte contrária. Sua função é encontrar os MELHORES
 argumentos contra a tese: [TESE].
 
-ACESSO AS BASES:
-- STJ: curl -s -X POST http://localhost:3100/search -H "Content-Type: application/json" -d '{"query":"[QUERY CONTRARIA]","limit":10}'
-- Legislacao: cd ~/.claude/legal-knowledge-base/ingest && cargo run --release -- -c legal-vec.toml search "[QUERY]"
+ACESSO ÀS BASES (MCP tools):
+- STJ: stj-vec-tools:search_formula "[QUERY CONTRÁRIA]"
+- Legislação: legal-vec-tools:search "[QUERY]"
 
 OUTPUT ESPERADO:
-1. Contra-argumentos juridicos (com fundamento)
-2. Jurisprudencia desfavoravel
+1. Contra-argumentos jurídicos (com fundamento)
+2. Jurisprudência desfavorável
 3. Riscos processuais que a tese ignora
-4. Pontos fracos da argumentacao
+4. Pontos fracos da argumentação
 ```
 
 ## Troubleshooting
 
-### TEI down (embeddings)
+As bases são MCP tools — não há serviço de shell para reiniciar. Se uma tool
+falhar:
 
-```bash
-# Verificar
-curl -s localhost:8080/health
+1. **Reportar a falha** ao operador (qual tool, qual erro retornado).
+2. **Oferecer alternativa**: outra base relevante, busca web, ou pedir o texto
+   ao operador.
+3. **Nunca** cair para `curl`/`cargo run`/`nc`/`sqlite3` da VM — esses caminhos
+   estão desativados e não funcionam na cmr-002.
+4. **Nunca** preencher a lacuna com memória. "Não localizei na base" é resposta
+   legítima e preferível a fabricar.
 
-# Reiniciar
-docker restart tei-bge-m3
-
-# Fallback: queries funcionam mas com qualidade reduzida se TEI caiu
-# apos a indexacao (indices ja existem)
-```
-
-### cogmem socket not found
-
-```bash
-# Verificar
-ls -la /tmp/claude-cogmem.sock
-
-# Reiniciar
-systemctl --user restart cogmem
-
-# Verificar logs
-journalctl --user -u cogmem -n 20
-```
-
-### stj-vec server down
-
-```bash
-# Verificar
-curl -s localhost:3100/health
-
-# Reiniciar (verificar processo)
-# O servidor roda como processo separado — consultar CLAUDE.md do projeto stj-vec
-```
-
-### legal-knowledge-base nao compilado
-
-```bash
-# Compilar
-cd ~/.claude/legal-knowledge-base/ingest && cargo build --release
-
-# Verificar toml
-cat legal-vec.toml
-```
-
-## Queries SQLite3 Diretas (Bypass)
-
-Quando as interfaces normais falham, acessar SQLite diretamente:
-
-### cogmem
-
-```bash
-sqlite3 ~/.claude/memory/cogmem/cogmem.db \
-  "SELECT content, source FROM chunks WHERE content LIKE '%termo%' LIMIT 10;"
-```
-
-### case-knowledge
-
-```bash
-# knowledge.db fica no diretorio do caso ativo
-sqlite3 ~/.claude/case-knowledge/[caso]/knowledge.db \
-  "SELECT content, source FROM chunks WHERE content LIKE '%termo%' LIMIT 10;"
-```
-
-### legal-knowledge-base
-
-```bash
-sqlite3 ~/.claude/legal-knowledge-base/ingest/legal-vec.db \
-  "SELECT content, source FROM chunks WHERE content LIKE '%artigo%' LIMIT 10;"
-```
-
-**Nota:** queries SQLite LIKE nao usam embeddings — sao busca textual pura.
-Para FTS5 (quando disponivel):
-
-```bash
-sqlite3 [db] "SELECT content, source FROM fts_chunks WHERE fts_chunks MATCH 'termo1 AND termo2' LIMIT 10;"
-```
-
-## Pipeline de Embedding (Atualizacao)
-
-### cogmem
-
-Gerenciado automaticamente pelo daemon. Novos chunks sao embedados via TEI na ingestao.
-
-Para re-embedding em massa:
-```bash
-cd ~/.claude/memory/cogmem && python3 scripts/reembed.py
-```
-Usar sentence-transformers, nao TEI (TEI crashia sob carga sustentada).
-
-### legal-knowledge-base
-
-```bash
-cd ~/.claude/legal-knowledge-base/ingest
-# Adicionar novos documentos em sources/
-cargo run --release -- -c legal-vec.toml ingest
-```
-
-### case-knowledge
-
-```bash
-cd ~/.claude/case-knowledge
-cargo run --release -- ingest /caminho/para/novos/documentos/
-```
-
-### stj-vec
-
-Pipeline Modal GPU para embeddings dense + sparse (BGE-M3). Consultar skill `/embedding-modal`.
+Se o plugin não aparecer na sessão, confirmar que o marketplace `opc-plugins`
+está instalado e o plugin habilitado (`case-knowledge`, `stj-vec-tools`,
+`legal-vec-tools`, `cogmem-tools`).
 
 ## Additional Resources
 
 ### Reference Files
 
-Para detalhes avancados sobre cada base:
-- **`references/query-patterns.md`** — Padroes de query por area do direito
+- **`references/query-patterns.md`** — Padrões de query por área do direito
