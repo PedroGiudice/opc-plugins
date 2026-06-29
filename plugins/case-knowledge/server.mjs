@@ -16,6 +16,7 @@ import { join, resolve, sep } from "node:path";
 import yaml from "js-yaml";
 import { memoriaSearch } from "./memoria.mjs";
 import { renderLines, buildCappedPayload, capContextChunks } from "./format.mjs";
+import { requestWithAuth, APP_BASE } from "./auth.mjs";
 
 function defaultApiBase() {
   if (process.platform === "win32") return "http://100.123.73.128:8422/api";
@@ -74,11 +75,16 @@ async function fetchWithRetry(url, options = {}) {
 }
 
 async function apiPost(path, body) {
-  const res = await fetchWithRetry(`${API_BASE}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  // requestWithAuth injeta o Bearer (quando ha credencial), refresca proativo
+  // (<60s) e reativo (401 -> refresh -> 1 retry). 401 esgotado lanca erro
+  // acionavel; demais status nao-ok caem no tratamento abaixo.
+  const res = await requestWithAuth((authHeaders) =>
+    fetchWithRetry(`${API_BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders },
+      body: JSON.stringify(body),
+    })
+  );
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`API ${res.status}: ${text}`);
@@ -87,7 +93,9 @@ async function apiPost(path, body) {
 }
 
 async function apiGet(path) {
-  const res = await fetchWithRetry(`${API_BASE}${path}`);
+  const res = await requestWithAuth((authHeaders) =>
+    fetchWithRetry(`${API_BASE}${path}`, { headers: { ...authHeaders } })
+  );
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`API ${res.status}: ${text}`);
@@ -474,6 +482,7 @@ server.tool(
       `Collection Qdrant: case-${CASE.name}`,
       `Diretorio: ${CASE.dir}`,
       `API: ${API_BASE}`,
+      `App (login/token): ${APP_BASE}`,
     ];
     const relacionados = CASE_CONFIG?.casos_relacionados || CASE_CONFIG?.processos_relacionados;
     if (relacionados?.length) {
@@ -580,11 +589,13 @@ server.tool(
         if (negative && negative.length > 0) body.negative = negative;
       }
 
-      const res = await fetchWithRetry(`${API_BASE}/cases/${CASE.name}/recommend`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
+      const res = await requestWithAuth((authHeaders) =>
+        fetchWithRetry(`${API_BASE}/cases/${CASE.name}/recommend`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders },
+          body: JSON.stringify(body),
+        })
+      );
       if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
       const data = await res.json();
 
