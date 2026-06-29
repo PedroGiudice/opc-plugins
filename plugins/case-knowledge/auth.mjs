@@ -15,6 +15,10 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
 import { dirname, join } from "node:path";
 import os from "node:os";
+import crypto from "node:crypto";
+import http from "node:http";
+import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 
 /** App Laravel publico (login/troca/refresh de token). NAO e a API Rust. */
 export const APP_BASE =
@@ -23,8 +27,18 @@ export const APP_BASE =
 /** Mesmo timeout do server.mjs (REQUEST_TIMEOUT_MS). */
 const REFRESH_TIMEOUT_MS = 60_000;
 
-/** Comando de login, centralizado para a task de login ajustar em 1 lugar. */
-const LOGIN_CMD = "case-knowledge login";
+/**
+ * Comando de login concreto. Em runtime do MCP server, CLAUDE_PLUGIN_ROOT esta
+ * no env (set pelo Claude Code) -> caminho absoluto do server.mjs; fora dele
+ * (shell do usuario, testes) cai num placeholder claro. O subcomando real e
+ * `node <server.mjs> login` (mesmo entrypoint do .mcp.json).
+ */
+function loginCommand() {
+  const root = process.env.CLAUDE_PLUGIN_ROOT;
+  const target = root ? join(root, "server.mjs") : "<plugin>/server.mjs";
+  return `node ${target} login`;
+}
+const LOGIN_CMD = loginCommand();
 const MSG_NO_CREDENTIAL = `Sem credencial. Rode: ${LOGIN_CMD}`;
 const MSG_SESSION_EXPIRED = `Sessao expirada ou revogada. Rode: ${LOGIN_CMD}`;
 const MSG_UNAUTHORIZED_AFTER_REFRESH = `Nao autorizado (401) apos refresh. Rode: ${LOGIN_CMD}`;
@@ -54,12 +68,58 @@ export function credentialPath() {
   return join(configHome, "aidvlabs", "credentials.json");
 }
 
-/** Le a credencial; retorna { access_jwt, refresh } ou null (ausente/corrompida). */
-export function readCredential() {
-  const path = credentialPath();
-  if (!existsSync(path)) return null;
+// --- Storage: keychain do SO com fallback para arquivo 0600 ---
+
+/** Identidade da credencial no keychain do SO (1 por usuario/maquina). */
+const KEYCHAIN_SERVICE = "aidvlabs-case-knowledge";
+const KEYCHAIN_ACCOUNT = "default";
+
+/** Cache do modulo keyring: undefined=nao tentado | null=indisponivel | modulo. */
+let keyringModuleCache;
+
+/**
+ * Carrega @napi-rs/keyring de forma LAZY e tolerante a falha.
+ *
+ * Usa createRequire (sincrono) em vez de import() assincrono DE PROPOSITO:
+ * readCredential/writeCredential sao sincronos (contrato do cliente-1 e dos
+ * testes); um import() forcaria todo o storage a virar async, quebrando os
+ * callers. O require sincrono atende ao mesmo objetivo (carga lazy, em
+ * try/catch, sem dependencia hard no topo do modulo): se a dep nativa nao
+ * existir/carregar (sem prebuild, libsecret/D-Bus ausente headless) -> null e
+ * o storage cai para arquivo. NUNCA lanca.
+ */
+function loadKeyring() {
+  if (keyringModuleCache !== undefined) return keyringModuleCache;
   try {
-    const cred = JSON.parse(readFileSync(path, "utf-8"));
+    const require = createRequire(import.meta.url);
+    const mod = require("@napi-rs/keyring");
+    keyringModuleCache = mod && typeof mod.Entry === "function" ? mod : null;
+  } catch {
+    keyringModuleCache = null;
+  }
+  return keyringModuleCache;
+}
+
+/**
+ * Entry do keychain para esta credencial, ou null se devemos usar arquivo.
+ * O override AIDVLABS_CREDENTIALS_FILE forca arquivo (bypassa keychain) — usado
+ * em teste e como escape hatch. NUNCA lanca.
+ */
+function keychainEntryOrNull() {
+  if (process.env.AIDVLABS_CREDENTIALS_FILE) return null;
+  const mod = loadKeyring();
+  if (!mod) return null;
+  try {
+    return new mod.Entry(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
+  } catch {
+    return null;
+  }
+}
+
+/** Parse defensivo de uma credencial serializada; retorna objeto ou null. */
+function parseCredential(raw) {
+  try {
+    const cred = JSON.parse(raw);
     if (!cred || typeof cred !== "object") return null;
     return cred;
   } catch {
@@ -68,14 +128,48 @@ export function readCredential() {
 }
 
 /**
- * Grava a credencial: cria o diretorio e escreve JSON com modo restritivo
- * 0o600 no POSIX (chmod garante a permissao mesmo em sobrescrita).
+ * Le a credencial { access_jwt, refresh } ou null (ausente/corrompida).
+ * Tenta o keychain do SO primeiro; se indisponivel ou sem entrada, cai no
+ * arquivo. O override AIDVLABS_CREDENTIALS_FILE forca o caminho de arquivo.
+ */
+export function readCredential() {
+  const entry = keychainEntryOrNull();
+  if (entry) {
+    try {
+      const raw = entry.getPassword();
+      if (raw) {
+        const cred = parseCredential(raw);
+        if (cred) return cred;
+      }
+    } catch {
+      // ausente no keychain (NoEntry) ou erro de runtime -> tenta arquivo
+    }
+  }
+  const path = credentialPath();
+  if (!existsSync(path)) return null;
+  return parseCredential(readFileSync(path, "utf-8"));
+}
+
+/**
+ * Grava a credencial. Tenta o keychain do SO primeiro; se indisponivel, cai no
+ * arquivo com modo restritivo 0o600 no POSIX (chmod garante a permissao mesmo
+ * em sobrescrita). O override AIDVLABS_CREDENTIALS_FILE forca o arquivo.
+ * Retorna o destino usado ("keychain" ou o path do arquivo).
  */
 export function writeCredential(cred) {
+  const json = JSON.stringify(cred, null, 2);
+  const entry = keychainEntryOrNull();
+  if (entry) {
+    try {
+      entry.setPassword(json);
+      return "keychain";
+    } catch {
+      // keychain indisponivel em runtime -> cai para arquivo 0600
+    }
+  }
   const path = credentialPath();
   const posix = process.platform !== "win32";
   mkdirSync(dirname(path), { recursive: true, ...(posix ? { mode: 0o700 } : {}) });
-  const json = JSON.stringify(cred, null, 2);
   writeFileSync(path, json, posix ? { encoding: "utf-8", mode: 0o600 } : "utf-8");
   if (posix) {
     try {
@@ -152,7 +246,9 @@ export async function refreshOnce(fetchImpl = fetch) {
   if (!data || typeof data.access_jwt !== "string" || !data.access_jwt) {
     throw new Error(MSG_SESSION_EXPIRED);
   }
-  writeCredential({ access_jwt: data.access_jwt, refresh: data.refresh });
+  // Defensivo: se a resposta omitir o refresh, preserva o atual (nao perde a
+  // capacidade de renovar por causa de um payload incompleto).
+  writeCredential({ access_jwt: data.access_jwt, refresh: data.refresh ?? cred.refresh });
   return data.access_jwt;
 }
 
@@ -213,4 +309,219 @@ export async function requestWithAuth(doFetch, fetchImpl = fetch) {
   }
 
   return res;
+}
+
+// --- LOGIN: loopback browser + PKCE (RFC 8252 + RFC 7636) ---
+
+/** Tempo maximo aguardando o callback do browser. */
+const LOGIN_TIMEOUT_MS = 120_000;
+
+/**
+ * code_verifier PKCE: 32 bytes aleatorios -> base64url SEM padding (43 chars,
+ * piso do range 43-128 da RFC 7636).
+ */
+export function genCodeVerifier() {
+  return crypto.randomBytes(32).toString("base64url");
+}
+
+/**
+ * code_challenge S256: base64url(sha256(verifier)) SEM padding. DEVE bater com
+ * o servidor (vetor RFC 7636 Appendix B coberto em teste).
+ */
+export function challengeFromVerifier(verifier) {
+  return crypto.createHash("sha256").update(verifier).digest().toString("base64url");
+}
+
+/** state anti-CSRF: aleatorio base64url. */
+export function genState() {
+  return crypto.randomBytes(16).toString("base64url");
+}
+
+/** Escapa o minimo para nao quebrar o HTML de resposta no browser. */
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+/**
+ * Abre a URL no browser do sistema (cross-platform). Best-effort: se falhar, o
+ * usuario ainda tem a URL impressa no stdout.
+ */
+export function openBrowser(url, spawnImpl = spawn) {
+  try {
+    let cmd, args;
+    if (process.platform === "win32") {
+      // 'start' e builtin do cmd; o primeiro argumento "" e o titulo da janela.
+      cmd = "cmd";
+      args = ["/c", "start", "", url];
+    } else if (process.platform === "darwin") {
+      cmd = "open";
+      args = [url];
+    } else {
+      cmd = "xdg-open";
+      args = [url];
+    }
+    const child = spawnImpl(cmd, args, { detached: true, stdio: "ignore" });
+    if (child && typeof child.unref === "function") child.unref();
+  } catch {
+    // segue: a URL ja foi impressa no stdout como fallback
+  }
+}
+
+/**
+ * Fluxo de login: sobe um servidor loopback EFEMERO em 127.0.0.1, abre o
+ * browser na pagina de consentimento do app (APP_BASE/cli/authorize), recebe o
+ * callback com o code, troca por { access_jwt, refresh } em /cli/token usando
+ * PKCE S256 e grava a credencial. Resolve true em sucesso; rejeita em
+ * erro/timeout. Aceita apenas UMA requisicao valida em /callback.
+ *
+ * Injecoes (teste): fetchImpl (troca de code), openImpl (abrir browser),
+ * log (mensagens de progresso), timeoutMs.
+ */
+export async function loginFlow({
+  fetchImpl = fetch,
+  openImpl = openBrowser,
+  log = (m) => console.log(m),
+  timeoutMs = LOGIN_TIMEOUT_MS,
+} = {}) {
+  const verifier = genCodeVerifier();
+  const challenge = challengeFromVerifier(verifier);
+  const state = genState();
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer = null;
+    let redirectUri = null;
+
+    const shutdown = (after) => {
+      if (timer) clearTimeout(timer);
+      try {
+        if (typeof server.closeAllConnections === "function") server.closeAllConnections();
+      } catch {
+        // ignore
+      }
+      server.close(() => after());
+    };
+    const succeed = (val) => {
+      if (settled) return;
+      settled = true;
+      shutdown(() => resolve(val));
+    };
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      shutdown(() => reject(err));
+    };
+
+    const server = http.createServer((req, res) => {
+      let url;
+      try {
+        url = new URL(req.url, "http://127.0.0.1");
+      } catch {
+        res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8", Connection: "close" });
+        res.end("requisicao invalida");
+        return;
+      }
+      // Trata apenas GET /callback; resto e 404 sem encerrar o fluxo.
+      if (req.method !== "GET" || url.pathname !== "/callback") {
+        res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8", Connection: "close" });
+        res.end("nao encontrado");
+        return;
+      }
+      const recvState = url.searchParams.get("state");
+      const code = url.searchParams.get("code");
+      // state divergente: 400 e IGNORA (nao encerra) — aceita so o callback valido.
+      if (recvState !== state) {
+        res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8", Connection: "close" });
+        res.end("state invalido");
+        return;
+      }
+      if (!code) {
+        res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8", Connection: "close" });
+        res.end("code ausente");
+        return;
+      }
+      // Callback valido: troca o code pelo par de tokens.
+      (async () => {
+        try {
+          const tokenRes = await fetchImpl(`${APP_BASE}/cli/token`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ code, code_verifier: verifier, redirect_uri: redirectUri }),
+          });
+          if (!tokenRes.ok) {
+            const body = await tokenRes.text().catch(() => "");
+            throw new Error(
+              `troca de code falhou (HTTP ${tokenRes.status})${body ? `: ${body}` : ""}`,
+            );
+          }
+          const data = await tokenRes.json();
+          if (!data || typeof data.access_jwt !== "string" || !data.access_jwt) {
+            throw new Error("resposta de /cli/token sem access_jwt");
+          }
+          writeCredential({ access_jwt: data.access_jwt, refresh: data.refresh });
+          log("Login concluido. Credencial salva.");
+          res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", Connection: "close" });
+          res.end(
+            "<!doctype html><html lang=pt-br><meta charset=utf-8>" +
+              "<title>Login concluido</title>" +
+              '<body style="font-family:system-ui,sans-serif;padding:2rem">' +
+              "<h1>Login concluido</h1><p>Pode fechar esta aba.</p></body></html>",
+            () => succeed(true),
+          );
+        } catch (err) {
+          const e = err instanceof Error ? err : new Error(String(err));
+          res.writeHead(500, { "Content-Type": "text/html; charset=utf-8", Connection: "close" });
+          res.end(
+            "<!doctype html><html lang=pt-br><meta charset=utf-8>" +
+              "<title>Falha no login</title>" +
+              '<body style="font-family:system-ui,sans-serif;padding:2rem">' +
+              `<h1>Falha no login</h1><p>${escapeHtml(e.message)}</p></body></html>`,
+            () => fail(e),
+          );
+        }
+      })();
+    });
+
+    server.on("error", (err) => fail(err));
+
+    // Porta EFEMERA (0), bind LITERAL 127.0.0.1 (nunca localhost/0.0.0.0).
+    // Forma de OBJETO de listen() para passar exclusive:true (a forma posicional
+    // listen(0, host, opts) interpretaria o objeto como backlog).
+    server.listen({ port: 0, host: "127.0.0.1", exclusive: true }, () => {
+      const addr = server.address();
+      const port = addr && typeof addr === "object" ? addr.port : null;
+      if (!port) {
+        fail(new Error("nao foi possivel obter a porta do loopback"));
+        return;
+      }
+      // redirect_uri SEM query/fragment e com path EXATO /callback (allowlist
+      // estrita do servidor: scheme http, host literal 127.0.0.1, path /callback).
+      redirectUri = `http://127.0.0.1:${port}/callback`;
+
+      const authorizeUrl = new URL("/cli/authorize", APP_BASE);
+      authorizeUrl.searchParams.set("response_type", "code");
+      authorizeUrl.searchParams.set("redirect_uri", redirectUri);
+      authorizeUrl.searchParams.set("code_challenge", challenge);
+      authorizeUrl.searchParams.set("code_challenge_method", "S256");
+      authorizeUrl.searchParams.set("state", state);
+      const authUrl = authorizeUrl.toString();
+
+      log("Abrindo o navegador para login...");
+      log(`Se o navegador nao abrir, acesse:\n${authUrl}`);
+      openImpl(authUrl);
+      log("Aguardando autorizacao...");
+
+      timer = setTimeout(() => {
+        fail(
+          new Error(
+            `Tempo esgotado (${Math.round(timeoutMs / 1000)}s) aguardando autorizacao no ` +
+              "navegador. Rode o login novamente.",
+          ),
+        );
+      }, timeoutMs);
+    });
+  });
 }

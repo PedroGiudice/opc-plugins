@@ -16,7 +16,7 @@ import { join, resolve, sep } from "node:path";
 import yaml from "js-yaml";
 import { memoriaSearch } from "./memoria.mjs";
 import { renderLines, buildCappedPayload, capContextChunks } from "./format.mjs";
-import { requestWithAuth, APP_BASE } from "./auth.mjs";
+import { requestWithAuth, APP_BASE, loginFlow } from "./auth.mjs";
 
 function defaultApiBase() {
   if (process.platform === "win32") return "http://100.123.73.128:8422/api";
@@ -816,5 +816,18 @@ server.tool(
 );
 
 // Start
-const transport = new StdioServerTransport();
-await server.connect(transport);
+// Subcomando `login`: dispara o fluxo OAuth loopback + PKCE e encerra o
+// processo. NUNCA sobe o MCP server neste modo — no modo MCP o stdout e o canal
+// JSON-RPC; aqui ele fica livre para as mensagens humanas do login.
+if (process.argv[2] === "login") {
+  try {
+    await loginFlow();
+    process.exit(0);
+  } catch (err) {
+    process.stderr.write(`Login falhou: ${err && err.message ? err.message : String(err)}\n`);
+    process.exit(1);
+  }
+} else {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}

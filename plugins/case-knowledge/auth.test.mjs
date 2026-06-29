@@ -19,6 +19,10 @@ import {
   getFreshAccessToken,
   requestWithAuth,
   credentialPath,
+  genCodeVerifier,
+  challengeFromVerifier,
+  genState,
+  loginFlow,
 } from "./auth.mjs";
 
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
@@ -93,7 +97,7 @@ test("refreshOnce: 401 (revogado) lanca 'rode login'", async (t) => {
   freshCred(t);
   writeCredential({ access_jwt: "old", refresh: "r-old" });
   const fakeFetch = async () => ({ ok: false, status: 401, text: async () => "revoked" });
-  await assert.rejects(() => refreshOnce(fakeFetch), /Rode: case-knowledge login/i);
+  await assert.rejects(() => refreshOnce(fakeFetch), /Rode: node .*server\.mjs login/i);
 });
 
 test("refreshOnce: sem credencial lanca acionavel (nao tenta rede)", async (t) => {
@@ -210,4 +214,104 @@ test("requestWithAuth: status nao-ok != 401 retorna a Response ao caller", async
   const doFetch = async () => ({ ok: false, status: 500 });
   const res = await requestWithAuth(doFetch, fakeFetch);
   assert.equal(res.status, 500); // caller decide (mantem "API 500: ...")
+});
+
+test("refreshOnce: resposta sem refresh preserva o refresh atual (defensivo)", async (t) => {
+  freshCred(t);
+  writeCredential({ access_jwt: "old", refresh: "r-keep" });
+  const fakeFetch = async () => ({ ok: true, status: 200, json: async () => ({ access_jwt: "novo" }) });
+  const out = await refreshOnce(fakeFetch);
+  assert.equal(out, "novo");
+  assert.deepEqual(readCredential(), { access_jwt: "novo", refresh: "r-keep" });
+});
+
+// --- PKCE ---
+
+test("challengeFromVerifier: vetor RFC 7636 Appendix B", () => {
+  assert.equal(
+    challengeFromVerifier("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+    "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+  );
+});
+
+test("genCodeVerifier: base64url no range 43-128 (RFC 7636), aleatorio", () => {
+  const v = genCodeVerifier();
+  assert.match(v, /^[A-Za-z0-9_-]+$/); // base64url sem padding
+  assert.ok(v.length >= 43 && v.length <= 128, `len=${v.length}`);
+  assert.notEqual(genCodeVerifier(), genCodeVerifier());
+});
+
+test("genState: nao-vazio e base64url", () => {
+  const s = genState();
+  assert.ok(s.length > 0);
+  assert.match(s, /^[A-Za-z0-9_-]+$/);
+});
+
+// --- loginFlow (loopback real + fetch/opener mockados) ---
+
+test("loginFlow: callback valido troca code, grava credencial e resolve", async (t) => {
+  freshCred(t); // AIDVLABS_CREDENTIALS_FILE -> storage em arquivo (deterministico)
+  let tokenBody = null;
+  const fetchImpl = async (url, opts) => {
+    assert.ok(String(url).endsWith("/cli/token"));
+    tokenBody = JSON.parse(opts.body);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ access_jwt: "jwt-login", refresh: "r-login", expires_in: 900 }),
+    };
+  };
+  let authParams = null;
+  // Simula o browser: le a URL de authorize e bate no loopback com code+state.
+  const openImpl = (urlStr) => {
+    const u = new URL(urlStr);
+    assert.ok(u.pathname.endsWith("/cli/authorize"));
+    authParams = {
+      redirect_uri: u.searchParams.get("redirect_uri"),
+      state: u.searchParams.get("state"),
+      challenge: u.searchParams.get("code_challenge"),
+      method: u.searchParams.get("code_challenge_method"),
+      response_type: u.searchParams.get("response_type"),
+    };
+    const cb = new URL(authParams.redirect_uri);
+    cb.searchParams.set("code", "opaque-code-123");
+    cb.searchParams.set("state", authParams.state);
+    fetch(cb).catch(() => {}); // fire-and-forget no loopback real
+  };
+  const out = await loginFlow({ fetchImpl, openImpl, log: () => {}, timeoutMs: 10_000 });
+  assert.equal(out, true);
+  assert.deepEqual(readCredential(), { access_jwt: "jwt-login", refresh: "r-login" });
+  // PKCE S256: o challenge da URL bate com o verifier enviado na troca.
+  assert.equal(authParams.method, "S256");
+  assert.equal(authParams.response_type, "code");
+  assert.equal(challengeFromVerifier(tokenBody.code_verifier), authParams.challenge);
+  // redirect_uri loopback literal, path exato, SEM query/fragment.
+  const ru = new URL(authParams.redirect_uri);
+  assert.equal(ru.protocol, "http:");
+  assert.equal(ru.hostname, "127.0.0.1");
+  assert.equal(ru.pathname, "/callback");
+  assert.equal(ru.search, "");
+  assert.equal(ru.hash, "");
+});
+
+test("loginFlow: callback com state errado -> 400, nao grava, timeout", async (t) => {
+  freshCred(t);
+  const fetchImpl = async () => {
+    throw new Error("/cli/token nao deveria ser chamado com state invalido");
+  };
+  let badStatus = null;
+  const openImpl = async (urlStr) => {
+    const u = new URL(urlStr);
+    const cb = new URL(u.searchParams.get("redirect_uri"));
+    cb.searchParams.set("code", "x");
+    cb.searchParams.set("state", "STATE-ERRADO");
+    const r = await fetch(cb);
+    badStatus = r.status;
+  };
+  await assert.rejects(
+    () => loginFlow({ fetchImpl, openImpl, log: () => {}, timeoutMs: 400 }),
+    /Tempo esgotado/i,
+  );
+  assert.equal(badStatus, 400);
+  assert.equal(readCredential(), null); // nada gravado
 });
