@@ -349,14 +349,19 @@ function escapeHtml(s) {
  * Abre a URL no browser do sistema (cross-platform). Best-effort: se falhar, o
  * usuario ainda tem a URL impressa no stdout.
  */
-export function openBrowser(url, spawnImpl = spawn) {
+export function openBrowser(url, spawnImpl = spawn, platform = process.platform) {
   try {
     let cmd, args;
-    if (process.platform === "win32") {
-      // 'start' e builtin do cmd; o primeiro argumento "" e o titulo da janela.
-      cmd = "cmd";
-      args = ["/c", "start", "", url];
-    } else if (process.platform === "darwin") {
+    if (platform === "win32") {
+      // rundll32 (um .exe direto, sem shell) recebe a URL como argumento
+      // literal: os `&` da query string NAO sao interpretados. `cmd /c start ""`
+      // tratava `&` como separador de comando e truncava a URL no 1o `&`,
+      // perdendo redirect_uri/code_challenge/state (era a causa do "invalid
+      // authorization request"). Tambem evita o escaping especial que o Node
+      // aplica a cmd.exe (CVE-2024-27980). Fallback: a URL ja sai no stdout.
+      cmd = "rundll32";
+      args = ["url.dll,FileProtocolHandler", url];
+    } else if (platform === "darwin") {
       cmd = "open";
       args = [url];
     } else {

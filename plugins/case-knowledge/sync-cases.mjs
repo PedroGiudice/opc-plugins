@@ -19,6 +19,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { requestWithAuth } from "./auth.mjs";
 
 // Espelha defaultApiBase/defaultCasesBase do server.mjs. Duplicado de
 // proposito: importar server.mjs executaria o server MCP (connect no
@@ -209,7 +210,13 @@ function writeBaseline(casesBase, baseline) {
 }
 
 async function fetchJson(url) {
-  const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+  // Bearer S2S via requestWithAuth: injeta Authorization quando ha credencial
+  // (login do plugin), faz refresh em 401, e DEGRADA sem credencial (segue sem
+  // Bearer -- preserva o uso atual na tailnet com require_bearer=false). Mesma
+  // credencial do MCP (keychain), entao o sync herda o login sem passo extra.
+  const res = await requestWithAuth((authHeaders) =>
+    fetch(url, { headers: authHeaders, signal: AbortSignal.timeout(10_000) }),
+  );
   if (!res.ok) throw new Error(`HTTP ${res.status} em ${url}`);
   return await res.json();
 }

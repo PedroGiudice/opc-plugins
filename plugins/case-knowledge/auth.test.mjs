@@ -23,6 +23,7 @@ import {
   challengeFromVerifier,
   genState,
   loginFlow,
+  openBrowser,
 } from "./auth.mjs";
 
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
@@ -56,6 +57,27 @@ test("readCredential: ausente -> null; corrompido -> null", (t) => {
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, "{ nao e json valido");
   assert.equal(readCredential(), null);
+});
+
+test("openBrowser: comando por plataforma, URL integra como argumento (sem truncar nos &)", () => {
+  const url = "https://app.aidvlabs.com/cli/authorize?response_type=code&redirect_uri=http://127.0.0.1:5500/callback&code_challenge=abc123&state=xyz789";
+  const cap = (platform) => {
+    const calls = [];
+    openBrowser(url, (cmd, args) => {
+      calls.push({ cmd, args });
+      return { unref() {} };
+    }, platform);
+    return calls[0];
+  };
+  // win32: rundll32 (.exe direto, sem cmd) -- nao trunca a URL no 1o `&`.
+  assert.deepEqual(cap("win32"), { cmd: "rundll32", args: ["url.dll,FileProtocolHandler", url] });
+  assert.deepEqual(cap("darwin"), { cmd: "open", args: [url] });
+  assert.deepEqual(cap("linux"), { cmd: "xdg-open", args: [url] });
+  // a URL completa (com redirect_uri/state apos os `&`) chega intacta em todas.
+  for (const p of ["win32", "darwin", "linux"]) {
+    assert.ok(cap(p).args.at(-1).includes("redirect_uri"));
+    assert.ok(cap(p).args.at(-1).includes("state=xyz789"));
+  }
 });
 
 test("getAccessToken: sem credencial lanca mensagem acionavel", (t) => {
