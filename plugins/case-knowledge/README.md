@@ -100,3 +100,33 @@ Verificar a saida "updated from X to Y".
 Arquitetura e runbooks do lado servidor:
 `/home/opc/legal-cogmem/CLAUDE.md` e
 `/home/opc/legal-cogmem/docs/runbooks/syncthing-espelho-transcripts.md`.
+
+## Auth compartilhada (aidvlabs-mcp)
+
+Os 3 plugins MCP (`case-knowledge`, `stj-vec-tools`, `legal-vec-tools`)
+compartilham um unico login via keychain do SO (service `aidvlabs-mcp`,
+account `default`). `auth.mjs` e uma copia byte-identica nos 3 (teste de
+paridade `auth.parity.test.mjs`, dev-clone-only). O login e no app publico
+`https://app.aidvlabs.com`; as tools batem nas APIs Rust.
+
+### Smoke test (manual)
+
+1. Login (grava a credencial compartilhada `aidvlabs-mcp`):
+   `node plugins/case-knowledge/server.mjs login`
+   -> abre o browser, consente, callback loopback, "Login concluido".
+
+2. Os OUTROS dois NAO exigem novo login (leem a mesma entrada do keychain):
+   `node -e 'import("./plugins/stj-vec-tools/auth.mjs").then(m=>console.log(!!m.readCredential()))'`
+   -> `true`.
+
+3. Bearer injetado (com API alcancavel via tailnet/publico): qualquer tool
+   dos 3 responde 200 com `Authorization: Bearer`. Sem credencial, degrada
+   para sem Bearer (compat tailnet `require_bearer=false`); so 401 efetivo
+   pede login.
+
+4. Concorrencia (D7): MCP + sync rotacionam sem revogar a family — lock
+   `<dir-cred>/aidvlabs-mcp.lock` serializa (teste automatizado cobre).
+
+### Testes
+
+`cd plugins/<plugin> && node --test`
