@@ -13,6 +13,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { requestWithAuth, loginFlow } from "./auth.mjs";
 
 // legal-vec-api roda na VM; o default aponta pro IP tailnet, alcancavel de
 // qualquer cliente na tailnet. O default antigo 127.0.0.1 batia no loopback do
@@ -66,11 +67,16 @@ async function fetchWithRetry(url, options = {}) {
  * POST request to the Rust search API.
  */
 async function apiPost(path, body) {
-  const res = await fetchWithRetry(`${API_BASE}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  // requestWithAuth injeta o Bearer (quando ha credencial), refresca proativo
+  // (<60s) e reativo (401 -> refresh -> 1 retry). Sem credencial -> degrade sem
+  // Bearer (compat tailnet require_bearer=false).
+  const res = await requestWithAuth((authHeaders) =>
+    fetchWithRetry(`${API_BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders },
+      body: JSON.stringify(body),
+    })
+  );
 
   if (!res.ok) {
     const text = await res.text();
@@ -84,7 +90,9 @@ async function apiPost(path, body) {
  * GET request to the Rust search API.
  */
 async function apiGet(path) {
-  const res = await fetchWithRetry(`${API_BASE}${path}`);
+  const res = await requestWithAuth((authHeaders) =>
+    fetchWithRetry(`${API_BASE}${path}`, { headers: { ...authHeaders } })
+  );
 
   if (!res.ok) {
     const text = await res.text();
@@ -98,7 +106,7 @@ async function apiGet(path) {
 
 const server = new McpServer({
   name: "legal-vec-tools",
-  version: "0.4.0",
+  version: "0.5.0",
 });
 
 // Tool: search
@@ -249,5 +257,18 @@ server.tool(
 );
 
 // Start
-const transport = new StdioServerTransport();
-await server.connect(transport);
+// Subcomando `login`: dispara o fluxo OAuth loopback + PKCE e encerra o
+// processo. NUNCA sobe o MCP server neste modo — no modo MCP o stdout e o canal
+// JSON-RPC; aqui ele fica livre para as mensagens humanas do login.
+if (process.argv[2] === "login") {
+  try {
+    await loginFlow();
+    process.exit(0);
+  } catch (err) {
+    process.stderr.write(`Login falhou: ${err && err.message ? err.message : String(err)}\n`);
+    process.exit(1);
+  }
+} else {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
