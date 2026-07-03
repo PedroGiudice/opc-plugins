@@ -344,3 +344,21 @@ test("loginFlow: callback com state errado -> 400, nao grava, timeout", async (t
 test("KEYCHAIN_SERVICE e 'aidvlabs-mcp' (1 login serve os 3 plugins)", () => {
   assert.equal(KEYCHAIN_SERVICE, "aidvlabs-mcp");
 });
+
+// --- D7: lock de refresh concorrente (MCP + sync compartilham a credencial) ---
+
+test("refreshOnce: 2 concorrentes -> 1 rotaciona, o outro reusa (D7 lock)", async (t) => {
+  freshCred(t); // AIDVLABS_CREDENTIALS_FILE -> storage em arquivo (lock no mesmo dir)
+  writeCredential({ access_jwt: "old", refresh: "r-old" });
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls++;
+    await new Promise((r) => setTimeout(r, 30)); // segura o lock enquanto o outro espera
+    return { ok: true, status: 200, json: async () => ({ access_jwt: "rotated", refresh: "r-new" }) };
+  };
+  const [a, b] = await Promise.all([refreshOnce(fetchImpl), refreshOnce(fetchImpl)]);
+  assert.equal(calls, 1); // so um bateu na rede
+  assert.equal(a, "rotated");
+  assert.equal(b, "rotated"); // o segundo reusou a credencial ja rotacionada
+  assert.deepEqual(readCredential(), { access_jwt: "rotated", refresh: "r-new" });
+});

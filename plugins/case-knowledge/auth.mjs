@@ -12,7 +12,7 @@
  *   - APP_BASE (este modulo): o app Laravel publico onde /cli/token* vivem.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, openSync, closeSync, unlinkSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
@@ -219,39 +219,101 @@ export function decodeJwtExp(jwt) {
   }
 }
 
+// --- D7: file-lock para serializar refresh entre processos (MCP + sync) ---
+
+/** Sleep interno (auth.mjs nao tinha um). */
+function sleepMs(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Path do lock: irmao do arquivo de credencial. Compartilhado pelos 3 plugins. */
+export function lockPath() {
+  return join(dirname(credentialPath()), "aidvlabs-mcp.lock");
+}
+
+const LOCK_STALE_MS = 15_000;
+const LOCK_RETRY_MS = 50;
+const LOCK_MAX_WAIT_MS = 10_000;
+
+/**
+ * Adquire lock exclusivo via open('wx'). Retorna o fd. Rouba lock stale
+ * (mtime > LOCK_STALE_MS) e, no fim da janela de espera, rouba para nao
+ * travar indefinidamente. NUNCA promete fairness: so serializa.
+ */
+async function acquireLock() {
+  const path = lockPath();
+  const posix = process.platform !== "win32";
+  mkdirSync(dirname(path), { recursive: true, ...(posix ? { mode: 0o700 } : {}) });
+  const deadline = Date.now() + LOCK_MAX_WAIT_MS;
+  for (;;) {
+    try {
+      const fd = openSync(path, "wx");
+      try { writeFileSync(fd, String(process.pid)); } catch { /* best-effort */ }
+      return fd;
+    } catch (err) {
+      if (!err || err.code !== "EEXIST") throw err;
+      try {
+        const age = Date.now() - statSync(path).mtimeMs;
+        if (age > LOCK_STALE_MS) { unlinkSync(path); continue; }
+      } catch { continue; /* sumiu entre stat e unlink: retenta */ }
+      if (Date.now() > deadline) { try { unlinkSync(path); } catch {} continue; }
+      await sleepMs(LOCK_RETRY_MS);
+    }
+  }
+}
+
+/** Libera o lock: fecha o fd e remove o arquivo (best-effort). */
+function releaseLock(fd) {
+  try { closeSync(fd); } catch {}
+  try { unlinkSync(lockPath()); } catch {}
+}
+
 /**
  * Troca o refresh por um novo par (rotacao). POST {APP_BASE}/cli/token/refresh.
  * 2xx -> grava { access_jwt, refresh } e retorna o novo access_jwt.
  * nao-2xx (ex. 401 = refresh revogado) -> lanca mensagem acionavel.
  */
 export async function refreshOnce(fetchImpl = fetch) {
-  const cred = readCredential();
-  if (!cred || !cred.refresh) throw noCredentialError();
+  const before = readCredential();
+  if (!before || !before.refresh) throw noCredentialError();
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REFRESH_TIMEOUT_MS);
-  let res;
+  const fd = await acquireLock();
   try {
-    res = await fetchImpl(`${APP_BASE}/cli/token/refresh`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh: cred.refresh }),
-      signal: controller.signal,
-    });
+    // Re-le SOB o lock: se outro processo ja rotacionou, o access_jwt mudou ->
+    // reusa o novo token em vez de rotacionar de novo (rotacao dupla revogaria
+    // a family). Compara pelo access_jwt (rotacao sempre o troca).
+    const current = readCredential();
+    if (current && current.access_jwt && current.access_jwt !== before.access_jwt) {
+      return current.access_jwt;
+    }
+    const refresh = current && current.refresh ? current.refresh : before.refresh;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REFRESH_TIMEOUT_MS);
+    let res;
+    try {
+      res = await fetchImpl(`${APP_BASE}/cli/token/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!res.ok) throw new Error(MSG_SESSION_EXPIRED);
+
+    const data = await res.json();
+    if (!data || typeof data.access_jwt !== "string" || !data.access_jwt) {
+      throw new Error(MSG_SESSION_EXPIRED);
+    }
+    // Defensivo: se a resposta omitir o refresh, preserva o atual.
+    writeCredential({ access_jwt: data.access_jwt, refresh: data.refresh ?? refresh });
+    return data.access_jwt;
   } finally {
-    clearTimeout(timer);
+    releaseLock(fd);
   }
-
-  if (!res.ok) throw new Error(MSG_SESSION_EXPIRED);
-
-  const data = await res.json();
-  if (!data || typeof data.access_jwt !== "string" || !data.access_jwt) {
-    throw new Error(MSG_SESSION_EXPIRED);
-  }
-  // Defensivo: se a resposta omitir o refresh, preserva o atual (nao perde a
-  // capacidade de renovar por causa de um payload incompleto).
-  writeCredential({ access_jwt: data.access_jwt, refresh: data.refresh ?? cred.refresh });
-  return data.access_jwt;
 }
 
 /**
