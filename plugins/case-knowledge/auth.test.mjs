@@ -24,6 +24,7 @@ import {
   genState,
   loginFlow,
   openBrowser,
+  KEYCHAIN_SERVICE,
 } from "./auth.mjs";
 
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
@@ -336,4 +337,10 @@ test("loginFlow: callback com state errado -> 400, nao grava, timeout", async (t
   );
   assert.equal(badStatus, 400);
   assert.equal(readCredential(), null); // nada gravado
+});
+
+// --- Keychain compartilhado entre os 3 plugins (aidvlabs-mcp) ---
+
+test("KEYCHAIN_SERVICE e 'aidvlabs-mcp' (1 login serve os 3 plugins)", () => {
+  assert.equal(KEYCHAIN_SERVICE, "aidvlabs-mcp");
 });

@@ -70,8 +70,10 @@ export function credentialPath() {
 
 // --- Storage: keychain do SO com fallback para arquivo 0600 ---
 
-/** Identidade da credencial no keychain do SO (1 por usuario/maquina). */
-const KEYCHAIN_SERVICE = "aidvlabs-case-knowledge";
+/** Identidade da credencial no keychain do SO (1 por usuario/maquina).
+ * COMPARTILHADO pelos 3 plugins MCP (case-knowledge, stj-vec-tools,
+ * legal-vec-tools): um unico login popula esta entrada e serve os tres. */
+export const KEYCHAIN_SERVICE = "aidvlabs-mcp";
 const KEYCHAIN_ACCOUNT = "default";
 
 /** Cache do modulo keyring: undefined=nao tentado | null=indisponivel | modulo. */
