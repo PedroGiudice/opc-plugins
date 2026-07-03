@@ -6,6 +6,9 @@ import {
   statSync,
   mkdirSync,
   writeFileSync,
+  readFileSync,
+  existsSync,
+  utimesSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 import os from "node:os";
@@ -19,6 +22,7 @@ import {
   getFreshAccessToken,
   requestWithAuth,
   credentialPath,
+  lockPath,
   genCodeVerifier,
   challengeFromVerifier,
   genState,
@@ -361,4 +365,46 @@ test("refreshOnce: 2 concorrentes -> 1 rotaciona, o outro reusa (D7 lock)", asyn
   assert.equal(a, "rotated");
   assert.equal(b, "rotated"); // o segundo reusou a credencial ja rotacionada
   assert.deepEqual(readCredential(), { access_jwt: "rotated", refresh: "r-new" });
+});
+
+// Correcao do D7: com LOCK_STALE_MS < REFRESH_TIMEOUT_MS o antigo lock roubava
+// de holder VIVO (rotacao dupla). Agora so rouba de holder genuinamente morto
+// (mtime > LOCK_STALE_MS = 90s > budget de refresh 60s).
+test("refreshOnce: rouba lock STALE de holder morto e rotaciona 1x (D7 timings)", async (t) => {
+  freshCred(t);
+  writeCredential({ access_jwt: "old", refresh: "r-old" });
+  // Pre-cria o lock de um "holder morto" com mtime bem antigo (> LOCK_STALE_MS).
+  const lp = lockPath();
+  mkdirSync(dirname(lp), { recursive: true });
+  writeFileSync(lp, "111111:1"); // token de outro pid (irrelevante ao roubo)
+  const past = new Date(Date.now() - 120_000); // 120s > 90s stale
+  utimesSync(lp, past, past);
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls++;
+    return { ok: true, status: 200, json: async () => ({ access_jwt: "rotated", refresh: "r-new" }) };
+  };
+  const out = await refreshOnce(fetchImpl);
+  assert.equal(out, "rotated");
+  assert.equal(calls, 1); // roubou o stale e rotacionou (nao travou ate o deadline)
+  assert.deepEqual(readCredential(), { access_jwt: "rotated", refresh: "r-new" });
+});
+
+// Correcao do D7: releaseLock so apaga o proprio lock. Se outro detentor
+// substituiu o arquivo (roubo como stale + recriacao), o release do holder
+// original NAO pode apagar o lock do novo dono (quebraria a exclusao mutua).
+test("releaseLock: nao apaga lock substituido por OUTRO detentor (posse por token)", async (t) => {
+  freshCred(t);
+  writeCredential({ access_jwt: "old", refresh: "r-old" });
+  const FOREIGN = "999999:424242"; // token de um "novo detentor"
+  const fetchImpl = async () => {
+    // Enquanto ESTE holder faz a rede (segurando o lock), simula outro processo
+    // assumindo o lock: sobrescreve o arquivo com um token diferente.
+    writeFileSync(lockPath(), FOREIGN);
+    return { ok: true, status: 200, json: async () => ({ access_jwt: "rotated", refresh: "r-new" }) };
+  };
+  await refreshOnce(fetchImpl);
+  // O release viu conteudo != seu token -> preservou o lock do "novo detentor".
+  assert.ok(existsSync(lockPath()), "lock do novo detentor foi apagado indevidamente");
+  assert.equal(readFileSync(lockPath(), "utf-8"), FOREIGN);
 });

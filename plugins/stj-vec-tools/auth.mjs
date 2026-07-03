@@ -231,41 +231,69 @@ export function lockPath() {
   return join(dirname(credentialPath()), "aidvlabs-mcp.lock");
 }
 
-const LOCK_STALE_MS = 15_000;
+// Um lock so pode ser considerado ABANDONADO depois que um refresh legitimo
+// (budget REFRESH_TIMEOUT_MS = 60s via AbortController) ja teria terminado.
+// LOCK_STALE_MS/LOCK_MAX_WAIT_MS < REFRESH_TIMEOUT_MS roubava o lock de um
+// holder VIVO -> o ladrao fazia SUA propria chamada de rede lendo `current`
+// ainda "old" -> rotacao dupla (o exato risco que o D7 previne: rotacao dupla
+// pode revogar a family). Por isso 90s (> 60s + margem): so rouba de holder
+// genuinamente morto; um holder vivo termina em <60s e LIBERA, entao o waiter
+// re-le e REUSA em vez de roubar.
+const LOCK_STALE_MS = 90_000;
 const LOCK_RETRY_MS = 50;
-const LOCK_MAX_WAIT_MS = 10_000;
+const LOCK_MAX_WAIT_MS = 90_000;
 
 /**
- * Adquire lock exclusivo via open('wx'). Retorna o fd. Rouba lock stale
- * (mtime > LOCK_STALE_MS) e, no fim da janela de espera, rouba para nao
- * travar indefinidamente. NUNCA promete fairness: so serializa.
+ * Adquire lock exclusivo via open('wx'). Grava um TOKEN de posse unico
+ * (`${pid}:${Date.now()}`) no arquivo e retorna { fd, token } — o token deixa
+ * o release apagar SO o proprio lock (nao o de um novo detentor). Rouba lock
+ * stale (mtime > LOCK_STALE_MS = holder morto) e, no fim da janela de espera
+ * (LOCK_MAX_WAIT_MS), rouba para nao travar indefinidamente. Todo ramo que NAO
+ * adquire dorme LOCK_RETRY_MS antes de retentar -> nunca ha busy-loop. NUNCA
+ * promete fairness: so serializa.
  */
 async function acquireLock() {
   const path = lockPath();
   const posix = process.platform !== "win32";
   mkdirSync(dirname(path), { recursive: true, ...(posix ? { mode: 0o700 } : {}) });
   const deadline = Date.now() + LOCK_MAX_WAIT_MS;
+  const token = `${process.pid}:${Date.now()}`;
   for (;;) {
     try {
       const fd = openSync(path, "wx");
-      try { writeFileSync(fd, String(process.pid)); } catch { /* best-effort */ }
-      return fd;
+      try { writeFileSync(fd, token); } catch { /* best-effort */ }
+      return { fd, token };
     } catch (err) {
       if (!err || err.code !== "EEXIST") throw err;
-      try {
-        const age = Date.now() - statSync(path).mtimeMs;
-        if (age > LOCK_STALE_MS) { unlinkSync(path); continue; }
-      } catch { continue; /* sumiu entre stat e unlink: retenta */ }
-      if (Date.now() > deadline) { try { unlinkSync(path); } catch {} continue; }
-      await sleepMs(LOCK_RETRY_MS);
     }
+    // EEXIST: outro detentor. Decide roubo (stale OU deadline) e SEMPRE dorme
+    // LOCK_RETRY_MS antes de retentar -> nenhum ramo faz spin apertado.
+    let steal = false;
+    try {
+      const age = Date.now() - statSync(path).mtimeMs;
+      if (age > LOCK_STALE_MS) steal = true;
+    } catch {
+      // sumiu entre a falha e o stat: apenas retenta (dorme abaixo)
+    }
+    if (!steal && Date.now() > deadline) steal = true;
+    if (steal) { try { unlinkSync(path); } catch {} }
+    await sleepMs(LOCK_RETRY_MS);
   }
 }
 
-/** Libera o lock: fecha o fd e remove o arquivo (best-effort). */
-function releaseLock(fd) {
+/**
+ * Libera o lock: fecha o fd SEMPRE; e so apaga o arquivo se o conteudo atual
+ * ainda for o `token` que ESTE holder gravou. Se o arquivo sumiu ou ja e de
+ * outro detentor (ex: foi roubado como stale e recriado), NAO apaga — apagar o
+ * lock alheio quebraria a exclusao mutua do novo dono. Leitura best-effort.
+ */
+function releaseLock(fd, token) {
   try { closeSync(fd); } catch {}
-  try { unlinkSync(lockPath()); } catch {}
+  try {
+    if (readFileSync(lockPath(), "utf-8") === token) unlinkSync(lockPath());
+  } catch {
+    // arquivo ausente/ilegivel: nada a apagar
+  }
 }
 
 /**
@@ -277,7 +305,7 @@ export async function refreshOnce(fetchImpl = fetch) {
   const before = readCredential();
   if (!before || !before.refresh) throw noCredentialError();
 
-  const fd = await acquireLock();
+  const { fd, token } = await acquireLock();
   try {
     // Re-le SOB o lock: se outro processo ja rotacionou, o access_jwt mudou ->
     // reusa o novo token em vez de rotacionar de novo (rotacao dupla revogaria
@@ -312,7 +340,7 @@ export async function refreshOnce(fetchImpl = fetch) {
     writeCredential({ access_jwt: data.access_jwt, refresh: data.refresh ?? refresh });
     return data.access_jwt;
   } finally {
-    releaseLock(fd);
+    releaseLock(fd, token);
   }
 }
 
