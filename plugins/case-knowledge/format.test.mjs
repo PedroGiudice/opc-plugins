@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { truncateContent, previewResult, renderLines, buildCappedPayload, capContextChunks } from "./format.mjs";
+import { truncateContent, previewResult, renderLines, buildCappedPayload, capContextChunks, renderDocumentChunks } from "./format.mjs";
 
 test("truncateContent: content curto retorna intacto", () => {
   const r = truncateContent("texto curto", 1200);
@@ -245,4 +245,61 @@ test("capContextChunks: array vazio retorna vazio sem reduzir", () => {
   const { chunks, reduced } = capContextChunks([], 5, 60000);
   assert.deepEqual(chunks, []);
   assert.equal(reduced, false);
+});
+
+test("renderDocumentChunks: ordena por chunk_index e rende sequencial", () => {
+  const out = renderDocumentChunks([
+    { chunk_index: 2, content: "terceiro" },
+    { chunk_index: 0, content: "primeiro" },
+    { chunk_index: 1, content: "segundo" },
+  ]);
+  assert.equal(out.total, 3);
+  assert.equal(out.delivered, 3);
+  assert.equal(out.delivered_from, 0);
+  assert.equal(out.delivered_to, 2);
+  assert.equal(out.truncated, false);
+  assert.equal(out.next_from, null);
+  assert.match(out.text, /--- chunk 0 ---\nprimeiro[\s\S]*--- chunk 1 ---\nsegundo[\s\S]*--- chunk 2 ---\nterceiro/);
+});
+
+test("renderDocumentChunks: from_chunk filtra o inicio", () => {
+  const out = renderDocumentChunks(
+    [
+      { chunk_index: 0, content: "a" },
+      { chunk_index: 1, content: "b" },
+      { chunk_index: 2, content: "c" },
+    ],
+    { fromChunk: 1 }
+  );
+  assert.equal(out.delivered, 2);
+  assert.equal(out.delivered_from, 1);
+  assert.equal(out.total, 3);
+  assert.ok(!out.text.includes("chunk 0"));
+});
+
+test("renderDocumentChunks: cap trunca e aponta next_from", () => {
+  const big = "x".repeat(500);
+  const chunks = Array.from({ length: 10 }, (_, i) => ({ chunk_index: i, content: big }));
+  const out = renderDocumentChunks(chunks, { globalCap: 1200 });
+  assert.equal(out.truncated, true);
+  assert.equal(out.delivered, 2); // 2 chunks de ~540 cabem em 1200
+  assert.equal(out.delivered_to, 1);
+  assert.equal(out.next_from, 2);
+});
+
+test("renderDocumentChunks: primeiro chunk entra mesmo acima do cap", () => {
+  const out = renderDocumentChunks(
+    [{ chunk_index: 0, content: "y".repeat(5000) }],
+    { globalCap: 100 }
+  );
+  assert.equal(out.delivered, 1);
+  assert.equal(out.truncated, false);
+});
+
+test("renderDocumentChunks: from_chunk alem do fim retorna vazio sem lancar", () => {
+  const out = renderDocumentChunks([{ chunk_index: 0, content: "a" }], { fromChunk: 99 });
+  assert.equal(out.delivered, 0);
+  assert.equal(out.delivered_from, null);
+  assert.equal(out.next_from, null);
+  assert.equal(out.total, 1);
 });

@@ -116,6 +116,44 @@ export function buildCappedPayload({ lists, render, contentChars = 1200, globalC
 }
 
 /**
+ * Renderiza os chunks de um documento INTEIRO em ordem sequencial
+ * (tool `document`). Conteudo integral, nunca preview — leitura de peca
+ * completa e a razao de existir da tool. Quando o documento nao cabe no
+ * cap, entrega o prefixo que coube e informa `next_from` para o caller
+ * continuar na proxima chamada (fatiamento sequencial, nunca amostra).
+ */
+export function renderDocumentChunks(chunks, { fromChunk = 0, globalCap = 60000 } = {}) {
+  const OVERHEAD_PER_CHUNK = 40; // separadores "--- chunk N ---"
+  const ordered = [...(chunks || [])].sort(
+    (a, b) => (a.chunk_index ?? 0) - (b.chunk_index ?? 0)
+  );
+  const total = ordered.length;
+  const eligible = ordered.filter((c) => (c.chunk_index ?? 0) >= fromChunk);
+  const kept = [];
+  let size = 0;
+  for (const c of eligible) {
+    const s = (c.content?.length || 0) + OVERHEAD_PER_CHUNK;
+    // O primeiro chunk entra mesmo acima do cap (nunca entregar zero por
+    // causa de um chunk grande; max real de chunk ~32k chars < cap).
+    if (kept.length > 0 && size + s > globalCap) break;
+    kept.push(c);
+    size += s;
+  }
+  const truncated = kept.length < eligible.length;
+  return {
+    text: kept
+      .map((c) => `--- chunk ${c.chunk_index} ---\n${c.content ?? ""}`)
+      .join("\n\n"),
+    total,
+    delivered: kept.length,
+    delivered_from: kept.length > 0 ? kept[0].chunk_index : null,
+    delivered_to: kept.length > 0 ? kept[kept.length - 1].chunk_index : null,
+    truncated,
+    next_from: truncated ? eligible[kept.length].chunk_index : null,
+  };
+}
+
+/**
  * Reduz a janela da tool `contexto` quando o total estoura o cap: remove
  * chunks das extremidades (sempre o mais DISTANTE do central primeiro).
  * O chunk central nunca e removido nem truncado — a leitura na integra

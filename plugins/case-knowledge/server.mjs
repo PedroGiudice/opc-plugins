@@ -11,11 +11,16 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import yaml from "js-yaml";
 import { memoriaSearch } from "./memoria.mjs";
-import { renderLines, buildCappedPayload, capContextChunks } from "./format.mjs";
+import {
+  renderLines,
+  buildCappedPayload,
+  capContextChunks,
+  renderDocumentChunks,
+} from "./format.mjs";
 import { requestWithAuth, APP_BASE, loginFlow } from "./auth.mjs";
 
 function defaultApiBase() {
@@ -113,9 +118,22 @@ const WIN_DRIVE = /^[a-z]:(\\|\/|$)/i;
  * em lowercase (CMR-99 item 1, mesma regra do caseSlugFromCwd do hook).
  * O nome do caso preserva o casing original do path.
  */
+/** Canonicaliza symlinks: process.cwd() retorna path FISICO, e na VM
+ * cases/ e symlink pra tenants/1/cases (migracao SaaS 18/06) — sem
+ * realpath nos DOIS lados, cwd fisico nunca casa com base logica e
+ * detectCase falha em toda sessao de caso na VM. Path inexistente
+ * (tests, race) cai no proprio input. */
+function physicalPath(p) {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
 function detectCase() {
-  const cwd = resolve(process.cwd());
-  const base = resolve(CASES_BASE);
+  const cwd = physicalPath(resolve(process.cwd()));
+  const base = physicalPath(resolve(CASES_BASE));
 
   const insensitive = WIN_DRIVE.test(cwd) && WIN_DRIVE.test(base);
   const cwdF = insensitive ? cwd.toLowerCase() : cwd;
@@ -168,10 +186,30 @@ function resolveCasos(casos) {
 
 // --- MCP Server ---
 
-const server = new McpServer({
-  name: "case-knowledge",
-  version: "0.4.0",
-});
+/** Versao unica: lida do plugin.json (a fonte do bump de release). */
+const PLUGIN_VERSION = (() => {
+  try {
+    return JSON.parse(
+      readFileSync(new URL("./.claude-plugin/plugin.json", import.meta.url), "utf-8")
+    ).version;
+  } catch {
+    return "0.0.0";
+  }
+})();
+
+const server = new McpServer(
+  { name: "case-knowledge", version: PLUGIN_VERSION },
+  {
+    instructions: [
+      "Tools sobre os DOCUMENTOS do caso ativo (derivado do cwd). Guia de decisao:",
+      "- Abrir sessao / entender o caso: metadata -> manifesto -> stats; memoria_search para o que ja foi feito/decidido em sessoes anteriores.",
+      "- Achar tema/argumento: search (filtros peca/fase/documento/categoria). Dois temas que precisam aparecer JUNTOS: buscar_interseccao. Os mais recentes sobre um tema: buscar_cronologico. Panorama por documentos distintos: buscar_diversificado. Mais-como-este a partir de chunks: recommend. Na direcao de X evitando Y: discover.",
+      "- Ler na INTEGRA: contexto (janela ao redor de um chunk do search) ou document (peca inteira em ordem sequencial). O content do search e PREVIEW — nunca citar/transcrever a partir dele.",
+      "- Contar/mapear valores de campo: facet. Citacoes do caso: facet em processos_citados/recursos_citados/sumulas_citadas/temas_repetitivos/dispositivos_citados; onde mais os autos citam um item: cross_ref.",
+      "- Repeticao/duplicata entre pecas: comparar.",
+    ].join("\n"),
+  }
+);
 
 // Tool: search
 server.tool(
@@ -811,6 +849,109 @@ server.tool(
       return { content: [{ type: "text", text: JSON.stringify(data.groups, null, 2) }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Erro: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// Tool: document — peca inteira em ordem sequencial (Qdrant scroll)
+server.tool(
+  "document",
+  "Retorna um documento/peca INTEIRO do caso, chunks completos em ordem sequencial " +
+    "(Qdrant scroll, sem query vetorial). Caminho canonico para ler uma peca do inicio " +
+    "ao fim — complementa contexto, que abre janela ao redor de UM chunk achado no search. " +
+    "Use o nome EXATO do campo 'documento' (resultados de search, manifesto ou facet). " +
+    "Se o documento nao couber no limite de output, entrega o prefixo que coube e indica " +
+    "from_chunk para continuar na proxima chamada (fatiamento sequencial). " +
+    "Conteudo INTEGRAL, nunca preview — apto para transcricao e citacao.",
+  {
+    documento: z.string()
+      .describe("Nome exato do documento (campo 'documento' de search/manifesto/facet)"),
+    from_chunk: z.number().int().min(0).default(0)
+      .describe("chunk_index inicial (default 0). Use o next_from do aviso de truncamento para continuar a leitura."),
+  },
+  async ({ documento, from_chunk }) => {
+    try {
+      if (!CASE) {
+        throw new Error("Sessao nao esta dentro de um caso.");
+      }
+      const data = await apiGet(
+        `/cases/${CASE.name}/document/${encodeURIComponent(documento)}`
+      );
+      const out = renderDocumentChunks(data.chunks || [], {
+        fromChunk: from_chunk,
+        globalCap: OUTPUT_CAP_CHARS,
+      });
+      if (out.delivered === 0) {
+        return {
+          content: [{
+            type: "text",
+            text: `Nenhum chunk com chunk_index >= ${from_chunk} em '${documento}' (total: ${out.total} chunks).`,
+          }],
+        };
+      }
+      const notice = out.truncated
+        ? `[aviso: documento maior que o limite de output — entregue ate o chunk ${out.delivered_to} ` +
+          `de ${out.total}. Continue com from_chunk=${out.next_from}.]\n`
+        : "";
+      const header =
+        `Documento: ${documento}\n` +
+        `Chunks ${out.delivered_from}-${out.delivered_to} de ${out.total} (ordem sequencial)\n\n`;
+      return { content: [{ type: "text", text: notice + header + out.text }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Erro no document: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// Tool: cross_ref — onde mais os autos citam um item (processo/sumula/tema/...)
+server.tool(
+  "cross_ref",
+  "Rastreia uma citacao pelos autos: dado o tipo e o valor canonico de um item citado " +
+    "(processo, recurso, sumula, tema repetitivo ou dispositivo legal), retorna os chunks " +
+    "de TODOS os documentos do caso que citam o mesmo item, agrupados por documento. " +
+    "Use para 'onde mais nos autos citaram X'. Valores canonicos vem do facet nos campos " +
+    "processos_citados/recursos_citados/sumulas_citadas/temas_repetitivos/dispositivos_citados " +
+    "(ex: 'REsp 1234567/SP', 'STJ-297', '988'). O content retornado e preview — integra via " +
+    "contexto/document.",
+  {
+    kind: z.enum(["processo", "recurso", "sumula", "tema", "dispositivo"])
+      .describe("Tipo da citacao"),
+    value: z.string()
+      .describe("Valor canonico do item citado (como aparece no facet do campo *_citados)"),
+    exclude_documento: z.string().optional()
+      .describe("Documento de origem a excluir do resultado (ex: o proprio doc onde voce achou a citacao)"),
+    limit: z.number().int().min(1).max(200).default(50)
+      .describe("Maximo de chunks retornados (default 50)"),
+  },
+  async ({ kind, value, exclude_documento, limit }) => {
+    try {
+      if (!CASE) {
+        throw new Error("Sessao nao esta dentro de um caso.");
+      }
+      const params = new URLSearchParams({ kind, value, limit: String(limit) });
+      if (exclude_documento) params.set("exclude_documento", exclude_documento);
+      const data = await apiGet(`/cases/${CASE.name}/cross_ref?${params}`);
+      const groups = data.by_documento || [];
+      if (groups.length === 0) {
+        return {
+          content: [{ type: "text", text: `Nenhuma ocorrencia de ${kind}='${value}' nos autos.` }],
+        };
+      }
+      const lists = groups.map((g) => g.hits || []);
+      const { text, degraded } = buildCappedPayload({
+        lists,
+        render: (pls) =>
+          groups
+            .map((g, i) => `=== documento: ${g.documento} (${g.count} ocorrencias) ===\n${renderLines(pls[i])}`)
+            .join("\n\n"),
+        contentChars: 600,
+        globalCap: OUTPUT_CAP_CHARS,
+      });
+      const header =
+        `Cross-ref ${kind}='${value}' — ${data.total_hits} ocorrencias em ${groups.length} documentos\n\n`;
+      return { content: [{ type: "text", text: degradeNotice(degraded, 600) + header + text }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Erro no cross_ref: ${err.message}` }], isError: true };
     }
   }
 );

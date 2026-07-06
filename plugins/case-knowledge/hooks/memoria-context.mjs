@@ -10,6 +10,7 @@
  * LEGAL_COGMEM_API_BASE.
  */
 
+import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -128,9 +129,19 @@ async function main() {
     /* stdin invalido -> segue com {} */
   }
   const prompt = input.userPrompt ?? input.user_prompt ?? input.prompt ?? "";
-  const cwd = input.cwd ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
+  const rawCwd = input.cwd ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
+  // Canonicaliza symlinks nos DOIS lados (na VM cases/ -> tenants/1/cases;
+  // process.cwd()/getcwd retornam path FISICO). Path inexistente cai no input.
+  const physical = (p) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return p;
+    }
+  };
+  const cwd = physical(rawCwd);
 
-  const slug = caseSlugFromCwd(cwd);
+  const slug = caseSlugFromCwd(cwd, physical(CASES_BASE));
   if (!slug || shouldSkipPrompt(prompt)) {
     console.log("{}");
     return;
