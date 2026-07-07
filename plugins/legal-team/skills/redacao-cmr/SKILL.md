@@ -53,14 +53,27 @@ podem ser simples ou complexos; a estrutura acompanha o grau de complexidade.
 ### Periodo e ritmo
 
 - Alternancia deliberada: periodo longo subordinado (com incisos entre
-  travessoes) fechado por **frase-lamina curta**: "Sem razao, contudo." /
+  travessoes) fechado por **frase-lamina curta** — que e sempre uma CONCLUSAO
+  JURIDICA comprimida (regra de direito, subsuncao ou constatacao sobre os
+  autos), sustentada pelo que a antecede: "Sem razao, contudo." /
   "A contradicao e manifesta." / "Essa distincao e decisiva."
 - Frase-topico taxativa abrindo o nucleo argumentativo: "Os contratos tem
   prazo determinado."
-- Aforismo com ponto-e-virgula ou travessao: "Sem inadimplemento, nao ha
-  resolucao; sem resolucao, nao ha restituicao." / "Quem conhece de antemao o
-  fato que qualifica como vicio nao incorre em erro — pratica ato de vontade
-  consciente."
+- Aforismo com ponto-e-virgula ou travessao SO quando enuncia proposicao
+  juridica: "Sem inadimplemento, nao ha resolucao; sem resolucao, nao ha
+  restituicao." (regra comprimida) / "Quem conhece de antemao o fato que
+  qualifica como vicio nao incorre em erro — pratica ato de vontade
+  consciente." (dogmatica do erro).
+- **Teste de conteudo da frase curta**: ela precisa sobreviver sozinha como
+  afirmacao JURIDICA. Se funciona como tirada de efeito, epigrama ou slogan
+  — soa "esperta" mas nao afirma regra, subsuncao nem fato dos autos —
+  corte-a e termine com a consequencia normativa. Exemplo real: paragrafo
+  demonstrando que a decisao nao enfrentou os fundamentos deduzidos NAO fecha
+  com "Rotulo nao e fundamentacao." (slogan, mau gosto, alfineta o juizo);
+  fecha com a consequencia: "— em desacordo com o art. 489, §1º, IV, do CPC,
+  que reputa nao fundamentada a decisao que deixa de enfrentar os argumentos
+  capazes de infirmar a conclusao adotada." A ultima palavra do paragrafo e
+  do DIREITO, nao da retorica.
 - Anafora negativa para lacuna probatoria: "Nao juntou [...]. Nao requereu
   [...]. Nao alegou [...]."
 - Dois-pontos como operador de definicao/desfecho e antitese: "E uma obrigacao
@@ -221,7 +234,8 @@ Formulas literais completas em `references/formulas-cmr.md`. Mapa:
        limpo)?
 10. [ ] Corpo em ordem direta e voz ativa? Nenhuma anastrofe ("Conhecido deve
         ser..."), nominalizacao evitavel ou cadeia de -mente? Toda frase passa
-        no teste de voz alta?
+        no teste de voz alta? Toda frase curta de fecho carrega conteudo
+        juridico (regra/subsuncao/fato) — nenhuma tirada de efeito?
 
 ## O que NAO imitar do corpus
 
