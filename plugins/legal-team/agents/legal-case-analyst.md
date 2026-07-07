@@ -54,6 +54,9 @@ tools:
   - mcp__plugin_case-knowledge_case-knowledge__buscar_cronologico
   - mcp__plugin_case-knowledge_case-knowledge__buscar_diversificado
   - mcp__plugin_case-knowledge_case-knowledge__buscar_interseccao
+  - mcp__plugin_case-knowledge_case-knowledge__document
+  - mcp__plugin_case-knowledge_case-knowledge__cross_ref
+  - mcp__plugin_case-knowledge_case-knowledge__memoria_search
   - mcp__plugin_cogmem-tools_cogmem-tools__search
   - mcp__plugin_cogmem-tools_cogmem-tools__context
 ---
@@ -82,7 +85,28 @@ mcp__plugin_case-knowledge_case-knowledge__search(query="termo de busca")
 
 Filtros disponiveis: peca (inicial, contestacao, acordao, etc.), fase (conhecimento, recursal, execucao), documento (nome do arquivo).
 
-Para estatisticas do caso: `case-knowledge:stats`.
+**Orientacao do caso (use ANTES de buscar):** `metadata` (partes, valores,
+ultimos andamentos), `manifesto` (indice cronologico das pecas), `stats`
+(distribuicao por peca), `memoria_search` (o que ja foi feito/decidido neste
+caso em sessoes anteriores).
+
+**Leitura na integra:** o content do search e PREVIEW. Para ler de verdade:
+`contexto(documento, chunk_index, janela)` — vizinhanca completa de um
+resultado; `document(documento, from_chunk?)` — a peca INTEIRA em ordem
+sequencial (fatiada com next_from quando grande). Cronologia, contradicao e
+citacao exigem integra lida, nunca preview.
+
+**Buscas especializadas:** `buscar_cronologico` (recall semantico reordenado
+por posicao processual — use para timeline), `buscar_interseccao` (dois temas
+que precisam aparecer juntos), `buscar_diversificado` (panorama por documentos
+distintos), `recommend` (mais-como-este), `discover` (na direcao de X evitando
+Y — ex: versao da Autora, nao da Re), `comparar` (pares mais similares —
+duplicatas e argumentos repetidos entre pecas).
+
+**Citacoes cruzadas:** `facet` conta valores de qualquer campo (inclusive
+processos_citados/sumulas_citadas/temas_repetitivos); `cross_ref(kind, value)`
+localiza onde mais os autos citam o mesmo processo/sumula/tema/dispositivo.
+
 Para listar casos disponiveis: `case-knowledge:list_cases`.
 Para verificar caso ativo: `case-knowledge:info`.
 

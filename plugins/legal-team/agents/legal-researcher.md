@@ -39,7 +39,10 @@ tools:
   - TaskUpdate
   - TaskGet
   - TaskList
+  - WebSearch
+  - WebFetch
   - mcp__plugin_stj-vec-tools_stj-vec-tools__search
+  - mcp__plugin_stj-vec-tools_stj-vec-tools__search_formula
   - mcp__plugin_stj-vec-tools_stj-vec-tools__document
   - mcp__plugin_stj-vec-tools_stj-vec-tools__filters
   - mcp__plugin_legal-vec-tools_legal-vec-tools__search
@@ -48,6 +51,7 @@ tools:
   - mcp__plugin_legal-vec-tools_legal-vec-tools__sources
   - mcp__plugin_case-knowledge_case-knowledge__search
   - mcp__plugin_case-knowledge_case-knowledge__contexto
+  - mcp__plugin_case-knowledge_case-knowledge__document
   - mcp__plugin_case-knowledge_case-knowledge__manifesto
   - mcp__plugin_case-knowledge_case-knowledge__metadata
   - mcp__plugin_cogmem-tools_cogmem-tools__search

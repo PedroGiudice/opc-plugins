@@ -40,16 +40,30 @@ dentro de `cases/<slug>/`). Faz proxy para a `case-knowledge-api`
 (`127.0.0.1:8422` na VM; `100.123.73.128:8422` via Tailscale na cmr-002), sobre
 as collections `case-{slug}` no Qdrant.
 
-- `case-knowledge:search` — busca híbrida; filtros `peca`, `fase`, `documento`, `categoria`
-- `case-knowledge:contexto` — chunks completos, sem truncamento
-- `case-knowledge:stats`, `:info`, `:list_cases`, `:manifesto`, `:metadata`
-- `case-knowledge:buscar_cronologico`, `:buscar_interseccao`, `:buscar_diversificado`
-- `case-knowledge:memoria_search` — memória de sessões do caso (legal-cogmem)
+**Orientação do caso:** `metadata` (partes, valores, andamentos), `manifesto`
+(índice cronológico), `stats` (distribuição por peça), `facet(key)` (contagem
+de qualquer campo), `info`, `list_cases`.
 
-A memória do caso é injetada automaticamente a cada prompt (hook). Fora de um
-caso, só `list_cases` opera; as demais retornam erro.
+**Busca:** `search` — busca semântica DENSE (batch até 20 queries; filtros
+`peca`, `parent_peca`, `fase`, `documento`, `numero_processo`, `categoria`;
+`agrupar=true` diversifica). Especializadas: `buscar_interseccao` (dois temas
+juntos), `buscar_cronologico` (reordena por posição processual),
+`buscar_diversificado` (panorama por documentos), `recommend`
+(mais-como-este), `discover` (direção de X evitando Y), `comparar`
+(duplicatas/argumentos repetidos), `cross_ref(kind, value)` (onde mais os
+autos citam um processo/súmula/tema/dispositivo).
+
+**Leitura na íntegra:** o `content` do search é PREVIEW (1200 chars).
+`contexto(documento, chunk_index, janela)` — vizinhança completa;
+`document(documento, from_chunk?)` — a peça INTEIRA em ordem sequencial.
+Citação/transcrição exigem íntegra lida por uma dessas duas.
+
+**Memória do caso:** `memoria_search` — sessões anteriores DESTE caso
+(legal-cogmem). A memória também é injetada automaticamente a cada prompt
+(hook). Fora de um caso, só `list_cases` opera; as demais retornam erro.
 
 **Quando usar:** fatos do caso, peças processuais, provas, perícias.
+Protocolo completo de leitura: skill `leitura-autos`.
 
 ### 2. STJ Jurisprudência
 
