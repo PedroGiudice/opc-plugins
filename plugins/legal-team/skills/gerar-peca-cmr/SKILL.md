@@ -1,21 +1,35 @@
 ---
 name: gerar-peca-cmr
-description: Gerar pecas processuais formatadas no padrao CMR Advogados usando python-docx. Use quando precisar gerar .docx de contestacao, replica, peticao inicial ou qualquer peca processual. Template com numeracao automatica, paragrafos vazios, Century Gothic 12pt, espacamento 1.5x.
+description: Gerar documentos .docx no padrao CMR Advogados usando python-docx. Use quando precisar gerar peca processual (contestacao, replica, peticao inicial, recurso), contrato ou aditamento em .docx. Template com numeracao automatica, paragrafos vazios, Century Gothic 12pt, espacamento 1.5x. Os scripts geradores ACOMPANHAM esta skill (scripts/), funcionam na VM e na cmr-002.
 ---
 
-# Gerador de Pecas Processuais — Template CMR Advogados
+# Gerador de Documentos — Padrao CMR Advogados
 
-## Biblioteca
+## Biblioteca (acompanha a skill)
 
-O script esta em `case-docs/scripts/gerar_peca_cmr.py`. Importe a classe `PecaCMR`:
+Os geradores estao no subdiretorio `scripts/` DESTA skill — o mesmo diretorio
+deste SKILL.md, em qualquer maquina. Resolva o path a partir da localizacao da
+skill (voce a conhece por ter carregado este arquivo) e importe a classe:
 
 ```python
 import sys
-sys.path.insert(0, "/home/opc/case-docs/scripts")
-from gerar_peca_cmr import PecaCMR
+sys.path.insert(0, r"<dir-desta-skill>/scripts")
+from gerar_peca_cmr import PecaCMR          # pecas processuais
+# from gerar_contrato_cmr import ContratoCMR      # contratos
+# from gerar_aditamento_cmr import AditamentoCMR  # aditamentos sobre .docx-base
 ```
 
-**NAO crie outro script. NAO copie o codigo. Importe e use a classe.**
+**NAO crie outro gerador. NAO copie o codigo. NAO use copias soltas antigas
+(ex: C:\Users\pedro\cases\gerar_peca_cmr.py) — a versao canonica e a da skill.**
+Dependencia: python-docx (ja instalado nas duas maquinas).
+
+## Qual gerador usar
+
+| Documento | Classe | Observacao |
+|-----------|--------|------------|
+| Peca processual | `PecaCMR` | API completa abaixo |
+| Contrato | `ContratoCMR` | Recria formatacao CMR |
+| Aditamento (bilingue, sobre template) | `AditamentoCMR` | Usa um .docx de referencia como DOCUMENTO-BASE (formatacao herdada byte a byte); modos FILL (placeholders) e BUILD (clona paragrafos-modelo). Requer `template_path` |
 
 ## API
 
@@ -106,4 +120,12 @@ PecaCMR.NUM_ITEM_LETRA     # 15 — itens letra minuscula (a. b.)
 
 ## Template de referencia
 
-Documento completo com todas as especificacoes de formatacao: `case-docs/docs/template-formatacao-cmr.md`
+Documento completo com todas as especificacoes de formatacao:
+`case-docs/docs/template-formatacao-cmr.md` (path da VM; na cmr-002 as regras
+criticas acima bastam — em duvida de formatacao, siga-as e pergunte ao operador).
+
+## Manutencao (para sessoes de dev)
+
+Fonte de EDICAO dos geradores: `case-docs/scripts/` na VM. As copias em
+`scripts/` desta skill sao de release — re-copiar e bumpar o plugin a cada
+mudanca (ver `scripts/README.md`).

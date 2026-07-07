@@ -1,5 +1,5 @@
 {
   "name": "legal-team",
   "description": "Trabalho juridico com subagentes especializados (researcher, case-analyst, strategist), skills (leitura-autos, gerar-peca-cmr, legal-knowledge-access) e comando /legal-team. Caminho leve por default; team para paralelismo real.",
-  "version": "0.3.0"
+  "version": "0.3.1"
 }
