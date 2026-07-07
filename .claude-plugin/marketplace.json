@@ -50,15 +50,6 @@
       },
       "source": "./plugins/case-knowledge",
       "category": "productivity"
-    },
-    {
-      "name": "deep-research",
-      "description": "MCP tools que expoem a Gemini Deep Research API (pesquisa agentiva profunda: le paginas inteiras, itera, cruza fontes, cita) + agente dedicado deep-researcher. Fecha o gap entre WebSearch raso e pesquisa multi-fonte.",
-      "author": {
-        "name": "opc"
-      },
-      "source": "./plugins/deep-research",
-      "category": "productivity"
     }
   ]
 }
