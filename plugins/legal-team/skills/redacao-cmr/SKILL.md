@@ -67,6 +67,38 @@ podem ser simples ou complexos; a estrutura acompanha o grau de complexidade.
   de meio, nao de resultado: ...".
 - Incisos romanos (i), (ii)... para premissas e requisitos.
 
+### Ordem direta e voz ativa (anti-juridiques)
+
+A formalidade da casa mora nas FORMULAS RITUAIS (abertura, tempestividade,
+pedidos, fecho, deferencia) e na precisao dos termos tecnicos — NUNCA na
+sintaxe ornamentada do corpo argumentativo. No corpo:
+
+1. **Ordem direta sempre** (sujeito -> verbo -> complemento). Anastrofe e
+   hiperbato sao VEDADOS: "Conhecido deve ser, portanto, o presente recurso."
+   e errado duas vezes — passiva E inversao. Escreva: "O recurso e tempestivo
+   e esta regularmente preparado; deve, portanto, ser conhecido."
+2. **Voz ativa preferencial.** Passiva so quando o paciente e o tema legitimo
+   do paragrafo ou o agente e irrelevante — e mesmo assim em ordem direta.
+   Melhor ainda: dar o verbo a quem age ("A Apelante comprovou o preparo" em
+   vez de "restou comprovado o preparo").
+3. **Verbo forte no lugar de nominalizacao**: "descumpriu" > "incorreu em
+   descumprimento"; "provou" > "procedeu a comprovacao"; "juntou" > "efetuou
+   a juntada".
+4. **Corte de ornamento sem funcao**: "o presente recurso" -> "o recurso"
+   (fora das formulas rituais); "resta evidente que" -> afirme direto;
+   "no que tange a" -> "quanto a"; "e de se ressaltar que" -> afirme, ou
+   "Frise-se" uma unica vez.
+5. **Adverbios em -mente: no maximo 1 por frase.** O empilhamento
+   (exaustivamente/pormenorizadamente/inquestionavelmente) existe no corpus
+   antigo, mas e traco a conter, nao a reproduzir.
+6. **Teste de voz alta**: se a frase nao pode ser dita a um colega sem soar
+   teatral, reescreva. O padrao da casa e a frase-lamina ("Os contratos tem
+   prazo determinado."), nao o rebuscamento.
+
+Excecao unica: as formulas rituais mantem sua sintaxe consagrada, inclusive
+passivas rituais dos pedidos ("requer seja o recurso CONHECIDO E PROVIDO",
+"seja julgada TOTALMENTE improcedente") e o fecho ("Pede deferimento.").
+
 ### Conectivos — os da casa e os vedados
 
 - **Da casa:** Portanto; Assim; Contudo; Ainda que; Tampouco; Alias; Inclusive;
@@ -187,6 +219,9 @@ Formulas literais completas em `references/formulas-cmr.md`. Mapa:
 8. [ ] Zero doutrina nominal; jurisprudencia integral-ou-numero?
 9. [ ] Revisao ortografica completa (o corpus 2024 tinha typos; o alvo e 2026:
        limpo)?
+10. [ ] Corpo em ordem direta e voz ativa? Nenhuma anastrofe ("Conhecido deve
+        ser..."), nominalizacao evitavel ou cadeia de -mente? Toda frase passa
+        no teste de voz alta?
 
 ## O que NAO imitar do corpus
 
