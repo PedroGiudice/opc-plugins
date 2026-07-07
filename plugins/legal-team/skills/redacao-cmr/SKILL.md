@@ -75,10 +75,12 @@ podem ser simples ou complexos; a estrutura acompanha o grau de complexidade.
   bastasse" (escalada); "Primeiro, porque... Segundo, porque..."; "Mais
   relevante ainda:"; Frise-se. Conclusoes: "Diante do exposto" / "Por todo o
   exposto" (pecas), "Por essas razoes" (cartas).
-- **Vedados (zero ocorrencias no corpus — nao introduza):** "Ocorre que",
-  "Data venia" cru (a casa usa "com a devida venia"), pergunta retorica,
-  ponto de exclamacao (unica excecao: o vocativo ritual "NOBRES JULGADORES, /
-  COLENDA CAMARA!"), "Destarte"/"Outrossim" (raridade estatistica — evite).
+- **Vedados:** "Ocorre que", "Data venia" cru (a casa usa "com a devida
+  venia"), pergunta retorica, "Destarte"/"Outrossim" (raridade estatistica —
+  evite). **Ponto de exclamacao: NUNCA, sem excecao** — nem no vocativo
+  recursal, que vai "NOBRES JULGADORES, / COLENDA CAMARA," (instrucao
+  expressa do socio, 07/07/2026; pecas antigas do corpus com "!" no vocativo
+  NAO devem ser imitadas nesse ponto).
 - "Ademais"/"Com efeito": tolerados com parcimonia em peca extensa; nunca em
   carta.
 - Retomada a distancia SEMPRE adverbial-generica ("conforme ja exaustivamente
@@ -166,7 +168,7 @@ Formulas literais completas em `references/formulas-cmr.md`. Mapa:
 | Genero | Abertura | Corpo | Fecho |
 |---|---|---|---|
 | Peca de 1º grau | Enderecamento em caps -> "Processo nº" -> periodo unico de qualificacao com o nome da peca em caps integrado a frase -> TEMPESTIVIDADE com conta exposta | Sintese da inicial (verbos de atribuicao: "narram", "sustentam", "aduzem") -> virada -> REALIDADE FATICA -> merito por titulos-tese | Pedidos "seja/sejam + participio", protesto por provas + depoimento pessoal "sob pena de confissao", publicacoes exclusivas "sob pena de nulidade", "Termos em que, / Pede deferimento." + local e data |
-| Recurso | Peca BIPARTIDA: interposicao (com preparo exato) + razoes com "Apelante:/Apelada:" e "NOBRES JULGADORES, / COLENDA CAMARA!" | Tempestividade -> sintese dos fatos -> sintese da SENTENCA (plantando a contradicao) -> merito do concreto ao abstrato -> subsidiario rotulado | + efeito suspensivo e inversao da sucumbencia; honorarios "entre 10% e 20% ... art. 85, §2º" |
+| Recurso | Peca BIPARTIDA: interposicao (com preparo exato) + razoes com "Apelante:/Apelada:" e "NOBRES JULGADORES, / COLENDA CAMARA," (sem exclamacao) | Tempestividade -> sintese dos fatos -> sintese da SENTENCA (plantando a contradicao) -> merito do concreto ao abstrato -> subsidiario rotulado | + efeito suspensivo e inversao da sucumbencia; honorarios "entre 10% e 20% ... art. 85, §2º" |
 | Embargos | Enderecamento NOMINAL ao relator; "opor tempestivamente o competente recurso de" | Mapa-indice dos vicios (vicio -> inciso do art. 1.022 -> dispositivo violado) -> desenvolvimento com paralelismo -> prequestionamento como secao autonoma | Cascata de pedidos com verbos variados ("Requer, ademais" / "Postula-se" / "Subsidiariamente") |
 | Carta/notificacao | Local e data -> bloco de enderecamento (A/C + e-mail) -> "Ref.:" -> "Prezados Senhores," -> "Na qualidade de advogados da [cliente] ('[Termo]') e com sua expressa autorizacao, serve a presente para..., contranotifica-los do quanto segue:" | Sintese da pretensao adversa COM AS PALAVRAS DELA -> apreço + anuncio da recusa -> refutacao clausula a clausula -> refutacao preventiva do proximo argumento | Binario: recusa integral e especifica + porta aberta ao dialogo com ressalva -> "Sem mais para o momento, / Atenciosamente," + nome + OAB |
 | Memoriais | Titulo + identificacao do recurso + partes por papel + julgadores NOMEADOS com tratamento completo | Narrativa cronologica continua (sem capitulos), decisoes favoraveis transcritas, quantificacao retorica | "Diante o exposto... entende... e espera seja negado provimento" (modestia formal: "entende/espera", nao "requer") |

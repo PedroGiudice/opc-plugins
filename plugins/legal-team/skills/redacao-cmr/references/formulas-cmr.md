@@ -34,7 +34,10 @@ Variantes da qualificacao: "ja qualificada" / "devidamente qualificada";
 > Apelada: [...]
 >
 > NOBRES JULGADORES,
-> COLENDA CAMARA!
+> COLENDA CAMARA,
+
+(Sem exclamacao — NUNCA, nem no vocativo. Pecas antigas do corpus usavam "!"
+aqui; vedado por instrucao do socio em 07/07/2026.)
 
 **Carta/notificacao:**
 > Sao Paulo, [data por extenso]
@@ -190,6 +193,14 @@ regularizacao de representacao (art. 104, §1º), endereco do escritorio e
 > Termos em que,
 > Pede deferimento.
 > Sao Paulo, [data por extenso]
+
+**Assinaturas (signatarios ATUAIS do escritorio, 07/2026):**
+- Titular: Carlos Magno N. Rodrigues — OAB/SP nº 129.021 (publicacoes
+  exclusivamente em nome dele, "sob pena de nulidade").
+- Segunda assinatura (via `assinatura_dupla` do gerar-peca-cmr):
+  Ana Beatriz Vianna Paoli — OAB/SP nº 493.706.
+- **NUNCA** assinar com Maria Claudia Boaventura Soares (OAB/SP 496.709) —
+  ex-integrante; aparece em peca antiga do corpus (embargos 2025), nao copiar.
 
 **Fecho de recurso (pedido):** "requer e confia que este EGREGIO TRIBUNAL,
 confirmando o acerto da r. Sentenca de primeiro grau, NEGARA PROVIMENTO ao
