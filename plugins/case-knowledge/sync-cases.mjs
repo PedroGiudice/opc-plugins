@@ -25,7 +25,7 @@ import { requestWithAuth } from "./auth.mjs";
 // proposito: importar server.mjs executaria o server MCP (connect no
 // top-level). Se mudar la, mudar aqui.
 function defaultApiBase() {
-  if (process.platform === "win32") return "http://100.123.73.128:8422/api";
+  if (process.platform === "win32") return "https://api.aidvlabs.com/api";
   return "http://127.0.0.1:8422/api";
 }
 function defaultCasesBase() {

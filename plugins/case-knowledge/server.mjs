@@ -23,8 +23,12 @@ import {
 } from "./format.mjs";
 import { requestWithAuth, APP_BASE, loginFlow } from "./auth.mjs";
 
+// Default por plataforma: no Windows (maquina cliente) a API publica com
+// Bearer obrigatorio (api.aidvlabs.com, Cloudflare) — funciona SEM tailnet.
+// Na VM (Linux) segue o loopback. Env CASE_KNOWLEDGE_API_BASE e soberana
+// (a cmr-002 pode manter o override tailnet no $PROFILE sem quebra).
 function defaultApiBase() {
-  if (process.platform === "win32") return "http://100.123.73.128:8422/api";
+  if (process.platform === "win32") return "https://api.aidvlabs.com/api";
   return "http://127.0.0.1:8422/api";
 }
 
@@ -968,6 +972,16 @@ if (process.argv[2] === "login") {
     process.stderr.write(`Login falhou: ${err && err.message ? err.message : String(err)}\n`);
     process.exit(1);
   }
+} else if (process.argv[2] === "setup") {
+  // Subcomando `setup`: re-exec do setup.mjs STANDALONE (onboarding CMR-116).
+  // Roteado aqui por conveniencia, mas o comando documentado e o setup.mjs
+  // direto — este caminho so funciona quando as deps ja estao instaladas
+  // (os imports top-level do SDK acima ja rodaram).
+  const { spawnSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const setupPath = fileURLToPath(new URL("./setup.mjs", import.meta.url));
+  const r = spawnSync(process.execPath, [setupPath], { stdio: "inherit" });
+  process.exit(r.status ?? 1);
 } else {
   const transport = new StdioServerTransport();
   await server.connect(transport);

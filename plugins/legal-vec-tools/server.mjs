@@ -15,12 +15,16 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { requestWithAuth, loginFlow } from "./auth.mjs";
 
-// legal-vec-api roda na VM; o default aponta pro IP tailnet, alcancavel de
-// qualquer cliente na tailnet. O default antigo 127.0.0.1 batia no loopback do
-// PROPRIO cliente (fetch failed em maquinas remotas). Padrao uniforme com os
-// demais plugins; override via LEGAL_VEC_API_BASE. Ver case-docs/docs/infraestrutura-dados.md.
+// legal-vec-api roda na VM. Default por plataforma: no Windows (maquina
+// cliente), a API publica com Bearer obrigatorio (legalvec.aidvlabs.com,
+// Cloudflare) — funciona SEM tailnet; no Linux (VM/tailnet), o IP tailnet.
+// Env LEGAL_VEC_API_BASE e soberana (override tailnet da cmr-002 no $PROFILE
+// segue valendo). Ver case-docs/docs/infraestrutura-dados.md.
 const API_BASE =
-  process.env.LEGAL_VEC_API_BASE || "http://100.123.73.128:8423/api";
+  process.env.LEGAL_VEC_API_BASE ||
+  (process.platform === "win32"
+    ? "https://legalvec.aidvlabs.com/api"
+    : "http://100.123.73.128:8423/api");
 const REQUEST_TIMEOUT_MS = 60_000;
 const MAX_RETRIES = 3;
 const RETRY_DELAYS = [500, 1500, 3000]; // ms

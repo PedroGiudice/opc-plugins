@@ -21,12 +21,16 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { requestWithAuth, loginFlow } from "./auth.mjs";
 
-// O servico stj-vec-search roda SO na VM (extractlab). Clientes remotos (cmr-002,
-// etc) batiam no default antigo 127.0.0.1 do PROPRIO host e recebiam "fetch failed".
-// O FQDN MagicDNS resolve para a VM em qualquer maquina da tailnet, inclusive a
-// propria VM. Override por STJ_VEC_API_BASE para ambientes fora da tailnet.
+// O servico stj-vec-search roda SO na VM (extractlab). Default por plataforma:
+// no Windows (maquina cliente), a API publica com Bearer obrigatorio
+// (stj.aidvlabs.com, Cloudflare) — funciona SEM tailnet; na VM/tailnet Linux,
+// o FQDN MagicDNS. Env STJ_VEC_API_BASE e soberana (override tailnet da
+// cmr-002 no $PROFILE segue valendo).
 const API_BASE =
-  process.env.STJ_VEC_API_BASE || "http://extractlab.cormorant-alpha.ts.net:8421/api";
+  process.env.STJ_VEC_API_BASE ||
+  (process.platform === "win32"
+    ? "https://stj.aidvlabs.com/api"
+    : "http://extractlab.cormorant-alpha.ts.net:8421/api");
 const REQUEST_TIMEOUT_MS = 60_000;
 const MAX_RETRIES = 3;
 const RETRY_DELAYS = [500, 1500, 3000]; // ms
