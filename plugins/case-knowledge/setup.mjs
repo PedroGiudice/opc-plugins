@@ -268,6 +268,35 @@ function installSyncTask(pluginDir, failures) {
   log("      Tarefa registrada (logon + 15 min) e primeiro sync disparado.");
 }
 
+/**
+ * Verificacao extra (best-effort, nao instala nada): os geradores de peca
+ * .docx da skill gerar-peca-cmr (plugin legal-team) exigem Python +
+ * python-docx. Falta vira pendencia no resumo com o comando pronto.
+ */
+function checkPecaGenerators(failures) {
+  log("[extra] Geradores de peca (.docx): Python + python-docx");
+  const candidates = IS_WIN ? ["python", "py"] : ["python3", "python"];
+  for (const bin of candidates) {
+    const r = spawnSync(bin, ["-c", "import docx"], { stdio: "pipe" });
+    if (!r.error && r.status === 0) {
+      log(`      ok (${bin} com python-docx presente).`);
+      return;
+    }
+    if (!r.error) {
+      // interpretador existe, falta o pacote
+      failures.push(
+        "python-docx ausente (geradores de peca nao rodam) — instale: " +
+          `${bin} -m pip install python-docx`,
+      );
+      return;
+    }
+  }
+  failures.push(
+    "Python nao encontrado (geradores de peca nao rodam) — instale: " +
+      "winget install Python.Python.3.13, reabra o terminal e rode: pip install python-docx",
+  );
+}
+
 async function main() {
   log("=== Setup do Claude Code juridico (aidvlabs) ===");
   const pluginDir = resolvePluginDir();
@@ -303,10 +332,11 @@ async function main() {
     fail(`scaffolding falhou: ${err && err.message ? err.message : String(err)}`);
   }
 
-  // 5 e 6 sao best-effort: falha vira pendencia listada no resumo.
+  // 5, 6 e extra sao best-effort: falha vira pendencia listada no resumo.
   const failures = [];
   applyEnvVars(failures);
   installSyncTask(pluginDir, failures);
+  checkPecaGenerators(failures);
 
   log("");
   log("=== Resumo ===");

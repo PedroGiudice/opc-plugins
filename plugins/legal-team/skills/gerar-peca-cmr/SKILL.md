@@ -21,7 +21,11 @@ from gerar_peca_cmr import PecaCMR          # pecas processuais
 
 **NAO crie outro gerador. NAO copie o codigo. NAO use copias soltas antigas
 (ex: C:\Users\pedro\cases\gerar_peca_cmr.py) — a versao canonica e a da skill.**
-Dependencia: python-docx (ja instalado nas duas maquinas).
+Dependencia: **python-docx**. Antes do primeiro uso na sessao, verifique:
+`python -c "import docx"`. Se falhar, instale com `pip install python-docx`
+(Windows sem pip no PATH: `py -m pip install python-docx`) e repita a
+verificacao. Sem python-docx os geradores NAO rodam — nao tente recriar a
+formatacao a mao como fallback.
 
 ## Qual gerador usar
 
