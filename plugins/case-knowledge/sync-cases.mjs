@@ -168,7 +168,7 @@ export function computeBaseline(manifestCases, localState, prevBaseline, succeed
  * nascimento ele pertence ao usuario/CC (mudar o style ou aprovar permissao
  * edita o mesmo arquivo; o sync nunca sobrescreve).
  */
-export function buildLocalSettings(scaffoldingSettingsRaw) {
+export function buildLocalSettings(scaffoldingSettingsRaw, overrideStyle) {
   if (typeof scaffoldingSettingsRaw !== "string") return null;
   let parsed;
   try {
@@ -177,9 +177,30 @@ export function buildLocalSettings(scaffoldingSettingsRaw) {
     return null;
   }
   if (!parsed || typeof parsed.outputStyle !== "string") return null;
-  const out = { outputStyle: parsed.outputStyle };
+  const out = { outputStyle: overrideStyle || parsed.outputStyle };
   if (parsed.permissions !== undefined) out.permissions = parsed.permissions;
   return `${JSON.stringify(out, null, 2)}\n`;
+}
+
+/**
+ * Extrai o override de output style do case.yaml do caso (campo opcional
+ * `output_style: <nome>`, escrito na VM — a mao ou pelo classifier). O
+ * case.yaml e formato NOSSO (materializado pelo case-ingest), entao um
+ * match de linha basta — sem dependencia de parser YAML completo. Aceita
+ * valor plano ou entre aspas; comentario inline (` # ...`) e descartado.
+ */
+export function extractOutputStyle(caseYamlRaw) {
+  if (typeof caseYamlRaw !== "string") return null;
+  const m = caseYamlRaw.match(/^output_style:[ \t]*(.+)$/m);
+  if (!m) return null;
+  let v = m[1].trim();
+  const quoted = v.match(/^"([^"]*)"|^'([^']*)'/);
+  if (quoted) {
+    v = quoted[1] ?? quoted[2];
+  } else {
+    v = v.replace(/[ \t]+#.*$/, "").trim();
+  }
+  return v || null;
 }
 
 /** Nome de destino em _archive/, sufixando -YYYYMMDD em colisao. */
@@ -279,36 +300,6 @@ async function main() {
     mkdirSync(join(casesBase, name), { recursive: true });
   }
 
-  // Provisiona .claude/settings.local.json (outputStyle/permissions do
-  // scaffolding) nos casos do manifest que ainda nao tem — cria-se-ausente,
-  // cobre legados e recem-criados; nunca sobrescreve (CMR-103). Dirs locais
-  // fora do manifest nao sao tocados (o espelho mexe so no que e dele).
-  let provisioned = 0;
-  try {
-    const scaffoldingSettings = join(casesBase, ".claude", "settings.json");
-    const localSettings = buildLocalSettings(
-      existsSync(scaffoldingSettings) ? readFileSync(scaffoldingSettings, "utf-8") : null,
-    );
-    if (localSettings) {
-      const localByLower = new Map(
-        Object.keys(localState).map((k) => [k.toLowerCase(), k]),
-      );
-      for (const c of manifestCases) {
-        if (!VALID_CASE_NAME.test(c.name) || isExcluded(c.name)) continue;
-        const dirName = localByLower.get(c.name.toLowerCase()) ?? c.name;
-        const caseDir = join(casesBase, dirName);
-        if (!existsSync(caseDir)) continue;
-        const target = join(caseDir, ".claude", "settings.local.json");
-        if (existsSync(target)) continue;
-        mkdirSync(join(caseDir, ".claude"), { recursive: true });
-        writeAtomic(target, localSettings);
-        provisioned++;
-      }
-    }
-  } catch (err) {
-    errors.push(`settings: ${err.message}`);
-  }
-
   for (const { name, files } of plan.download) {
     try {
       const briefing = await fetchJson(`${apiBase}/cases/${encodeURIComponent(name)}/briefing`);
@@ -324,6 +315,43 @@ async function main() {
     } catch (err) {
       errors.push(`${name}: ${err.message}`);
     }
+  }
+
+  // Provisiona .claude/settings.local.json (outputStyle/permissions do
+  // scaffolding, com override opcional `output_style:` do case.yaml do caso)
+  // nos casos do manifest que ainda nao tem — cria-se-ausente, cobre legados
+  // e recem-criados; nunca sobrescreve (CMR-103). Roda DEPOIS dos downloads:
+  // caso novo precisa do case.yaml ja no disco para o override valer no
+  // nascimento. Dirs locais fora do manifest nao sao tocados.
+  let provisioned = 0;
+  try {
+    const scaffoldingSettings = join(casesBase, ".claude", "settings.json");
+    const scaffoldingRaw = existsSync(scaffoldingSettings)
+      ? readFileSync(scaffoldingSettings, "utf-8")
+      : null;
+    if (buildLocalSettings(scaffoldingRaw)) {
+      const localByLower = new Map(
+        Object.keys(localState).map((k) => [k.toLowerCase(), k]),
+      );
+      for (const c of manifestCases) {
+        if (!VALID_CASE_NAME.test(c.name) || isExcluded(c.name)) continue;
+        const dirName = localByLower.get(c.name.toLowerCase()) ?? c.name;
+        const caseDir = join(casesBase, dirName);
+        if (!existsSync(caseDir)) continue;
+        const target = join(caseDir, ".claude", "settings.local.json");
+        if (existsSync(target)) continue;
+        const caseYamlPath = join(caseDir, "case.yaml");
+        const overrideStyle = extractOutputStyle(
+          existsSync(caseYamlPath) ? readFileSync(caseYamlPath, "utf-8") : null,
+        );
+        const localSettings = buildLocalSettings(scaffoldingRaw, overrideStyle);
+        mkdirSync(join(caseDir, ".claude"), { recursive: true });
+        writeAtomic(target, localSettings);
+        provisioned++;
+      }
+    }
+  } catch (err) {
+    errors.push(`settings: ${err.message}`);
   }
 
   let archived = 0;

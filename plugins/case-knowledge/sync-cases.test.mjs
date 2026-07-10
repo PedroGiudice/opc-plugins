@@ -190,3 +190,39 @@ test("buildLocalSettings: JSON invalido -> null, nunca lanca", async () => {
   const { buildLocalSettings } = await import("./sync-cases.mjs");
   assert.equal(buildLocalSettings("{nao é json"), null);
 });
+
+// --- extractOutputStyle (override por caso via case.yaml) ---
+
+test("extractOutputStyle: acha o campo plano, com aspas e com acento", async () => {
+  const { extractOutputStyle } = await import("./sync-cases.mjs");
+  assert.equal(extractOutputStyle("tipo: material\noutput_style: Legal Societário\ntags: []"), "Legal Societário");
+  assert.equal(extractOutputStyle('output_style: "Legal Societário"'), "Legal Societário");
+  assert.equal(extractOutputStyle("output_style: 'Legal Main Agent'"), "Legal Main Agent");
+  assert.equal(extractOutputStyle("output_style: Legal Societário # consultivo"), "Legal Societário");
+});
+
+test("extractOutputStyle: ausente, comentado, vazio ou input nulo -> null", async () => {
+  const { extractOutputStyle } = await import("./sync-cases.mjs");
+  assert.equal(extractOutputStyle("tipo: processo\ntags: []"), null);
+  assert.equal(extractOutputStyle("# output_style: Legal Societário"), null);
+  assert.equal(extractOutputStyle("output_style:"), null);
+  assert.equal(extractOutputStyle(null), null);
+  assert.equal(extractOutputStyle(undefined), null);
+});
+
+test("buildLocalSettings: override de style do case.yaml vence o default do scaffolding", async () => {
+  const { buildLocalSettings } = await import("./sync-cases.mjs");
+  const scaffolding = JSON.stringify({
+    outputStyle: "Legal Main Agent",
+    permissions: { allow: ["Read"] },
+  });
+  const out = JSON.parse(buildLocalSettings(scaffolding, "Legal Societário"));
+  assert.equal(out.outputStyle, "Legal Societário");
+  assert.deepEqual(out.permissions, { allow: ["Read"] });
+  // sem override, mantem o default
+  const def = JSON.parse(buildLocalSettings(scaffolding));
+  assert.equal(def.outputStyle, "Legal Main Agent");
+  // override vazio/nulo nao derruba o default
+  const nul = JSON.parse(buildLocalSettings(scaffolding, null));
+  assert.equal(nul.outputStyle, "Legal Main Agent");
+});
