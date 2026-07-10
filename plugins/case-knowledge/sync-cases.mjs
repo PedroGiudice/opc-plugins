@@ -157,6 +157,31 @@ export function computeBaseline(manifestCases, localState, prevBaseline, succeed
   return next;
 }
 
+/**
+ * Conteudo do <caso>/.claude/settings.local.json a provisionar, a partir do
+ * settings.json do scaffolding (<casesBase>/.claude/settings.json). O CC NAO
+ * herda settings de diretorio ancestral — a config que o scaffolding declara
+ * para as sessoes de caso (outputStyle, permissions) fica inerte no pai e
+ * cada caso nascia em default (selecao manual na primeira sessao). Retorna
+ * a string JSON a gravar, ou null (sem scaffolding/sem outputStyle/JSON
+ * invalido = no-op). So e gravado quando o arquivo NAO existe: depois do
+ * nascimento ele pertence ao usuario/CC (mudar o style ou aprovar permissao
+ * edita o mesmo arquivo; o sync nunca sobrescreve).
+ */
+export function buildLocalSettings(scaffoldingSettingsRaw) {
+  if (typeof scaffoldingSettingsRaw !== "string") return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(scaffoldingSettingsRaw);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed.outputStyle !== "string") return null;
+  const out = { outputStyle: parsed.outputStyle };
+  if (parsed.permissions !== undefined) out.permissions = parsed.permissions;
+  return `${JSON.stringify(out, null, 2)}\n`;
+}
+
 /** Nome de destino em _archive/, sufixando -YYYYMMDD em colisao. */
 export function archiveTarget(name, taken, now = new Date()) {
   if (!taken.has(name)) return name;
@@ -254,6 +279,36 @@ async function main() {
     mkdirSync(join(casesBase, name), { recursive: true });
   }
 
+  // Provisiona .claude/settings.local.json (outputStyle/permissions do
+  // scaffolding) nos casos do manifest que ainda nao tem — cria-se-ausente,
+  // cobre legados e recem-criados; nunca sobrescreve (CMR-103). Dirs locais
+  // fora do manifest nao sao tocados (o espelho mexe so no que e dele).
+  let provisioned = 0;
+  try {
+    const scaffoldingSettings = join(casesBase, ".claude", "settings.json");
+    const localSettings = buildLocalSettings(
+      existsSync(scaffoldingSettings) ? readFileSync(scaffoldingSettings, "utf-8") : null,
+    );
+    if (localSettings) {
+      const localByLower = new Map(
+        Object.keys(localState).map((k) => [k.toLowerCase(), k]),
+      );
+      for (const c of manifestCases) {
+        if (!VALID_CASE_NAME.test(c.name) || isExcluded(c.name)) continue;
+        const dirName = localByLower.get(c.name.toLowerCase()) ?? c.name;
+        const caseDir = join(casesBase, dirName);
+        if (!existsSync(caseDir)) continue;
+        const target = join(caseDir, ".claude", "settings.local.json");
+        if (existsSync(target)) continue;
+        mkdirSync(join(caseDir, ".claude"), { recursive: true });
+        writeAtomic(target, localSettings);
+        provisioned++;
+      }
+    }
+  } catch (err) {
+    errors.push(`settings: ${err.message}`);
+  }
+
   for (const { name, files } of plan.download) {
     try {
       const briefing = await fetchJson(`${apiBase}/cases/${encodeURIComponent(name)}/briefing`);
@@ -303,6 +358,7 @@ async function main() {
   const summary =
     `${errors.length ? "erro" : "ok"} mkdir=${plan.mkdir.length} ` +
     `arquivos_atualizados=${updated} orfaos_arquivados=${archived} conflitos=${plan.conflicts.length}` +
+    (provisioned ? ` settings_provisionados=${provisioned}` : "") +
     (errors.length ? ` ERROS: ${errors.join(" | ")}` : "");
   appendLog(casesBase, summary);
 }

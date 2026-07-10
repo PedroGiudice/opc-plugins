@@ -163,3 +163,30 @@ test("computeBaseline: orfao (sumiu do manifest) e removido do baseline", () => 
   const next = computeBaseline(manifest, local, prev, new Set());
   assert.deepEqual(next, { alpha: { "CLAUDE.md": "VM" } });
 });
+
+// --- buildLocalSettings (provisionamento de outputStyle por caso) ---
+
+test("buildLocalSettings: materializa outputStyle e permissions do scaffolding", async () => {
+  const { buildLocalSettings } = await import("./sync-cases.mjs");
+  const raw = JSON.stringify({
+    outputStyle: "Legal Main Agent",
+    permissions: { allow: ["Read", "Glob"] },
+  });
+  const out = buildLocalSettings(raw);
+  assert.deepEqual(JSON.parse(out), {
+    outputStyle: "Legal Main Agent",
+    permissions: { allow: ["Read", "Glob"] },
+  });
+});
+
+test("buildLocalSettings: sem outputStyle no scaffolding -> null (no-op)", async () => {
+  const { buildLocalSettings } = await import("./sync-cases.mjs");
+  assert.equal(buildLocalSettings(JSON.stringify({ permissions: {} })), null);
+  assert.equal(buildLocalSettings(null), null);
+  assert.equal(buildLocalSettings(undefined), null);
+});
+
+test("buildLocalSettings: JSON invalido -> null, nunca lanca", async () => {
+  const { buildLocalSettings } = await import("./sync-cases.mjs");
+  assert.equal(buildLocalSettings("{nao é json"), null);
+});
