@@ -106,10 +106,20 @@ test("buildSyncTaskCommand: replica o Install-SyncTask.ps1", () => {
   const cmd = buildSyncTaskCommand("C:\\Users\\x\\sync-cases.mjs");
   // Path embutido como literal single-quoted.
   assert.ok(cmd.includes("$script='C:\\Users\\x\\sync-cases.mjs'"));
-  // Truque do Repetition: herdado de um TimeTrigger e Duration='' (indefinido).
-  assert.ok(cmd.includes("$logon.Repetition=$timer.Repetition"));
+  // Action via wscript + vbs (execucao sem janela de console).
+  assert.ok(cmd.includes("sync-cases-hidden.vbs"));
+  assert.ok(cmd.includes("wscript.exe"));
+  // Dois triggers: AtLogOn + TimeTrigger que arma no REGISTRO (nao depende
+  // de logon — um re-registro sem relogon deixava o sync morto, CMR-126).
+  assert.ok(cmd.includes("-Trigger @($logon,$timer)"));
   assert.ok(cmd.includes("$logon.Repetition.Duration=''"));
-  assert.ok(cmd.includes("-RepetitionInterval (New-TimeSpan -Minutes 15)"));
+  assert.ok(cmd.includes("$timer.Repetition.Duration=''"));
+  // Intervalo de 5 min nos dois triggers, indefinido.
+  assert.equal(
+    (cmd.match(/-RepetitionInterval \(New-TimeSpan -Minutes 5\)/g) || []).length,
+    2,
+  );
+  assert.ok(!cmd.includes("-Minutes 15"));
   // Idempotencia + registro + primeiro sync.
   assert.ok(cmd.includes("Unregister-ScheduledTask -TaskName 'CaseKnowledge-SyncCases'"));
   assert.ok(cmd.includes("Register-ScheduledTask -TaskName 'CaseKnowledge-SyncCases'"));
@@ -118,6 +128,21 @@ test("buildSyncTaskCommand: replica o Install-SyncTask.ps1", () => {
   assert.ok(cmd.includes("-MultipleInstances IgnoreNew"));
   assert.ok(cmd.includes("-ExecutionTimeLimit (New-TimeSpan -Minutes 5)"));
   assert.ok(cmd.includes("-StartWhenAvailable"));
+});
+
+test("sync-cases-hidden.vbs: versionado no plugin, roda oculto e espera", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { join, dirname } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const vbs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "sync-cases-hidden.vbs"),
+    "utf8",
+  );
+  // intWindowStyle=0 (oculto) e bWaitOnReturn=True (preserva
+  // ExecutionTimeLimit/MultipleInstances da task para o sync real).
+  assert.match(vbs, /\.Run\(cmd, 0, True\)/);
+  // Propaga o exit code do node para LastTaskResult.
+  assert.match(vbs, /WScript\.Quit sh\.Run/);
 });
 
 test("buildSyncTaskCommand: path com aspas simples nao quebra o literal PS", () => {

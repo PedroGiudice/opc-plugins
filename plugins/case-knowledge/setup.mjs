@@ -107,10 +107,19 @@ export function psSingleQuote(s) {
 
 /**
  * Comando PowerShell inline que registra a scheduled task do espelho,
- * replicando legal-scaffolding/scripts/Install-SyncTask.ps1: trigger AtLogOn
- * com Repetition herdada de um TimeTrigger descartavel de 15 min e
- * Duration='' (repetir indefinidamente — [TimeSpan]::MaxValue e rejeitado
- * pelo Task Scheduler). Termina disparando o primeiro sync.
+ * replicando legal-scaffolding/scripts/Install-SyncTask.ps1.
+ *
+ * Dois triggers (CMR-126): AtLogOn (sync imediato ao logar) + um TimeTrigger
+ * Once que arma a repeticao NO REGISTRO — um trigger AtLogOn-only so rearma
+ * no proximo logon, entao qualquer re-registro (re-setup/update) sem relogon
+ * deixava o sync morto silenciosamente (NextRunTime vazio). Duration=''
+ * (repetir indefinidamente — [TimeSpan]::MaxValue e rejeitado pelo Task
+ * Scheduler). Repetition NAO e compartilhado entre os triggers (objeto CIM
+ * por referencia) — cada um recebe o seu.
+ *
+ * Action via wscript + sync-cases-hidden.vbs: node.exe direto em sessao
+ * interativa abre janela de console a cada sync; o wrapper roda oculto.
+ * Termina disparando o primeiro sync.
  */
 export function buildSyncTaskCommand(scriptPath) {
   return [
@@ -118,14 +127,19 @@ export function buildSyncTaskCommand(scriptPath) {
     "$node=(Get-Command node -ErrorAction Stop).Source",
     `$script=${psSingleQuote(scriptPath)}`,
     "if (-not (Test-Path $script)) { throw ('sync-cases.mjs nao encontrado: ' + $script) }",
-    "$action=New-ScheduledTaskAction -Execute $node -Argument ('\"'+$script+'\"')",
+    "$vbs=Join-Path (Split-Path $script) 'sync-cases-hidden.vbs'",
+    "if (-not (Test-Path $vbs)) { throw ('sync-cases-hidden.vbs nao encontrado (marketplace desatualizado? git pull): ' + $vbs) }",
+    "$wscript=Join-Path $env:SystemRoot 'System32\\wscript.exe'",
+    "$action=New-ScheduledTaskAction -Execute $wscript -Argument ('\"'+$vbs+'\" \"'+$node+'\" \"'+$script+'\"')",
+    "$timer=New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 1)",
+    "$timer.Repetition.Duration=''",
     "$logon=New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME",
-    "$timer=New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 15) -RepetitionDuration (New-TimeSpan -Days 1)",
-    "$logon.Repetition=$timer.Repetition",
+    "$rep=New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 1)",
+    "$logon.Repetition=$rep.Repetition",
     "$logon.Repetition.Duration=''",
     "$settings=New-ScheduledTaskSettingsSet -StartWhenAvailable -DontStopOnIdleEnd -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -MultipleInstances IgnoreNew",
     `Unregister-ScheduledTask -TaskName '${TASK_NAME}' -Confirm:$false -ErrorAction SilentlyContinue`,
-    `Register-ScheduledTask -TaskName '${TASK_NAME}' -Action $action -Trigger $logon -Settings $settings -Description 'Espelho de casos VM->local (case-knowledge)' | Out-Null`,
+    `Register-ScheduledTask -TaskName '${TASK_NAME}' -Action $action -Trigger @($logon,$timer) -Settings $settings -Description 'Espelho de casos VM->local (case-knowledge)' | Out-Null`,
     `Start-ScheduledTask -TaskName '${TASK_NAME}'`,
   ].join("; ");
 }
@@ -265,7 +279,7 @@ function installSyncTask(pluginDir, failures) {
     );
     return;
   }
-  log("      Tarefa registrada (logon + 15 min) e primeiro sync disparado.");
+  log("      Tarefa registrada (a cada 5 min + logon, sem janela) e primeiro sync disparado.");
 }
 
 /**

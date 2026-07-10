@@ -6,7 +6,7 @@
  * GET /cases/{name}/briefing so o que mudou -> move orfaos p/ _archive.
  * NUNCA deleta nada; so escreve nos arquivos de briefing.
  *
- * Agendado pelo Task Scheduler (logon + 15 min). Exit 0 sempre —
+ * Agendado pelo Task Scheduler (a cada 5 min + logon, via sync-cases-hidden.vbs). Exit 0 sempre —
  * erro e logado em ~/cases/.sync.log e o proximo ciclo e o retry.
  *
  * Spec: case-docs/docs/superpowers/specs/2026-06-11-sync-vm-cmr002-mirror-design.md

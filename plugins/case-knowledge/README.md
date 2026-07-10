@@ -58,7 +58,7 @@ nos arquivos de briefing (`CLAUDE.md`, `case.yaml`, `documentos.yaml`);
 NUNCA deleta. Manifest vazio e tratado como erro do servidor (nao "arquive
 tudo"). Matching de nome de caso e case-insensitive (NTFS): renomeio de
 caixa na VM reusa o dir local em vez de duplicar. Agendado na cmr-002 via
-Task Scheduler (logon + a cada 15 min); exit 0 sempre — erros vao para
+Task Scheduler (a cada 5 min + logon, via sync-cases-hidden.vbs sem janela); exit 0 sempre — erros vao para
 `~/cases/.sync.log` e o proximo ciclo e o retry. Usa as mesmas envs
 `CASE_KNOWLEDGE_API_BASE` e `CASE_KNOWLEDGE_CASES_BASE`.
 
