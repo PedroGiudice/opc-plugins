@@ -219,6 +219,25 @@ export function decodeJwtExp(jwt) {
   }
 }
 
+/**
+ * Decodifica o payload do JWT (base64url do meio) SEM verificar assinatura
+ * e retorna o claim `sub` (string) ou null se ausente/nao parseavel.
+ * Usado pra derivar o autor da memoria (namespace-por-autor, CMR-138).
+ */
+export function decodeJwtSub(jwt) {
+  try {
+    if (typeof jwt !== "string") return null;
+    const parts = jwt.split(".");
+    if (parts.length < 2 || !parts[1]) return null;
+    const payload = JSON.parse(
+      Buffer.from(parts[1], "base64url").toString("utf-8"),
+    );
+    return typeof payload.sub === "string" ? payload.sub : null;
+  } catch {
+    return null;
+  }
+}
+
 // --- D7: file-lock para serializar refresh entre processos (MCP + sync) ---
 
 /** Sleep interno (auth.mjs nao tinha um). */

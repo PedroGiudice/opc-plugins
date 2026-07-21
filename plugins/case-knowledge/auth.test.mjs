@@ -18,6 +18,7 @@ import {
   writeCredential,
   getAccessToken,
   decodeJwtExp,
+  decodeJwtSub,
   refreshOnce,
   getFreshAccessToken,
   requestWithAuth,
@@ -99,6 +100,12 @@ test("decodeJwtExp: extrai exp de JWT fabricado; lixo -> null", () => {
   assert.equal(decodeJwtExp(undefined), null);
   // payload valido sem claim exp -> null
   assert.equal(decodeJwtExp(`${b64({})}.${b64({ tenant_id: 1 })}.sig`), null);
+});
+
+test("decodeJwtSub extrai sub do payload", () => {
+  const payload = Buffer.from(JSON.stringify({ sub: "42", exp: 9999999999 })).toString("base64url");
+  assert.equal(decodeJwtSub(`h.${payload}.sig`), "42");
+  assert.equal(decodeJwtSub("lixo"), null);
 });
 
 test("refreshOnce: 2xx grava novo par e retorna access_jwt", async (t) => {
