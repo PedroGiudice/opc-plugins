@@ -10,7 +10,13 @@ import {
   planScaffoldingWrites,
   psSingleQuote,
   buildSyncTaskCommand,
+  buildGlobalSettings,
+  DEFAULT_OUTPUT_STYLE,
+  applyGlobalOutputStyle,
 } from "./setup.mjs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 // --- defaults por plataforma (rodam no SO corrente; asserts condicionais) ---
 
@@ -148,4 +154,125 @@ test("sync-cases-hidden.vbs: versionado no plugin, roda oculto e espera", async 
 test("buildSyncTaskCommand: path com aspas simples nao quebra o literal PS", () => {
   const cmd = buildSyncTaskCommand("C:\\Users\\O'Neill\\sync-cases.mjs");
   assert.ok(cmd.includes("$script='C:\\Users\\O''Neill\\sync-cases.mjs'"));
+});
+
+// --- buildGlobalSettings: output style default no settings.json GLOBAL ---
+
+test("buildGlobalSettings: sem arquivo previo -> cria com outputStyle", () => {
+  for (const raw of [null, "", "   "]) {
+    const out = buildGlobalSettings(raw);
+    assert.ok(out, String(raw));
+    assert.equal(out.changed, true);
+    assert.deepEqual(JSON.parse(out.json), { outputStyle: DEFAULT_OUTPUT_STYLE });
+  }
+});
+
+test("buildGlobalSettings: merge preserva as demais chaves do usuario", () => {
+  const raw = JSON.stringify({ model: "opus", theme: "dark-ansi", permissions: { defaultMode: "default" } });
+  const out = buildGlobalSettings(raw);
+  assert.equal(out.changed, true);
+  const parsed = JSON.parse(out.json);
+  assert.equal(parsed.outputStyle, DEFAULT_OUTPUT_STYLE);
+  assert.equal(parsed.model, "opus");
+  assert.equal(parsed.theme, "dark-ansi");
+  assert.deepEqual(parsed.permissions, { defaultMode: "default" });
+});
+
+test("buildGlobalSettings: outputStyle divergente e sobrescrito", () => {
+  const out = buildGlobalSettings(JSON.stringify({ outputStyle: "Explanatory", model: "opus" }));
+  assert.equal(out.changed, true);
+  const parsed = JSON.parse(out.json);
+  assert.equal(parsed.outputStyle, DEFAULT_OUTPUT_STYLE);
+  assert.equal(parsed.model, "opus");
+});
+
+test("buildGlobalSettings: idempotente (ja setado -> changed=false)", () => {
+  const out = buildGlobalSettings(JSON.stringify({ outputStyle: DEFAULT_OUTPUT_STYLE, model: "opus" }));
+  assert.equal(out.changed, false);
+  assert.equal(JSON.parse(out.json).outputStyle, DEFAULT_OUTPUT_STYLE);
+});
+
+test("buildGlobalSettings: JSON invalido/array/null -> null (nao pisa em config)", () => {
+  for (const raw of ["{nao json", "[1,2,3]", "null", "\"str\"", "42"]) {
+    assert.equal(buildGlobalSettings(raw), null, raw);
+  }
+});
+
+// --- applyGlobalOutputStyle: integridade em disco real (tmpdir) ---
+
+function withTmpHome(fn) {
+  const home = mkdtempSync(join(tmpdir(), "ck-setup-"));
+  try {
+    return fn(home);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+test("applyGlobalOutputStyle: settings valido -> merge, backup e SEM sobra de tmp", () => {
+  withTmpHome((home) => {
+    const dir = join(home, ".claude");
+    mkdirSync(dir, { recursive: true });
+    const target = join(dir, "settings.json");
+    const original = JSON.stringify({ model: "opus", theme: "dark-ansi" }, null, 2) + "\n";
+    writeFileSync(target, original, "utf-8");
+
+    const failures = [];
+    applyGlobalOutputStyle(failures, home);
+
+    assert.deepEqual(failures, []);
+    const parsed = JSON.parse(readFileSync(target, "utf-8"));
+    assert.equal(parsed.outputStyle, DEFAULT_OUTPUT_STYLE);
+    assert.equal(parsed.model, "opus");
+    assert.equal(parsed.theme, "dark-ansi");
+    // backup do estado anterior, byte-a-byte
+    assert.equal(readFileSync(`${target}.bak`, "utf-8"), original);
+    // nenhum tmp orfao (rename consumiu)
+    assert.equal(existsSync(`${target}.setup-tmp`), false);
+  });
+});
+
+test("applyGlobalOutputStyle: sem arquivo previo -> cria, sem backup", () => {
+  withTmpHome((home) => {
+    const failures = [];
+    applyGlobalOutputStyle(failures, home);
+    const target = join(home, ".claude", "settings.json");
+    assert.deepEqual(failures, []);
+    assert.deepEqual(JSON.parse(readFileSync(target, "utf-8")), { outputStyle: DEFAULT_OUTPUT_STYLE });
+    assert.equal(existsSync(`${target}.bak`), false);
+  });
+});
+
+test("applyGlobalOutputStyle: JSON invalido -> NAO altera o arquivo, vira pendencia", () => {
+  withTmpHome((home) => {
+    const dir = join(home, ".claude");
+    mkdirSync(dir, { recursive: true });
+    const target = join(dir, "settings.json");
+    const corrupto = '{ "model": "opus"  <<< quebrado';
+    writeFileSync(target, corrupto, "utf-8");
+
+    const failures = [];
+    applyGlobalOutputStyle(failures, home);
+
+    // arquivo intocado byte-a-byte + pendencia reportada
+    assert.equal(readFileSync(target, "utf-8"), corrupto);
+    assert.equal(failures.length, 1);
+    assert.match(failures[0], /JSON invalido/);
+  });
+});
+
+test("applyGlobalOutputStyle: idempotente (ja setado -> nao reescreve, sem backup novo)", () => {
+  withTmpHome((home) => {
+    const dir = join(home, ".claude");
+    mkdirSync(dir, { recursive: true });
+    const target = join(dir, "settings.json");
+    writeFileSync(target, JSON.stringify({ outputStyle: DEFAULT_OUTPUT_STYLE, model: "opus" }), "utf-8");
+
+    const failures = [];
+    applyGlobalOutputStyle(failures, home);
+
+    assert.deepEqual(failures, []);
+    assert.equal(existsSync(`${target}.bak`), false); // no-op nao gera backup
+    assert.equal(JSON.parse(readFileSync(target, "utf-8")).outputStyle, DEFAULT_OUTPUT_STYLE);
+  });
 });

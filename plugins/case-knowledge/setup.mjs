@@ -24,7 +24,7 @@
  * exibem mojibake em UTF-8 acentuado — mesma convencao do auth.mjs.
  */
 
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, renameSync, copyFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -98,6 +98,41 @@ export function planScaffoldingWrites(files, existsFn) {
     else plan.write.push(f);
   }
   return plan;
+}
+
+/**
+ * Output style default de TODA sessao. cmr-002 e as maquinas dos colegas sao
+ * de TRABALHO, nao de dev: as sessoes do CC nelas tem proposito juridico e os
+ * colegas sequer codam. Por isso o setup grava outputStyle no settings.json
+ * GLOBAL do usuario — sessoes abertas FORA de um caso ja nascem nesse style.
+ * O settings.local.json por-caso continua sobrepondo (override societario etc.)
+ * pela precedencia do CC (project local > user global).
+ */
+export const DEFAULT_OUTPUT_STYLE = "Legal Main Agent";
+
+/**
+ * Conteudo do ~/.claude/settings.json global com outputStyle setado,
+ * preservando as demais chaves do usuario. Pura.
+ *   - existingRaw null/vazio -> objeto novo { outputStyle }
+ *   - JSON de objeto valido  -> merge (outputStyle sobrescrito)
+ *   - JSON invalido/array/null/primitivo -> null (NAO pisa em config alheia;
+ *     o caller reporta como pendencia)
+ * Retorna { json, changed } ou null. `changed` distingue no-op (ja setado) de
+ * alteracao, para o passo de I/O evitar reescrita desnecessaria.
+ */
+export function buildGlobalSettings(existingRaw, style = DEFAULT_OUTPUT_STYLE) {
+  let obj = {};
+  if (existingRaw && existingRaw.trim()) {
+    try {
+      obj = JSON.parse(existingRaw);
+    } catch {
+      return null;
+    }
+    if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return null;
+  }
+  const changed = obj.outputStyle !== style;
+  obj.outputStyle = style;
+  return { json: `${JSON.stringify(obj, null, 2)}\n`, changed };
 }
 
 /** String single-quoted de PowerShell (escapa ' dobrando). */
@@ -283,6 +318,74 @@ function installSyncTask(pluginDir, failures) {
 }
 
 /**
+ * Escrita atomica: escreve num tmp no MESMO diretorio e faz rename (atomico no
+ * destino). Um crash no meio do writeFileSync deixa so o tmp orfao — o
+ * settings.json nunca fica meio-escrito/truncado. Mesmo padrao do sync-cases.mjs.
+ */
+function writeAtomic(path, content) {
+  const tmp = `${path}.setup-tmp`;
+  writeFileSync(tmp, content, "utf-8");
+  renameSync(tmp, path);
+}
+
+/**
+ * Passo extra: grava o output style default no settings.json GLOBAL do usuario
+ * (~/.claude/settings.json), preservando as demais chaves. Idempotente e
+ * best-effort — falha vira pendencia, nunca quebra o setup.
+ *
+ * INTEGRIDADE DO settings.json (critico — arquivo dificil de arrumar se quebra):
+ *   1. JSON invalido/corrompido -> NAO toca (preserva a config alheia).
+ *   2. Sanity check round-trip: re-parseia o JSON gerado antes de tocar o disco.
+ *   3. Backup do anterior (settings.json.bak) antes de sobrescrever -> rollback.
+ *   4. Escrita atomica (tmp + rename) -> nunca deixa o arquivo truncado.
+ */
+export function applyGlobalOutputStyle(failures, homedir = os.homedir()) {
+  log(`[extra] Output style padrao (${DEFAULT_OUTPUT_STYLE}) no settings global`);
+  const dir = join(homedir, ".claude");
+  const target = join(dir, "settings.json");
+  let existingRaw = null;
+  try {
+    if (existsSync(target)) existingRaw = readFileSync(target, "utf-8");
+  } catch (err) {
+    failures.push(
+      `nao consegui ler ${target} (${err.message}) — defina outputStyle "${DEFAULT_OUTPUT_STYLE}" manualmente.`,
+    );
+    return;
+  }
+  const built = buildGlobalSettings(existingRaw);
+  if (!built) {
+    failures.push(
+      `${target} tem JSON invalido — NAO alterado (config preservada); defina outputStyle "${DEFAULT_OUTPUT_STYLE}" manualmente.`,
+    );
+    return;
+  }
+  if (!built.changed && existingRaw !== null) {
+    log("      Ja configurado — sem alteracao.");
+    return;
+  }
+  // Sanity check: nunca escrever algo que nao re-parseia como esperado.
+  try {
+    if (JSON.parse(built.json).outputStyle !== DEFAULT_OUTPUT_STYLE) {
+      throw new Error("round-trip divergente");
+    }
+  } catch (err) {
+    failures.push(`sanity check do settings falhou (${err.message}) — ${target} NAO alterado.`);
+    return;
+  }
+  try {
+    mkdirSync(dir, { recursive: true });
+    if (existingRaw !== null) copyFileSync(target, `${target}.bak`); // rollback do estado anterior
+    writeAtomic(target, built.json);
+    log("      Definido (sessoes fora de um caso ja nascem nesse style).");
+    if (existingRaw !== null) log(`      Backup do anterior: ${target}.bak`);
+  } catch (err) {
+    failures.push(
+      `nao consegui escrever ${target} (${err.message}) — defina outputStyle "${DEFAULT_OUTPUT_STYLE}" manualmente.`,
+    );
+  }
+}
+
+/**
  * Verificacao extra (best-effort, nao instala nada): os geradores de peca
  * .docx da skill gerar-peca-cmr (plugin legal-team) exigem Python +
  * python-docx. Falta vira pendencia no resumo com o comando pronto.
@@ -350,6 +453,7 @@ async function main() {
   const failures = [];
   applyEnvVars(failures);
   installSyncTask(pluginDir, failures);
+  applyGlobalOutputStyle(failures);
   checkPecaGenerators(failures);
 
   log("");
