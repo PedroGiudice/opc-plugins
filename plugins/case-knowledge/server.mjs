@@ -20,6 +20,7 @@ import {
   buildCappedPayload,
   capContextChunks,
   renderDocumentChunks,
+  renderReconstrucao,
 } from "./format.mjs";
 import { requestWithAuth, APP_BASE, loginFlow } from "./auth.mjs";
 
@@ -209,6 +210,7 @@ const server = new McpServer(
       "- Abrir sessao / entender o caso: metadata -> manifesto -> stats; memoria_search para o que ja foi feito/decidido em sessoes anteriores.",
       "- Achar tema/argumento: search (filtros peca/fase/documento/categoria). Dois temas que precisam aparecer JUNTOS: buscar_interseccao. Os mais recentes sobre um tema: buscar_cronologico. Panorama por documentos distintos: buscar_diversificado. Mais-como-este a partir de chunks: recommend. Na direcao de X evitando Y: discover.",
       "- Ler na INTEGRA: contexto (janela ao redor de um chunk do search) ou document (peca inteira em ordem sequencial). O content do search e PREVIEW — nunca citar/transcrever a partir dele.",
+      "- Reconstruir passagens continuas de um tema atravessando varios documentos, em ordem processual: reconstruir. Prefira document para UMA peca inteira; reconstruir para o recorte de VARIOS documentos.",
       "- Contar/mapear valores de campo: facet. Citacoes do caso: facet em processos_citados/recursos_citados/sumulas_citadas/temas_repetitivos/dispositivos_citados; onde mais os autos citam um item: cross_ref.",
       "- Repeticao/duplicata entre pecas: comparar.",
     ].join("\n"),
@@ -444,6 +446,44 @@ server.tool(
       return { content: [{ type: "text", text: notice + header + formatted }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Erro ao expandir contexto: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// Tool: reconstruir
+server.tool(
+  "reconstruir",
+  "Reconstroi um recorte LEGIVEL e em ordem processual dos autos sobre um tema. " +
+    "Recall semantico -> top-N documentos -> janela de contexto ao redor de cada trecho " +
+    "que casou (intervalos fundidos) -> texto na ordem original com elipses honestas " +
+    "('[... fls. X-Y omitidas ...]') e trechos localizados marcados. Texto INTEGRAL dos " +
+    "chunks entregues (nunca preview). Use search para triagem; document para UMA peca " +
+    "inteira; reconstruir para leitura continua de VARIOS documentos sobre um tema.",
+  {
+    query: z.string().min(3).describe("Tema/pergunta em linguagem natural."),
+    modo: z.enum(["passagens", "documento"]).default("passagens")
+      .describe("passagens: faixas ao redor dos matches. documento: top-N documentos inteiros."),
+    janela: z.number().int().min(0).max(6).default(2)
+      .describe("Chunks de contexto antes/depois de cada match (modo passagens)."),
+    max_documentos: z.number().int().min(1).max(6).default(3)
+      .describe("Documentos distintos reconstruidos (top por relevancia)."),
+    peca: z.string().optional().describe("Filtrar recall por peca."),
+    fase: z.string().optional().describe("Filtrar por fase."),
+    documento: z.string().optional().describe("Restringir a um documento (nome exato)."),
+    numero_processo: z.string().optional().describe("Filtrar por numero CNJ."),
+  },
+  async ({ query, modo, janela, max_documentos, peca, fase, documento, numero_processo }) => {
+    try {
+      if (!CASE) throw new Error("Sessao nao esta dentro de um caso. Navegue para cases/<nome>.");
+      const data = await apiPost(`/cases/${CASE.name}/reconstruir`, {
+        query, modo, janela, max_documentos,
+        recall_limit: 80, max_chunks_por_doc: 24, max_chunks_global: 48,
+        peca, fase, documento, numero_processo,
+      });
+      const { text } = renderReconstrucao(data, { globalCap: OUTPUT_CAP_CHARS });
+      return { content: [{ type: "text", text }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Erro na reconstrucao: ${err.message}` }], isError: true };
     }
   }
 );
