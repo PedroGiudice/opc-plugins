@@ -11,6 +11,9 @@ import {
   planMemoriaActions,
   computeMemoriaBaseline,
   memFileType,
+  isSafeMemoriaCase,
+  isSafeMemoriaAuthor,
+  isSafeMemoriaFile,
   md5hex,
   readMemoriaState,
   readFeedbackState,
@@ -1068,5 +1071,144 @@ test("syncMemoria: feedback sob caso ja no pool (mesmo md5) NAO re-sobe (fecha p
     assert.ok(!posts.some((p) => p.url.endsWith("/feedback")), "feedback ja no pool nao pode re-subir");
   } finally {
     rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// ---------- CMR-138 (review adversarial): traversal via manifest forjado ----------
+// Manifest e DADO REMOTO nao-confiavel. Um autor forjado `../../PWNED/x` no
+// pool de feedback fazia `join(caseDir, author)` escapar de casesBase e gravar
+// arquivo arbitrario na maquina cliente. O sync de briefing ja valida com
+// VALID_CASE_NAME; o caminho de memoria largou o guard.
+
+test("syncMemoria: autor forjado com path traversal NAO grava fora de casesBase (repro review)", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr138-traversal-"));
+  const outside = join(base, "..", "PWNED"); // alvo do traversal (fora de base)
+  try {
+    // pool remoto forjado: autor com `../../PWNED/x` -> join escaparia de base.
+    const { deps } = makeFakeApi({
+      get: {
+        "/memoria-manifest": { cases: {} },
+        "/feedback-manifest": { authors: { "../../PWNED/x": { "evil.md": "hx" } } },
+        // conteudo (nunca deve ser buscado nem escrito apos o fix)
+        [`/feedback/${encodeURIComponent("../../PWNED/x")}`]: {
+          files: { "evil.md": { content: "PWNED", md5: "hx" } },
+        },
+      },
+      post: {},
+    });
+
+    await syncMemoria("http://t/api", base, "42", deps);
+
+    // NADA pode ter sido escrito fora de casesBase.
+    assert.ok(!existsSync(outside), "traversal gravou fora de casesBase");
+    assert.ok(!existsSync(join(outside, "x", "evil.md")), "arquivo forjado materializado fora de base");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true }); // limpa poluicao do RED, no-op pos-fix
+  }
+});
+
+test("syncMemoria: caso forjado com `..` NAO cria dir fora de casesBase", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr138-caso-traversal-"));
+  const outside = join(base, "..", "PWNED2");
+  try {
+    const { deps } = makeFakeApi({
+      get: {
+        // caso forjado com traversal no manifest de memoria
+        "/memoria-manifest": { cases: { "../PWNED2": { "42": { "evil.md": "hx" } } } },
+        "/feedback-manifest": { authors: {} },
+        [`/cases/${encodeURIComponent("../PWNED2")}/memoria/42`]: {
+          files: { "evil.md": { content: "PWNED", md5: "hx" } },
+        },
+      },
+      post: {},
+    });
+
+    await syncMemoria("http://t/api", base, "42", deps);
+
+    assert.ok(!existsSync(outside), "caso forjado escapou de casesBase");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+// ---------- CMR-138: Camada 1 (planMemoriaActions descarta segmentos inseguros) ----------
+
+test("planMemoriaActions: autor forjado `../../PWNED/x` no pool -> descartado do plano + warning", () => {
+  const remote = { ".feedback": { "../../PWNED/x": { "evil.md": "hx" }, "42": { "ok.md": "hh" } } };
+  const plan = planMemoriaActions(remote, {}, {}, "42");
+  // o autor forjado nunca entra em downloadAuthors
+  assert.ok(!plan.downloadAuthors.some((d) => d.author.includes("PWNED")), "autor forjado vazou pro plano");
+  // o autor legitimo do mesmo pool segue baixando (seed)
+  assert.ok(plan.downloadAuthors.some((d) => d.case === ".feedback" && d.author === "42"));
+  assert.ok(plan.warnings.some((w) => /autor com nome inseguro/.test(w) && w.includes("../../PWNED/x")));
+});
+
+test("planMemoriaActions: caso com `..` ou `/` -> descartado + warning", () => {
+  const remote = {
+    "../evil": { "42": { "a.md": "h" } },
+    "a/b": { "42": { "a.md": "h" } },
+    "ok-caso": { "42": { "a.md": "h" } },
+  };
+  const plan = planMemoriaActions(remote, {}, {}, "42");
+  assert.deepEqual(plan.downloadAuthors.map((d) => d.case), ["ok-caso"]);
+  assert.equal(plan.warnings.filter((w) => /caso com nome inseguro/.test(w)).length, 2);
+});
+
+test("planMemoriaActions: arquivo `../evil.md` ou `x.txt` -> descartado + warning", () => {
+  const remote = { "caso": { "42": { "../evil.md": "h1", "x.txt": "h2", "bom.md": "h3" } } };
+  const plan = planMemoriaActions(remote, {}, {}, "42");
+  assert.deepEqual(plan.downloadAuthors, [{ case: "caso", author: "42", files: ["bom.md"] }]);
+  assert.equal(plan.warnings.filter((w) => /arquivo com nome inseguro/.test(w)).length, 2);
+});
+
+test("planMemoriaActions: caso legitimo + pool .feedback + autor 42 + nota.md -> caminho feliz intacto", () => {
+  const remote = {
+    "novartis-anais-prado": { "42": { "nota.md": "h1" } },
+    ".feedback": { "42": { "feedback_lig.md": "h2" } },
+  };
+  const plan = planMemoriaActions(remote, {}, {}, "42");
+  assert.deepEqual(
+    plan.downloadAuthors.map((d) => `${d.case}/${d.author}/${d.files.join(",")}`).sort(),
+    [".feedback/42/feedback_lig.md", "novartis-anais-prado/42/nota.md"],
+  );
+  assert.deepEqual(plan.warnings, []);
+});
+
+test("planMemoriaActions: upload com arquivo inseguro no estado local -> descartado + warning (camada 1)", () => {
+  // defense-in-depth do lado do upload: nome de arquivo com traversal nunca vira POST.
+  const local = { "caso": { "42": { "../evil.md": { md5: "x", content: "meu" }, "bom.md": { md5: "y", content: "ok" } } } };
+  const plan = planMemoriaActions({}, local, {}, "42");
+  assert.deepEqual(plan.uploadFiles.map((u) => u.name), ["bom.md"]);
+  assert.ok(plan.warnings.some((w) => /upload: entrada com nome inseguro/.test(w)));
+});
+
+// ---------- CMR-138: Camada 2 (helpers puras de validacao de segmento) ----------
+
+test("isSafeMemoriaCase: aceita caso valido e o pseudo-caso .feedback; rejeita traversal", () => {
+  for (const ok of ["caso", "caso-a", "t1-case-novartis", ".feedback", "a.b_c-1"]) {
+    assert.equal(isSafeMemoriaCase(ok), true, `deveria aceitar ${ok}`);
+  }
+  for (const bad of ["..", "../x", ".hidden", "a/b", "a\\b", ".", "", 42, null, undefined]) {
+    assert.equal(isSafeMemoriaCase(bad), false, `deveria rejeitar ${String(bad)}`);
+  }
+});
+
+test("isSafeMemoriaAuthor: aceita id/slug; rejeita `.`, `..`, `/`, `\\` e nao-string", () => {
+  for (const ok of ["42", "carlos-magno", "a.b", "user_1", "X"]) {
+    assert.equal(isSafeMemoriaAuthor(ok), true, `deveria aceitar ${ok}`);
+  }
+  for (const bad of [".", "..", "../../PWNED/x", "a/b", "a\\b", "", "x y", 7, null, undefined]) {
+    assert.equal(isSafeMemoriaAuthor(bad), false, `deveria rejeitar ${String(bad)}`);
+  }
+});
+
+test("isSafeMemoriaFile: aceita *.md comum; rejeita traversal, nao-.md e artefatos", () => {
+  for (const ok of ["nota.md", "feedback_x.md", "recursos-agravo.md"]) {
+    assert.equal(isSafeMemoriaFile(ok), true, `deveria aceitar ${ok}`);
+  }
+  for (const bad of ["../evil.md", "a/b.md", "a\\b.md", "x.txt", "evil", "PEERS.md", "FEEDBACK.md", "..md", "", null, undefined]) {
+    assert.equal(isSafeMemoriaFile(bad), false, `deveria rejeitar ${String(bad)}`);
   }
 });

@@ -239,6 +239,48 @@ export function memFileType(name, content) {
   return "memoria";
 }
 
+// ---------- CMR-138 (review adversarial): validacao de segmentos de path ----------
+//
+// O manifest de memoria/feedback e DADO REMOTO nao-confiavel; caso/autor/arquivo
+// viram segmentos de path no disco do cliente. Sem guard, um autor forjado como
+// `../../PWNED/x` faz `join(caseDir, autor)` escapar de casesBase e gravar arquivo
+// arbitrario. O sync de briefing ja disciplina o nome de caso com VALID_CASE_NAME;
+// estas helpers espelham essa disciplina nos 3 niveis da arvore de memoria e sao
+// usadas em DUAS camadas (defense-in-depth): no plano (planMemoriaActions descarta
+// com aviso) E no ponto de escrita (syncMemoria revalida, appendLog + skip).
+const VALID_MEMORIA_AUTHOR = /^[A-Za-z0-9._-]+$/;
+
+/** Caso seguro: VALID_CASE_NAME (mesmo do briefing) OU o pseudo-caso `.feedback`
+ * (leading dot rejeitado por VALID_CASE_NAME -> precisa do OR explicito). */
+export function isSafeMemoriaCase(caso) {
+  return typeof caso === "string" && (VALID_CASE_NAME.test(caso) || caso === FEEDBACK_POOL);
+}
+
+/** Autor seguro: `^[A-Za-z0-9._-]+$` e nao `.`/`..` (ambos casam o regex mas
+ * traversam). Sem `/`, `\` (fora do char class). */
+export function isSafeMemoriaAuthor(author) {
+  return (
+    typeof author === "string" &&
+    author !== "." &&
+    author !== ".." &&
+    VALID_MEMORIA_AUTHOR.test(author)
+  );
+}
+
+/** Arquivo seguro: sem `/`, `\`, `..`; termina em `.md`; nao e artefato de
+ * indice (`PEERS.md`/`FEEDBACK.md`). */
+export function isSafeMemoriaFile(file) {
+  return (
+    typeof file === "string" &&
+    !file.includes("/") &&
+    !file.includes("\\") &&
+    !file.includes("..") &&
+    file.endsWith(".md") &&
+    file !== "PEERS.md" &&
+    file !== "FEEDBACK.md"
+  );
+}
+
 /**
  * Decide download e upload da memoria de caso a partir do manifest remoto
  * (por-autor), do estado local e do baseline.
@@ -302,13 +344,27 @@ export function planMemoriaActions(remoteManifest, localMemoriaState, baseline, 
   // ----- DOWNLOAD -----
   for (const [caso, authors] of Object.entries(remoteManifest)) {
     if (!authors || typeof authors !== "object") continue;
+    // Camada 1 (defense-in-depth): nome de caso inseguro do manifest nunca vira
+    // segmento de path no plano. Descarta com aviso legivel.
+    if (!isSafeMemoriaCase(caso)) {
+      plan.warnings.push(`download: caso com nome inseguro descartado: ${caso}`);
+      continue;
+    }
     for (const [author, files] of Object.entries(authors)) {
       if (!files || typeof files !== "object") continue;
+      if (!isSafeMemoriaAuthor(author)) {
+        plan.warnings.push(`download: autor com nome inseguro descartado em ${caso}: ${author}`);
+        continue;
+      }
       const localAuthor = localMemoriaState[caso]?.[author];
       const baseAuthor = baseline[caso]?.[author];
       const needs = [];
       for (const [file, info] of Object.entries(files)) {
         if (MEMORIA_IGNORED.has(file)) continue;
+        if (!isSafeMemoriaFile(file)) {
+          plan.warnings.push(`download: arquivo com nome inseguro descartado em ${caso}/${author}: ${file}`);
+          continue;
+        }
         const vmMd5 = fileMd5(info);
         const localMd5 = fileMd5(localAuthor?.[file]);
         const baseMd5 = fileMd5(baseAuthor?.[file]);
@@ -393,6 +449,13 @@ export function planMemoriaActions(remoteManifest, localMemoriaState, baseline, 
         }
 
         if (shouldUpload) {
+          // Camada 1: entrada com caso/arquivo inseguro nunca vira upload (o
+          // caso vira segmento na URL; o nome vai no corpo do POST). selfAuthor
+          // vem do JWT, nao do manifest -> nao entra nesta checagem.
+          if (!isSafeMemoriaCase(caso) || !isSafeMemoriaFile(file)) {
+            plan.warnings.push(`upload: entrada com nome inseguro descartada: ${caso}/${file}`);
+            continue;
+          }
           plan.uploadFiles.push({ case: caso, name: file, content, target });
         }
       }
@@ -989,6 +1052,13 @@ export async function syncMemoria(apiBase, casesBase, selfAuthor, deps = {}) {
   const succeeded = new Set();
   let downloaded = 0;
   for (const d of plan.downloadAuthors) {
+    // Camada 2 (fail-safe): revalida os segmentos imediatamente antes de qualquer
+    // mkdir/escrita. Redundante com a camada 1 por design (defense-in-depth) --
+    // um caso/autor inseguro que escapasse do plano nunca vira path no disco.
+    if (!isSafeMemoriaCase(d.case) || !isSafeMemoriaAuthor(d.author)) {
+      appendLog(casesBase, `memoria: segmento inseguro no plano (caso=${d.case} autor=${d.author}) -> skip download`);
+      continue;
+    }
     const isPool = d.case === FEEDBACK_POOL;
     const caseDir = isPool ? join(casesBase, FEEDBACK_POOL) : join(casesBase, d.case);
     if (!isPool && !existsSync(caseDir)) {
@@ -1013,6 +1083,11 @@ export async function syncMemoria(apiBase, casesBase, selfAuthor, deps = {}) {
       continue;
     }
     for (const file of d.files) {
+      // Camada 2 (fail-safe): nome de arquivo inseguro nunca vira escrita.
+      if (!isSafeMemoriaFile(file)) {
+        appendLog(casesBase, `memoria: arquivo inseguro no plano ${d.case}/${d.author}/${file} -> skip`);
+        continue;
+      }
       const remote = payload?.files?.[file];
       if (!remote || typeof remote.content !== "string") continue; // sumiu entre manifest e fetch
       try {
