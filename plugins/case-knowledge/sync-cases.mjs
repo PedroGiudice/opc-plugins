@@ -215,15 +215,21 @@ function frontmatterType(content) {
  *
  * Sinal PRIMARIO (spike CMR-138): o auto-memory nomeia arquivos livremente
  * (ex: `recursos-preferir-agravo.md`) e marca a categoria no frontmatter
- * (`metadata.type: feedback|project|reference`). Se o frontmatter declara
- * `type: feedback` -> "feedback". Senao, FALLBACK legado por nome: prefixo
+ * (`metadata.type: feedback|project|reference`). O frontmatter e primario nos
+ * DOIS sentidos: `type: feedback` -> "feedback"; type CONHECIDO nao-feedback
+ * (`project`/`reference`/`user`) -> "memoria" MESMO com nome `feedback_*`. Sem
+ * frontmatter ou type desconhecido -> FALLBACK legado por nome: prefixo
  * `feedback_` -> "feedback". Caso contrario -> "memoria".
  *
  * content ausente/nao-string -> so o fallback de prefixo.
  */
+const MEMORIA_KNOWN_TYPES = new Set(["project", "reference", "user"]);
+
 export function memFileType(name, content) {
-  if (typeof content === "string" && frontmatterType(content) === "feedback") {
-    return "feedback";
+  if (typeof content === "string") {
+    const ft = frontmatterType(content);
+    if (ft === "feedback") return "feedback";
+    if (MEMORIA_KNOWN_TYPES.has(ft)) return "memoria";
   }
   if (typeof name === "string" && name.startsWith("feedback_")) return "feedback";
   return "memoria";
@@ -244,20 +250,34 @@ export function memFileType(name, content) {
  *     uploadFiles:     [{ case, name, content, target: "memoria"|"feedback" }] }
  *
  * DOWNLOAD (qualquer autor, peer OU self, sob never-overwrite): baixa um
- * arquivo quando ausente local (seed) OU quando a VM mudou e o local ficou
- * intocado desde o ultimo sync (local === baseline). Edicao local divergente
- * -> preserva (nunca sobrescreve a auto-memory curada). Espelha planActions.
+ * arquivo quando
+ *   - ausente local E ausente do baseline (nunca visto nesta maquina -> seed), OU
+ *   - a VM mudou e o local ficou intocado desde o ultimo sync
+ *     (baseMd5 definido, local === baseline, local !== VM).
+ * Ausente local MAS presente no baseline = o usuario DELETOU localmente apos o
+ * baseline -> PRESERVA a delecao (nao baixa): a auto-memory deleta memorias
+ * erradas por design, ressuscita-las e nocivo. Edicao local divergente (inclui
+ * bootstrap sem baseline) -> preserva. Espelha o never-overwrite de planActions.
  *
  * UPLOAD (SO o proprio autor): deriva EXCLUSIVAMENTE de
  * localMemoriaState[caso][selfAuthor] -- nunca dos subdirs de peers ja baixados
  * (senao re-uploadaria memoria alheia como se fosse sua). selfAuthor null ->
- * nenhum upload. Roteamento por memFileType (frontmatter, com fallback prefixo).
+ * nenhum upload. Um arquivo do self entra em uploadFiles apenas quando
+ *   - a VM nao o tem (remoteMd5 === undefined), OU
+ *   - local !== VM E o arquivo NAO esta na fila de download deste plano
+ *     (se o plano decidiu baixar a versao da VM, subir a local antiga por cima
+ *     seria revert acidental da versao mais nova da VM).
+ * Roteamento por memFileType (frontmatter, com fallback prefixo).
  */
 export function planMemoriaActions(remoteManifest, localMemoriaState, baseline, selfAuthor) {
   const plan = { downloadAuthors: [], uploadFiles: [] };
   remoteManifest = remoteManifest || {};
   localMemoriaState = localMemoriaState || {};
   baseline = baseline || {};
+
+  // Fila de download deste plano (chave `${caso} ${autor} ${arquivo}`) para o
+  // gate de upload nao reverter uma versao da VM que este mesmo plano vai baixar.
+  const downloadKeys = new Set();
 
   // ----- DOWNLOAD -----
   for (const [caso, authors] of Object.entries(remoteManifest)) {
@@ -272,15 +292,15 @@ export function planMemoriaActions(remoteManifest, localMemoriaState, baseline, 
         const vmMd5 = fileMd5(info);
         const localMd5 = fileMd5(localAuthor?.[file]);
         const baseMd5 = fileMd5(baseAuthor?.[file]);
-        if (localMd5 === undefined) {
-          needs.push(file); // ausente local -> semeia
-        } else if (localMd5 === vmMd5) {
-          // ja sincronizado: nada a fazer
-        } else if (baseMd5 !== undefined && localMd5 === baseMd5) {
-          needs.push(file); // VM mudou, local intocado desde o ultimo download
-        } else {
-          // edicao local (ou bootstrap divergente) -> preserva, nao baixa
+        const seed = localMd5 === undefined && baseMd5 === undefined;
+        const vmChangedUntouched =
+          baseMd5 !== undefined && localMd5 === baseMd5 && localMd5 !== vmMd5;
+        if (seed || vmChangedUntouched) {
+          needs.push(file);
+          downloadKeys.add(`${caso} ${author} ${file}`);
         }
+        // ausente + baseline presente -> delecao local preservada;
+        // divergente (edicao ou bootstrap sem baseline) -> preservado.
       }
       if (needs.length > 0) plan.downloadAuthors.push({ case: caso, author, files: needs });
     }
@@ -291,15 +311,21 @@ export function planMemoriaActions(remoteManifest, localMemoriaState, baseline, 
     for (const [caso, authors] of Object.entries(localMemoriaState)) {
       const selfFiles = authors?.[selfAuthor];
       if (!selfFiles || typeof selfFiles !== "object") continue;
+      const remoteSelf = remoteManifest[caso]?.[selfAuthor];
       for (const [file, info] of Object.entries(selfFiles)) {
         if (MEMORIA_IGNORED.has(file)) continue;
-        const content = fileContent(info);
-        plan.uploadFiles.push({
-          case: caso,
-          name: file,
-          content,
-          target: memFileType(file, content),
-        });
+        const localMd5 = fileMd5(info);
+        const remoteMd5 = fileMd5(remoteSelf?.[file]);
+        const queuedForDownload = downloadKeys.has(`${caso} ${selfAuthor} ${file}`);
+        if (remoteMd5 === undefined || (localMd5 !== remoteMd5 && !queuedForDownload)) {
+          const content = fileContent(info);
+          plan.uploadFiles.push({
+            case: caso,
+            name: file,
+            content,
+            target: memFileType(file, content),
+          });
+        }
       }
     }
   }

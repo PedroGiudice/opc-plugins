@@ -411,3 +411,81 @@ test("computeMemoriaBaseline adota md5 da VM quando local ja == VM", () => {
   const base = computeMemoriaBaseline(remote, local, {}, new Set(), new Set(), "42");
   assert.equal(base["caso"]["42"]["a.md"], "x");
 });
+
+// --- FIX 1 (CMR-138): delecao local nao pode ser ressuscitada ---
+
+test("download: local ausente + baseline presente + VM tem -> NAO baixa (delecao preservada)", () => {
+  // usuario deletou a.md localmente apos o baseline; a auto-memory deleta
+  // memorias erradas por design -> ressuscitar e nocivo.
+  const remote = { "caso": { "42": { "a.md": { md5: "vm" } } } };
+  const local = {}; // a.md ausente local
+  const baseline = { "caso": { "42": { "a.md": "base" } } }; // ja foi baixado antes
+  const plan = planMemoriaActions(remote, local, baseline, "42");
+  assert.deepEqual(plan.downloadAuthors, []);
+});
+
+test("download: local ausente + baseline ausente -> baixa (seed)", () => {
+  const remote = { "caso": { "42": { "a.md": { md5: "vm" } } } };
+  const plan = planMemoriaActions(remote, {}, {}, "42");
+  assert.deepEqual(plan.downloadAuthors, [{ case: "caso", author: "42", files: ["a.md"] }]);
+});
+
+test("download: local existe, baseline ausente e VM difere -> NAO baixa (preserva bootstrap divergente)", () => {
+  const remote = { "caso": { "42": { "a.md": { md5: "vm-novo" } } } };
+  const local = { "caso": { "42": { "a.md": "local-existente" } } };
+  const baseline = {}; // nunca registrado no baseline
+  const plan = planMemoriaActions(remote, local, baseline, "42");
+  assert.deepEqual(plan.downloadAuthors, []);
+});
+
+// --- FIX 2 (CMR-138): gate de upload por divergencia ---
+
+test("upload: self local == baseline e VM mudou -> download SIM, upload NAO", () => {
+  const remote = { "caso": { "42": { "a.md": { md5: "vm-novo", content: "vm" } } } };
+  const local = { "caso": { "42": { "a.md": { md5: "base", content: "local" } } } };
+  const baseline = { "caso": { "42": { "a.md": "base" } } };
+  const plan = planMemoriaActions(remote, local, baseline, "42");
+  assert.deepEqual(plan.downloadAuthors, [{ case: "caso", author: "42", files: ["a.md"] }]);
+  assert.deepEqual(plan.uploadFiles, []); // nao reverte a versao mais nova da VM
+});
+
+test("upload: self editado (!=baseline) e VM mudou -> download NAO, upload SIM (last-write-wins)", () => {
+  const remote = { "caso": { "42": { "a.md": { md5: "vm-novo", content: "vm" } } } };
+  const local = { "caso": { "42": { "a.md": { md5: "local-editado", content: "meu" } } } };
+  const baseline = { "caso": { "42": { "a.md": "base-antigo" } } };
+  const plan = planMemoriaActions(remote, local, baseline, "42");
+  assert.deepEqual(plan.downloadAuthors, []); // edicao local preservada
+  assert.deepEqual(plan.uploadFiles.map((u) => u.name), ["a.md"]);
+});
+
+test("upload: self local == remote -> nem download nem upload", () => {
+  const remote = { "caso": { "42": { "a.md": { md5: "x", content: "vm" } } } };
+  const local = { "caso": { "42": { "a.md": { md5: "x", content: "meu" } } } };
+  const baseline = { "caso": { "42": { "a.md": "x" } } };
+  const plan = planMemoriaActions(remote, local, baseline, "42");
+  assert.deepEqual(plan.downloadAuthors, []);
+  assert.deepEqual(plan.uploadFiles, []);
+});
+
+test("upload: self so-local (VM nao tem) -> upload", () => {
+  const remote = {}; // VM nao tem o caso/autor
+  const local = { "caso": { "42": { "a.md": { md5: "x", content: "meu" } } } };
+  const plan = planMemoriaActions(remote, local, {}, "42");
+  assert.deepEqual(plan.uploadFiles.map((u) => u.name), ["a.md"]);
+});
+
+// --- FIX 3 (CMR-138): frontmatter conhecido vence o prefixo nos dois sentidos ---
+
+test("memFileType: feedback_ com frontmatter type project -> memoria (frontmatter primario)", () => {
+  const content = "---\nmetadata:\n  type: project\n---\ncorpo";
+  assert.equal(memFileType("feedback_x.md", content), "memoria");
+});
+
+test("memFileType: feedback_ sem frontmatter -> feedback (fallback prefixo mantido)", () => {
+  assert.equal(memFileType("feedback_y.md", "sem frontmatter"), "feedback");
+});
+
+test("memFileType: feedback_ com frontmatter type desconhecido -> feedback (fallback prefixo)", () => {
+  const content = "---\ntype: decision\n---\ncorpo";
+  assert.equal(memFileType("feedback_z.md", content), "feedback");
+});
