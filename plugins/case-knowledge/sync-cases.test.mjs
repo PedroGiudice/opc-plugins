@@ -1,6 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { planActions, computeBaseline, isExcluded, archiveTarget } from "./sync-cases.mjs";
+import {
+  planActions,
+  computeBaseline,
+  isExcluded,
+  archiveTarget,
+  planMemoriaActions,
+  computeMemoriaBaseline,
+  memFileType,
+} from "./sync-cases.mjs";
 
 test("caso novo: mkdir + download de todos os arquivos do manifest", () => {
   const manifest = [
@@ -256,4 +264,150 @@ test("mergeAutoMemoryDir: raw que ja contem autoMemoryDirectory preserva a escol
   // nao sobrescreve escolha local ja presente
   assert.equal(r.autoMemoryDirectory, "/escolha/local");
   assert.equal(r.outputStyle, "X");
+});
+
+// ---------- CMR-138: memoria de caso sincronizavel (funcoes puras) ----------
+
+// --- memFileType: roteamento por frontmatter (primario) + prefixo (fallback) ---
+
+test("memFileType: frontmatter metadata.type feedback (nome livre) -> feedback", () => {
+  const content = "---\nmetadata:\n  type: feedback\n  tags: [x]\n---\ncorpo";
+  assert.equal(memFileType("recursos-preferir-agravo.md", content), "feedback");
+});
+
+test("memFileType: frontmatter type project (nome livre) -> memoria", () => {
+  const content = "---\nmetadata:\n  type: project\n---\ncorpo";
+  assert.equal(memFileType("recursos-preferir-agravo.md", content), "memoria");
+});
+
+test("memFileType: frontmatter type feedback top-level -> feedback", () => {
+  const content = "---\ntype: feedback\n---\ncorpo";
+  assert.equal(memFileType("nota-solta.md", content), "feedback");
+});
+
+test("memFileType: MEMORY.md sem frontmatter -> memoria", () => {
+  assert.equal(memFileType("MEMORY.md", "# indice\n- a\n- b"), "memoria");
+});
+
+test("memFileType: fallback legado prefixo feedback_ sem frontmatter -> feedback", () => {
+  assert.equal(memFileType("feedback_y.md", "sem frontmatter"), "feedback");
+});
+
+test("memFileType: content ausente/nao-string -> so o fallback de prefixo", () => {
+  assert.equal(memFileType("feedback_z.md", undefined), "feedback");
+  assert.equal(memFileType("project_z.md", null), "memoria");
+});
+
+test("memFileType: frontmatter tolerante a CRLF e aspas", () => {
+  const content = "---\r\nmetadata:\r\n  type: \"feedback\"\r\n---\r\ncorpo";
+  assert.equal(memFileType("qualquer.md", content), "feedback");
+});
+
+// --- planMemoriaActions: upload roteia por-autor e por-tipo ---
+
+test("upload roteia feedback_ para feedback e resto para memoria", () => {
+  const plan = planMemoriaActions({}, { "caso": { "42": { "project_x.md": { md5: "a", content: "..." }, "feedback_y.md": { md5: "b", content: "..." } } } }, {}, "42");
+  const targets = Object.fromEntries(plan.uploadFiles.map((u) => [u.name, u.target]));
+  assert.equal(targets["project_x.md"], "memoria");
+  assert.equal(targets["feedback_y.md"], "feedback");
+});
+
+test("upload: nome-livre com frontmatter metadata.type feedback -> target feedback", () => {
+  const plan = planMemoriaActions({}, { "caso": { "42": { "recursos-agravo.md": { md5: "a", content: "---\nmetadata:\n  type: feedback\n---\nx" } } } }, {}, "42");
+  assert.equal(plan.uploadFiles.length, 1);
+  assert.equal(plan.uploadFiles[0].target, "feedback");
+});
+
+test("upload: nome-livre com frontmatter type project -> target memoria", () => {
+  const plan = planMemoriaActions({}, { "caso": { "42": { "estrategia.md": { md5: "a", content: "---\nmetadata:\n  type: project\n---\nx" } } } }, {}, "42");
+  assert.equal(plan.uploadFiles[0].target, "memoria");
+});
+
+test("upload deriva SO do self, ignora subdirs de peers ja baixados", () => {
+  const local = { "caso": { "42": { "a.md": { md5: "x", content: "meu" } }, "99": { "b.md": { md5: "y", content: "alheio" } } } };
+  const plan = planMemoriaActions({}, local, {}, "42");
+  assert.deepEqual(plan.uploadFiles.map((u) => u.name), ["a.md"]);
+});
+
+test("upload: selfAuthor null -> nenhum upload (defensivo)", () => {
+  const local = { "caso": { "42": { "a.md": { md5: "x", content: "meu" } } } };
+  const plan = planMemoriaActions({}, local, {}, null);
+  assert.deepEqual(plan.uploadFiles, []);
+});
+
+test("upload: PEERS.md nunca e considerado arquivo de autor", () => {
+  const local = { "caso": { "42": { "PEERS.md": { md5: "p", content: "indice" }, "a.md": { md5: "x", content: "meu" } } } };
+  const plan = planMemoriaActions({}, local, {}, "42");
+  assert.deepEqual(plan.uploadFiles.map((u) => u.name), ["a.md"]);
+});
+
+// --- planMemoriaActions: download inclui self sob never-overwrite ---
+
+test("maquina nova baixa o proprio self para semear (local ausente)", () => {
+  const plan = planMemoriaActions({ "caso": { "42": { "a.md": { md5: "x" } } } }, {}, {}, "42");
+  assert.equal(plan.downloadAuthors.filter((d) => d.author === "42").length, 1);
+});
+
+test("download peer: local intocado desde o baseline e VM mudou -> baixa", () => {
+  const remote = { "caso": { "99": { "b.md": { md5: "vm-novo" } } } };
+  const local = { "caso": { "99": { "b.md": "base-antigo" } } };
+  const baseline = { "caso": { "99": { "b.md": "base-antigo" } } };
+  const plan = planMemoriaActions(remote, local, baseline, "42");
+  assert.deepEqual(plan.downloadAuthors, [{ case: "caso", author: "99", files: ["b.md"] }]);
+});
+
+test("self editado localmente desde o baseline NAO e baixado (preserva)", () => {
+  const remote = { "caso": { "42": { "a.md": { md5: "vm-novo" } } } };
+  const local = { "caso": { "42": { "a.md": "local-editado" } } };
+  const baseline = { "caso": { "42": { "a.md": "base-antigo" } } }; // local != base => editado
+  const plan = planMemoriaActions(remote, local, baseline, "42");
+  assert.equal(plan.downloadAuthors.filter((d) => d.author === "42").length, 0);
+});
+
+test("download: local == baseline == VM (ja sincronizado) -> nao baixa", () => {
+  const remote = { "caso": { "42": { "a.md": { md5: "x" } } } };
+  const local = { "caso": { "42": { "a.md": "x" } } };
+  const baseline = { "caso": { "42": { "a.md": "x" } } };
+  const plan = planMemoriaActions(remote, local, baseline, "42");
+  assert.deepEqual(plan.downloadAuthors, []);
+});
+
+test("download: PEERS.md do manifest nunca e baixado como arquivo de autor", () => {
+  const remote = { "caso": { "42": { "PEERS.md": { md5: "p" }, "a.md": { md5: "x" } } } };
+  const plan = planMemoriaActions(remote, {}, {}, "42");
+  assert.deepEqual(plan.downloadAuthors, [{ case: "caso", author: "42", files: ["a.md"] }]);
+});
+
+// --- computeMemoriaBaseline: registra md5 de download E upload self ---
+
+test("computeMemoriaBaseline registra md5 de arquivo self uploadado (evita ping-pong)", () => {
+  // self "42" escreveu a.md local (md5 x), ainda ausente na VM -> foi uploadado
+  const remote = {};
+  const local = { "caso": { "42": { "a.md": { md5: "x", content: "meu" } } } };
+  const uploaded = new Set(["caso 42 a.md"]);
+  const base = computeMemoriaBaseline(remote, local, {}, new Set(), uploaded, "42");
+  assert.equal(base["caso"]["42"]["a.md"], "x");
+});
+
+test("computeMemoriaBaseline registra md5 da VM para arquivo baixado", () => {
+  const remote = { "caso": { "99": { "b.md": { md5: "vm-novo" } } } };
+  const local = {};
+  const succeeded = new Set(["caso 99 b.md"]);
+  const base = computeMemoriaBaseline(remote, local, {}, succeeded, new Set(), "42");
+  assert.equal(base["caso"]["99"]["b.md"], "vm-novo");
+});
+
+test("computeMemoriaBaseline preserva prev em conflito (nao baixado, nao sincronizado)", () => {
+  const remote = { "caso": { "42": { "a.md": { md5: "vm-novo" } } } };
+  const local = { "caso": { "42": { "a.md": "local-editado" } } };
+  const prev = { "caso": { "42": { "a.md": "base-antigo" } } };
+  const base = computeMemoriaBaseline(remote, local, prev, new Set(), new Set(), "42");
+  assert.equal(base["caso"]["42"]["a.md"], "base-antigo");
+});
+
+test("computeMemoriaBaseline adota md5 da VM quando local ja == VM", () => {
+  const remote = { "caso": { "42": { "a.md": { md5: "x" } } } };
+  const local = { "caso": { "42": { "a.md": "x" } } };
+  const base = computeMemoriaBaseline(remote, local, {}, new Set(), new Set(), "42");
+  assert.equal(base["caso"]["42"]["a.md"], "x");
 });

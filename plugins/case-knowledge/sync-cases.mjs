@@ -157,6 +157,221 @@ export function computeBaseline(manifestCases, localState, prevBaseline, succeed
   return next;
 }
 
+// ---------- CMR-138: memoria de caso sincronizavel (por-autor) ----------
+//
+// A memoria de caso e uma arvore por-autor: cada advogado (tenant/autor) tem seu
+// subdir; peers baixados vivem em `.memoria/<peer>/`, a memoria do proprio autor
+// (auto-memory) e a fonte dos uploads. Estas puras decidem o que baixar (peers +
+// self sob never-overwrite) e o que subir (SO os arquivos do proprio autor,
+// roteados para memoria-de-caso ou pool-de-feedback). Wiring (fs/rede) e a Task 10.
+
+/**
+ * Normaliza o valor de um arquivo no manifest/baseline/estado local para a
+ * string md5. O server real usa md5 STRING PLANA; os testes e o manifest
+ * teorico usam objeto `{ md5, content? }`. Aceita ambos; qualquer outra coisa
+ * (undefined, numero, etc) -> undefined.
+ */
+function fileMd5(v) {
+  if (typeof v === "string") return v;
+  if (v && typeof v === "object" && typeof v.md5 === "string") return v.md5;
+  return undefined;
+}
+
+/** Conteudo do arquivo (para upload). So o shape objeto `{ content }` carrega. */
+function fileContent(v) {
+  if (v && typeof v === "object" && typeof v.content === "string") return v.content;
+  return undefined;
+}
+
+// PEERS.md e um indice gerado dentro do dir de memoria, nunca um arquivo de
+// autor -- fica fora de download e upload.
+const MEMORIA_IGNORED = new Set(["PEERS.md"]);
+
+/**
+ * Le o `type` declarado no frontmatter YAML (bloco entre `---` no INICIO do
+ * arquivo). Sem lib YAML: varre as linhas do bloco e casa `type: <valor>`
+ * (top-level OU aninhado sob `metadata:`), tolerante a indentacao, aspas e
+ * comentario inline. Se qualquer linha declarar `type: feedback`, retorna
+ * "feedback"; senao retorna o primeiro `type:` encontrado (ex: "project");
+ * sem frontmatter/sem type -> undefined.
+ */
+function frontmatterType(content) {
+  const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!m) return undefined;
+  let first;
+  for (const line of m[1].split(/\r?\n/)) {
+    const lm = line.match(/^\s*type:\s*["']?([A-Za-z_]+)["']?\s*(?:#.*)?$/);
+    if (!lm) continue;
+    const v = lm[1].toLowerCase();
+    if (v === "feedback") return "feedback";
+    if (first === undefined) first = v;
+  }
+  return first;
+}
+
+/**
+ * Roteia um arquivo de memoria para "feedback" (pool compartilhado por autor)
+ * ou "memoria" (memoria-de-caso do autor).
+ *
+ * Sinal PRIMARIO (spike CMR-138): o auto-memory nomeia arquivos livremente
+ * (ex: `recursos-preferir-agravo.md`) e marca a categoria no frontmatter
+ * (`metadata.type: feedback|project|reference`). Se o frontmatter declara
+ * `type: feedback` -> "feedback". Senao, FALLBACK legado por nome: prefixo
+ * `feedback_` -> "feedback". Caso contrario -> "memoria".
+ *
+ * content ausente/nao-string -> so o fallback de prefixo.
+ */
+export function memFileType(name, content) {
+  if (typeof content === "string" && frontmatterType(content) === "feedback") {
+    return "feedback";
+  }
+  if (typeof name === "string" && name.startsWith("feedback_")) return "feedback";
+  return "memoria";
+}
+
+/**
+ * Decide download e upload da memoria de caso a partir do manifest remoto
+ * (por-autor), do estado local e do baseline.
+ *
+ * Shapes (destripados do envelope pela Task 10):
+ *   remoteManifest:     { <caso>: { <autor>: { <arquivo>: md5|{md5} } } }
+ *   localMemoriaState:  { <caso>: { <autor>: { <arquivo>: md5|{md5,content} } } }
+ *   baseline:           { <caso>: { <autor>: { <arquivo>: md5|{md5} } } }
+ *   selfAuthor:         id do proprio autor (string) ou null
+ *
+ * Retorna:
+ *   { downloadAuthors: [{ case, author, files: [nome] }],
+ *     uploadFiles:     [{ case, name, content, target: "memoria"|"feedback" }] }
+ *
+ * DOWNLOAD (qualquer autor, peer OU self, sob never-overwrite): baixa um
+ * arquivo quando ausente local (seed) OU quando a VM mudou e o local ficou
+ * intocado desde o ultimo sync (local === baseline). Edicao local divergente
+ * -> preserva (nunca sobrescreve a auto-memory curada). Espelha planActions.
+ *
+ * UPLOAD (SO o proprio autor): deriva EXCLUSIVAMENTE de
+ * localMemoriaState[caso][selfAuthor] -- nunca dos subdirs de peers ja baixados
+ * (senao re-uploadaria memoria alheia como se fosse sua). selfAuthor null ->
+ * nenhum upload. Roteamento por memFileType (frontmatter, com fallback prefixo).
+ */
+export function planMemoriaActions(remoteManifest, localMemoriaState, baseline, selfAuthor) {
+  const plan = { downloadAuthors: [], uploadFiles: [] };
+  remoteManifest = remoteManifest || {};
+  localMemoriaState = localMemoriaState || {};
+  baseline = baseline || {};
+
+  // ----- DOWNLOAD -----
+  for (const [caso, authors] of Object.entries(remoteManifest)) {
+    if (!authors || typeof authors !== "object") continue;
+    for (const [author, files] of Object.entries(authors)) {
+      if (!files || typeof files !== "object") continue;
+      const localAuthor = localMemoriaState[caso]?.[author];
+      const baseAuthor = baseline[caso]?.[author];
+      const needs = [];
+      for (const [file, info] of Object.entries(files)) {
+        if (MEMORIA_IGNORED.has(file)) continue;
+        const vmMd5 = fileMd5(info);
+        const localMd5 = fileMd5(localAuthor?.[file]);
+        const baseMd5 = fileMd5(baseAuthor?.[file]);
+        if (localMd5 === undefined) {
+          needs.push(file); // ausente local -> semeia
+        } else if (localMd5 === vmMd5) {
+          // ja sincronizado: nada a fazer
+        } else if (baseMd5 !== undefined && localMd5 === baseMd5) {
+          needs.push(file); // VM mudou, local intocado desde o ultimo download
+        } else {
+          // edicao local (ou bootstrap divergente) -> preserva, nao baixa
+        }
+      }
+      if (needs.length > 0) plan.downloadAuthors.push({ case: caso, author, files: needs });
+    }
+  }
+
+  // ----- UPLOAD (so o proprio autor) -----
+  if (selfAuthor !== null && selfAuthor !== undefined) {
+    for (const [caso, authors] of Object.entries(localMemoriaState)) {
+      const selfFiles = authors?.[selfAuthor];
+      if (!selfFiles || typeof selfFiles !== "object") continue;
+      for (const [file, info] of Object.entries(selfFiles)) {
+        if (MEMORIA_IGNORED.has(file)) continue;
+        const content = fileContent(info);
+        plan.uploadFiles.push({
+          case: caso,
+          name: file,
+          content,
+          target: memFileType(file, content),
+        });
+      }
+    }
+  }
+  return plan;
+}
+
+/**
+ * Novo baseline por-autor a persistir apos aplicar o plano de memoria. Analogo
+ * a computeBaseline, sobre a arvore { <caso>: { <autor>: { <arquivo>: md5 } } }.
+ *
+ *   - Arquivo BAIXADO com sucesso (peer ou self) -> md5 da VM (agora local === VM).
+ *   - Arquivo self UPLOADADO -> md5 LOCAL (a VM passou a te-lo). Sem isso o
+ *     proximo ciclo veria o self recem-uploadado sem baseline e poderia
+ *     re-baixar em ping-pong.
+ *   - Arquivo ja sincronizado (local === VM) -> adota md5 da VM.
+ *   - Conflito/falha -> mantem o baseline anterior.
+ *   - Autor/caso ausente do manifest E nao uploadado -> removido (orfao).
+ *
+ * succeeded: Set de chaves `${caso} ${autor} ${arquivo}` baixadas com sucesso.
+ * uploaded:  Set de chaves `${caso} ${selfAuthor} ${arquivo}` subidas com sucesso.
+ */
+export function computeMemoriaBaseline(remoteManifest, localMemoriaState, prevBaseline, succeeded, uploaded, selfAuthor) {
+  remoteManifest = remoteManifest || {};
+  localMemoriaState = localMemoriaState || {};
+  prevBaseline = prevBaseline || {};
+  succeeded = succeeded || new Set();
+  uploaded = uploaded || new Set();
+
+  const next = {};
+  const put = (caso, author, file, md5) => {
+    if (md5 === undefined) return;
+    (next[caso] ??= {});
+    (next[caso][author] ??= {});
+    next[caso][author][file] = md5;
+  };
+
+  // Passo 1: espelha computeBaseline sobre a arvore por-autor da VM.
+  for (const [caso, authors] of Object.entries(remoteManifest)) {
+    if (!authors || typeof authors !== "object") continue;
+    for (const [author, files] of Object.entries(authors)) {
+      if (!files || typeof files !== "object") continue;
+      const localAuthor = localMemoriaState[caso]?.[author];
+      const prevAuthor = prevBaseline[caso]?.[author] ?? {};
+      for (const [file, info] of Object.entries(files)) {
+        if (MEMORIA_IGNORED.has(file)) continue;
+        const vmMd5 = fileMd5(info);
+        const key = `${caso} ${author} ${file}`;
+        if (succeeded.has(key)) {
+          put(caso, author, file, vmMd5); // baixado -> agora igual a VM
+        } else if (vmMd5 !== undefined && fileMd5(localAuthor?.[file]) === vmMd5) {
+          put(caso, author, file, vmMd5); // ja sincronizado -> adota
+        } else if (prevAuthor[file] !== undefined) {
+          put(caso, author, file, fileMd5(prevAuthor[file])); // conflito/falha -> mantem
+        }
+      }
+    }
+  }
+
+  // Passo 2: arquivos self UPLOADADOS -> md5 local (a VM passou a te-lo).
+  if (selfAuthor !== null && selfAuthor !== undefined) {
+    for (const [caso, authors] of Object.entries(localMemoriaState)) {
+      const selfFiles = authors?.[selfAuthor];
+      if (!selfFiles || typeof selfFiles !== "object") continue;
+      for (const [file, info] of Object.entries(selfFiles)) {
+        if (MEMORIA_IGNORED.has(file)) continue;
+        if (uploaded.has(`${caso} ${selfAuthor} ${file}`)) put(caso, selfAuthor, file, fileMd5(info));
+      }
+    }
+  }
+  return next;
+}
+
 /**
  * Conteudo do <caso>/.claude/settings.local.json a provisionar, a partir do
  * settings.json do scaffolding (<casesBase>/.claude/settings.json). O CC NAO
