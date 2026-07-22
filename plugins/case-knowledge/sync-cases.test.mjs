@@ -18,8 +18,9 @@ import {
   buildFeedbackIndex,
   syncMemoria,
   postJson,
+  provisionCaseSettings,
 } from "./sync-cases.mjs";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, readdirSync } from "node:fs";
 
 test("caso novo: mkdir + download de todos os arquivos do manifest", () => {
   const manifest = [
@@ -275,6 +276,141 @@ test("mergeAutoMemoryDir: raw que ja contem autoMemoryDirectory preserva a escol
   // nao sobrescreve escolha local ja presente
   assert.equal(r.autoMemoryDirectory, "/escolha/local");
   assert.equal(r.outputStyle, "X");
+});
+
+// --- provisionCaseSettings: injecao de autoMemoryDirectory em disco (tmpdir real) ---
+
+function withCasesBase(fn) {
+  const base = mkdtempSync(join(tmpdir(), "ck-sync-"));
+  try {
+    return fn(base);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+}
+
+const SCAFFOLDING = JSON.stringify({ outputStyle: "Legal Main Agent", permissions: { allow: ["Read"] } });
+
+function seedScaffolding(base) {
+  mkdirSync(join(base, ".claude"), { recursive: true });
+  writeFileSync(join(base, ".claude", "settings.json"), SCAFFOLDING, "utf-8");
+}
+
+test("provisionCaseSettings: caso NOVO recebe settings.local.json com autoMemoryDirectory", () => {
+  withCasesBase((base) => {
+    seedScaffolding(base);
+    mkdirSync(join(base, "alpha"), { recursive: true });
+    const errors = [];
+    const n = provisionCaseSettings(base, [{ name: "alpha" }], {}, "42", errors);
+    assert.equal(n, 1);
+    assert.deepEqual(errors, []);
+    const target = join(base, "alpha", ".claude", "settings.local.json");
+    const out = JSON.parse(readFileSync(target, "utf-8"));
+    assert.equal(out.outputStyle, "Legal Main Agent");
+    // path absoluto, normalizado para `/`, terminando em .memoria/<autor>
+    assert.equal(out.autoMemoryDirectory, `${base}/alpha/.memoria/42`.replace(/\\/g, "/"));
+  });
+});
+
+test("provisionCaseSettings: caso LEGADO recebe autoMemoryDirectory via merge (backup + preserva chaves)", () => {
+  withCasesBase((base) => {
+    seedScaffolding(base);
+    const caseClaude = join(base, "beta", ".claude");
+    mkdirSync(caseClaude, { recursive: true });
+    const legacy = `${JSON.stringify({ outputStyle: "Legal Societário", permissions: { allow: ["Bash"] } }, null, 2)}\n`;
+    const target = join(caseClaude, "settings.local.json");
+    writeFileSync(target, legacy, "utf-8");
+
+    const errors = [];
+    const n = provisionCaseSettings(base, [{ name: "beta" }], {}, "42", errors);
+    assert.equal(n, 1);
+    assert.deepEqual(errors, []);
+    const out = JSON.parse(readFileSync(target, "utf-8"));
+    assert.equal(out.autoMemoryDirectory, `${base}/beta/.memoria/42`.replace(/\\/g, "/"));
+    assert.equal(out.outputStyle, "Legal Societário"); // preservado
+    assert.deepEqual(out.permissions, { allow: ["Bash"] });
+    // backup do estado anterior, byte-a-byte
+    assert.equal(readFileSync(`${target}.bak`, "utf-8"), legacy);
+  });
+});
+
+test("provisionCaseSettings: LEGADO ja com autoMemoryDirectory -> arquivo NAO regravado (mtime/conteudo)", () => {
+  withCasesBase((base) => {
+    seedScaffolding(base);
+    const caseClaude = join(base, "gamma", ".claude");
+    mkdirSync(caseClaude, { recursive: true });
+    // formato canonico (como o sync grava) ja com o campo -> merge devolve byte-igual
+    const already = `${JSON.stringify({ outputStyle: "X", autoMemoryDirectory: "/escolha/local" }, null, 2)}\n`;
+    const target = join(caseClaude, "settings.local.json");
+    writeFileSync(target, already, "utf-8");
+    const before = statSync(target).mtimeMs;
+
+    const errors = [];
+    const n = provisionCaseSettings(base, [{ name: "gamma" }], {}, "42", errors);
+    assert.equal(n, 0);
+    assert.deepEqual(errors, []);
+    assert.equal(readFileSync(target, "utf-8"), already);
+    assert.equal(statSync(target).mtimeMs, before);
+    assert.equal(existsSync(`${target}.bak`), false); // no-op nao gera backup
+  });
+});
+
+test("provisionCaseSettings: LEGADO corrompido -> intocado (nunca pisa), skip", () => {
+  withCasesBase((base) => {
+    seedScaffolding(base);
+    const caseClaude = join(base, "delta", ".claude");
+    mkdirSync(caseClaude, { recursive: true });
+    const corrupt = '{ "outputStyle": "X"  <<< quebrado';
+    const target = join(caseClaude, "settings.local.json");
+    writeFileSync(target, corrupt, "utf-8");
+
+    const errors = [];
+    const n = provisionCaseSettings(base, [{ name: "delta" }], {}, "42", errors);
+    assert.equal(n, 0);
+    assert.equal(readFileSync(target, "utf-8"), corrupt); // intocado byte-a-byte
+    assert.equal(existsSync(`${target}.bak`), false);
+  });
+});
+
+test("provisionCaseSettings: selfAuthor null -> caso NOVO sem autoMemoryDirectory; LEGADO intocado", () => {
+  withCasesBase((base) => {
+    seedScaffolding(base);
+    // caso novo (sem settings.local.json)
+    mkdirSync(join(base, "novo"), { recursive: true });
+    // caso legado (com settings.local.json sem o campo)
+    const legadoClaude = join(base, "legado", ".claude");
+    mkdirSync(legadoClaude, { recursive: true });
+    const legadoRaw = `${JSON.stringify({ outputStyle: "X" }, null, 2)}\n`;
+    const legadoTarget = join(legadoClaude, "settings.local.json");
+    writeFileSync(legadoTarget, legadoRaw, "utf-8");
+    const beforeMtime = statSync(legadoTarget).mtimeMs;
+
+    const errors = [];
+    provisionCaseSettings(base, [{ name: "novo" }, { name: "legado" }], {}, null, errors);
+
+    // novo: settings.local.json criado, mas SEM autoMemoryDirectory
+    const novoOut = JSON.parse(
+      readFileSync(join(base, "novo", ".claude", "settings.local.json"), "utf-8"),
+    );
+    assert.equal(novoOut.outputStyle, "Legal Main Agent");
+    assert.equal(novoOut.autoMemoryDirectory, undefined);
+    // legado: intocado (sem injecao quando nao ha autor)
+    assert.equal(readFileSync(legadoTarget, "utf-8"), legadoRaw);
+    assert.equal(statSync(legadoTarget).mtimeMs, beforeMtime);
+    assert.equal(existsSync(`${legadoTarget}.bak`), false);
+  });
+});
+
+test("provisionCaseSettings: dir de caso ausente localmente -> skip sem erro", () => {
+  withCasesBase((base) => {
+    seedScaffolding(base);
+    const errors = [];
+    // manifest referencia caso que nao existe no disco local
+    const n = provisionCaseSettings(base, [{ name: "inexistente" }], {}, "42", errors);
+    assert.equal(n, 0);
+    assert.deepEqual(errors, []);
+    assert.equal(existsSync(join(base, "inexistente")), false);
+  });
 });
 
 // ---------- CMR-138: memoria de caso sincronizavel (funcoes puras) ----------

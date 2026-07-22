@@ -13,6 +13,8 @@ import {
   buildGlobalSettings,
   DEFAULT_OUTPUT_STYLE,
   applyGlobalOutputStyle,
+  ensureFeedbackImport,
+  FEEDBACK_IMPORT_LINE,
 } from "./setup.mjs";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -274,5 +276,85 @@ test("applyGlobalOutputStyle: idempotente (ja setado -> nao reescreve, sem backu
     assert.deepEqual(failures, []);
     assert.equal(existsSync(`${target}.bak`), false); // no-op nao gera backup
     assert.equal(JSON.parse(readFileSync(target, "utf-8")).outputStyle, DEFAULT_OUTPUT_STYLE);
+  });
+});
+
+// --- ensureFeedbackImport: @import do feedback no ~/.claude/CLAUDE.md (CMR-138) ---
+
+import { readdirSync, statSync } from "node:fs";
+
+function countOccurrences(content, line) {
+  return content.split(/\r?\n/).filter((l) => l.trim() === line).length;
+}
+
+test("ensureFeedbackImport: cria o CLAUDE.md ausente com header minimo + a linha", () => {
+  withTmpHome((home) => {
+    const r = ensureFeedbackImport(home);
+    assert.equal(r.changed, true);
+    assert.equal(r.error, undefined);
+    const target = join(home, ".claude", "CLAUDE.md");
+    const content = readFileSync(target, "utf-8");
+    assert.equal(countOccurrences(content, FEEDBACK_IMPORT_LINE), 1);
+    assert.ok(content.length > FEEDBACK_IMPORT_LINE.length, "tem header minimo alem da linha");
+    // sem tmp orfao
+    assert.equal(existsSync(`${target}.setup-tmp`), false);
+  });
+});
+
+test("ensureFeedbackImport: idempotente (roda 2x -> a linha aparece uma unica vez)", () => {
+  withTmpHome((home) => {
+    const first = ensureFeedbackImport(home);
+    const second = ensureFeedbackImport(home);
+    assert.equal(first.changed, true);
+    assert.equal(second.changed, false); // 2a passada nao altera
+    const target = join(home, ".claude", "CLAUDE.md");
+    const content = readFileSync(target, "utf-8");
+    assert.equal(countOccurrences(content, FEEDBACK_IMPORT_LINE), 1);
+    // no-op nao deixa backup
+    const baks = readdirSync(join(home, ".claude")).filter((f) => f.startsWith("CLAUDE.md.bak-"));
+    assert.equal(baks.length, 0);
+  });
+});
+
+test("ensureFeedbackImport: arquivo existente SEM a linha -> append preserva conteudo + backup", () => {
+  withTmpHome((home) => {
+    const dir = join(home, ".claude");
+    mkdirSync(dir, { recursive: true });
+    const target = join(dir, "CLAUDE.md");
+    const original = "# Minhas instrucoes\n\nRegra pessoal importante.\n";
+    writeFileSync(target, original, "utf-8");
+
+    const r = ensureFeedbackImport(home);
+    assert.equal(r.changed, true);
+    const content = readFileSync(target, "utf-8");
+    // conteudo original inteiro preservado no inicio
+    assert.ok(content.startsWith(original), "preserva o conteudo original");
+    // a linha foi anexada exatamente uma vez, com linha em branco separando
+    assert.equal(countOccurrences(content, FEEDBACK_IMPORT_LINE), 1);
+    assert.match(content, /Regra pessoal importante\.\n\n@~\/cases\/\.feedback\/FEEDBACK\.md\n$/);
+    // backup .bak-<ts> do estado anterior, byte-a-byte
+    const baks = readdirSync(dir).filter((f) => f.startsWith("CLAUDE.md.bak-"));
+    assert.equal(baks.length, 1);
+    assert.equal(readFileSync(join(dir, baks[0]), "utf-8"), original);
+    // sem tmp orfao
+    assert.equal(existsSync(`${target}.setup-tmp`), false);
+  });
+});
+
+test("ensureFeedbackImport: ja contem a linha (em qualquer posicao) -> no-op, sem backup", () => {
+  withTmpHome((home) => {
+    const dir = join(home, ".claude");
+    mkdirSync(dir, { recursive: true });
+    const target = join(dir, "CLAUDE.md");
+    const original = `# Topo\n\n${FEEDBACK_IMPORT_LINE}\n\nmais texto\n`;
+    writeFileSync(target, original, "utf-8");
+    const before = statSync(target).mtimeMs;
+
+    const r = ensureFeedbackImport(home);
+    assert.equal(r.changed, false);
+    assert.equal(readFileSync(target, "utf-8"), original); // intocado
+    assert.equal(statSync(target).mtimeMs, before);
+    const baks = readdirSync(dir).filter((f) => f.startsWith("CLAUDE.md.bak-"));
+    assert.equal(baks.length, 0);
   });
 });

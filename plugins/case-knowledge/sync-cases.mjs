@@ -15,7 +15,7 @@
 import { createHash } from "node:crypto";
 import {
   existsSync, mkdirSync, readdirSync, readFileSync,
-  writeFileSync, renameSync, appendFileSync,
+  writeFileSync, renameSync, appendFileSync, copyFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -622,6 +622,83 @@ export function extractOutputStyle(caseYamlRaw) {
   return v || null;
 }
 
+/**
+ * Provisiona `<caso>/.claude/settings.local.json` para os casos do manifest
+ * (CMR-138 injeta `autoMemoryDirectory` = `<casesBase>/<caso>/.memoria/<autor>`,
+ * absoluto e normalizado para `/`). Cobre dois estados por caso:
+ *   - NOVO (sem settings.local.json): cria a partir do scaffolding
+ *     (outputStyle/permissions, override `output_style:` do case.yaml) +
+ *     autoMemoryDirectory quando ha autor. Sem scaffolding valido -> nada a criar.
+ *   - LEGADO (settings.local.json ja existe): injeta autoMemoryDirectory se
+ *     ausente, preservando o resto (backup `.bak` + escrita atomica); ja com o
+ *     campo OU byte-igual -> no-op sem backup; corrompido -> log e skip (nunca pisa).
+ *
+ * selfAuthor null/undefined -> pula a injecao inteira (sem subdir de autor): casos
+ * novos nascem sem autoMemoryDirectory e legados ficam intocados; 1 log.
+ * Nunca sobrescreve config existente (CMR-103). Erros por caso vao para `errors`.
+ * Retorna a contagem de arquivos escritos. Extraida do main() para ser testavel
+ * contra um tmpdir real sem rede.
+ */
+export function provisionCaseSettings(casesBase, manifestCases, localState, selfAuthor, errors) {
+  let provisioned = 0;
+  const scaffoldingSettings = join(casesBase, ".claude", "settings.json");
+  const scaffoldingRaw = existsSync(scaffoldingSettings)
+    ? readFileSync(scaffoldingSettings, "utf-8")
+    : null;
+
+  const hasAuthor = selfAuthor !== null && selfAuthor !== undefined;
+  if (!hasAuthor) {
+    appendLog(casesBase, "settings: autoMemoryDirectory nao injetado (sem autor)");
+  }
+
+  const localByLower = new Map(
+    Object.keys(localState).map((k) => [k.toLowerCase(), k]),
+  );
+  for (const c of manifestCases) {
+    if (!VALID_CASE_NAME.test(c.name) || isExcluded(c.name)) continue;
+    const dirName = localByLower.get(c.name.toLowerCase()) ?? c.name;
+    const caseDir = join(casesBase, dirName);
+    if (!existsSync(caseDir)) continue;
+    const target = join(caseDir, ".claude", "settings.local.json");
+    // Path absoluto normalizado para `/` (no Windows casesBase vem com `\`).
+    const autoMemoryDir = hasAuthor
+      ? [casesBase, dirName, ".memoria", selfAuthor].join("/").replace(/\\/g, "/")
+      : undefined;
+
+    try {
+      if (!existsSync(target)) {
+        // Caso NOVO: cria settings.local.json (com autoMemoryDirectory se ha autor).
+        const caseYamlPath = join(caseDir, "case.yaml");
+        const overrideStyle = extractOutputStyle(
+          existsSync(caseYamlPath) ? readFileSync(caseYamlPath, "utf-8") : null,
+        );
+        const localSettings = buildLocalSettings(scaffoldingRaw, overrideStyle, autoMemoryDir);
+        if (!localSettings) continue; // sem scaffolding valido: nada a criar
+        mkdirSync(join(caseDir, ".claude"), { recursive: true });
+        writeAtomic(target, localSettings);
+        provisioned++;
+      } else if (autoMemoryDir) {
+        // Caso LEGADO: injeta autoMemoryDirectory se ausente, preservando o resto.
+        const existingRaw = readFileSync(target, "utf-8");
+        const merged = mergeAutoMemoryDir(existingRaw, autoMemoryDir);
+        if (merged === null) {
+          appendLog(casesBase, `settings: ${dirName}/settings.local.json invalido -> injecao de autoMemoryDirectory pulada`);
+          continue;
+        }
+        // byte-igual cobre "ja continha o campo" (merge devolve o canonico igual)
+        // e "nada mudou" -> no-op sem backup. So grava (com backup) se de fato mudou.
+        if (merged === existingRaw) continue;
+        copyFileSync(target, `${target}.bak`);
+        writeAtomic(target, merged);
+        provisioned++;
+      }
+    } catch (err) {
+      errors.push(`settings ${dirName}: ${err.message}`);
+    }
+  }
+  return provisioned;
+}
+
 /** Nome de destino em _archive/, sufixando -YYYYMMDD em colisao. */
 export function archiveTarget(name, taken, now = new Date()) {
   if (!taken.has(name)) return name;
@@ -1093,39 +1170,15 @@ async function main() {
     }
   }
 
-  // Provisiona .claude/settings.local.json (outputStyle/permissions do
-  // scaffolding, com override opcional `output_style:` do case.yaml do caso)
-  // nos casos do manifest que ainda nao tem — cria-se-ausente, cobre legados
-  // e recem-criados; nunca sobrescreve (CMR-103). Roda DEPOIS dos downloads:
-  // caso novo precisa do case.yaml ja no disco para o override valer no
-  // nascimento. Dirs locais fora do manifest nao sao tocados.
+  // Provisiona .claude/settings.local.json dos casos do manifest: cria-se-ausente
+  // (outputStyle/permissions do scaffolding + override `output_style:` do case.yaml)
+  // e injeta autoMemoryDirectory (CMR-138) tambem em legados; nunca sobrescreve
+  // config existente (CMR-103). Roda DEPOIS dos downloads: caso novo precisa do
+  // case.yaml ja no disco para o override valer no nascimento. Dirs locais fora
+  // do manifest nao sao tocados.
   let provisioned = 0;
   try {
-    const scaffoldingSettings = join(casesBase, ".claude", "settings.json");
-    const scaffoldingRaw = existsSync(scaffoldingSettings)
-      ? readFileSync(scaffoldingSettings, "utf-8")
-      : null;
-    if (buildLocalSettings(scaffoldingRaw)) {
-      const localByLower = new Map(
-        Object.keys(localState).map((k) => [k.toLowerCase(), k]),
-      );
-      for (const c of manifestCases) {
-        if (!VALID_CASE_NAME.test(c.name) || isExcluded(c.name)) continue;
-        const dirName = localByLower.get(c.name.toLowerCase()) ?? c.name;
-        const caseDir = join(casesBase, dirName);
-        if (!existsSync(caseDir)) continue;
-        const target = join(caseDir, ".claude", "settings.local.json");
-        if (existsSync(target)) continue;
-        const caseYamlPath = join(caseDir, "case.yaml");
-        const overrideStyle = extractOutputStyle(
-          existsSync(caseYamlPath) ? readFileSync(caseYamlPath, "utf-8") : null,
-        );
-        const localSettings = buildLocalSettings(scaffoldingRaw, overrideStyle);
-        mkdirSync(join(caseDir, ".claude"), { recursive: true });
-        writeAtomic(target, localSettings);
-        provisioned++;
-      }
-    }
+    provisioned = provisionCaseSettings(casesBase, manifestCases, localState, selfAuthor, errors);
   } catch (err) {
     errors.push(`settings: ${err.message}`);
   }

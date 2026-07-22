@@ -386,6 +386,67 @@ export function applyGlobalOutputStyle(failures, homedir = os.homedir()) {
 }
 
 /**
+ * Linha de @import (user-scope) do feedback do escritorio no CLAUDE.md global.
+ * O sync (sync-cases.mjs) materializa `~/cases/.feedback/FEEDBACK.md` (indice
+ * agregado por autor). Com o @import no `~/.claude/CLAUDE.md`, TODA sessao do
+ * CC — dentro ou fora de um caso — carrega o feedback do escritorio. User-scope
+ * => o CC resolve o @import sem dialog de permissao (validado por spike no
+ * Windows: `@~/cases/.feedback/FEEDBACK.md` carrega direto; `~` e expandido).
+ */
+export const FEEDBACK_IMPORT_LINE = "@~/cases/.feedback/FEEDBACK.md";
+
+/** True se `content` ja tem `line` como uma linha propria (ignorando espacos). */
+function hasImportLine(content, line) {
+  return content.split(/\r?\n/).some((l) => l.trim() === line);
+}
+
+/**
+ * Garante a linha de @import do feedback no `~/.claude/CLAUDE.md` (GLOBAL do
+ * usuario). Idempotente e best-effort — NUNCA lanca: retorna { changed, error? }
+ * (mesmo contrato de applyGlobalOutputStyle; o caller reporta error como
+ * pendencia). Casos:
+ *   - arquivo ausente    -> cria com header minimo + a linha
+ *   - existe SEM a linha  -> backup `.bak-<ts>` + append (linha em branco de
+ *     separacao) + escrita atomica
+ *   - JA contem a linha   -> no-op (sem backup, sem regravacao)
+ *
+ * NON-GOAL: nunca toca `<caso>/CLAUDE.md` (briefing da VM). So o CLAUDE.md
+ * global e ferramenta de onboarding — os peers/feedback por-caso vem por hook.
+ */
+export function ensureFeedbackImport(homedir = os.homedir()) {
+  const dir = join(homedir, ".claude");
+  const target = join(dir, "CLAUDE.md");
+  let existing = null;
+  try {
+    if (existsSync(target)) existing = readFileSync(target, "utf-8");
+  } catch (err) {
+    return { changed: false, error: `nao consegui ler ${target} (${err.message})` };
+  }
+
+  if (existing !== null && hasImportLine(existing, FEEDBACK_IMPORT_LINE)) {
+    return { changed: false }; // ja presente -> no-op
+  }
+
+  try {
+    mkdirSync(dir, { recursive: true });
+    if (existing === null) {
+      const header =
+        "# Instrucoes globais (Claude Code juridico)\n\n" +
+        "Feedback do escritorio, agregado pelo espelho de casos e carregado em toda sessao:\n\n";
+      writeAtomic(target, `${header}${FEEDBACK_IMPORT_LINE}\n`);
+      return { changed: true };
+    }
+    // Existe sem a linha: backup do estado anterior + append separado por linha em branco.
+    copyFileSync(target, `${target}.bak-${Date.now()}`);
+    const sep = existing.endsWith("\n") ? "" : "\n";
+    writeAtomic(target, `${existing}${sep}\n${FEEDBACK_IMPORT_LINE}\n`);
+    return { changed: true };
+  } catch (err) {
+    return { changed: false, error: `nao consegui escrever ${target} (${err.message})` };
+  }
+}
+
+/**
  * Verificacao extra (best-effort, nao instala nada): os geradores de peca
  * .docx da skill gerar-peca-cmr (plugin legal-team) exigem Python +
  * python-docx. Falta vira pendencia no resumo com o comando pronto.
@@ -454,6 +515,15 @@ async function main() {
   applyEnvVars(failures);
   installSyncTask(pluginDir, failures);
   applyGlobalOutputStyle(failures);
+
+  log("[extra] Feedback do escritorio (@import no CLAUDE.md global)");
+  const fb = ensureFeedbackImport();
+  if (fb.error) {
+    failures.push(`${fb.error} — adicione a linha "${FEEDBACK_IMPORT_LINE}" ao seu ~/.claude/CLAUDE.md.`);
+  } else {
+    log(fb.changed ? "      Linha de @import garantida." : "      Ja presente — sem alteracao.");
+  }
+
   checkPecaGenerators(failures);
 
   log("");
