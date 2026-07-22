@@ -1,6 +1,6 @@
 ---
 name: gerar-peca-cmr
-description: Gerar documentos .docx no padrao CMR Advogados usando python-docx. Use quando precisar gerar peca processual (contestacao, replica, peticao inicial, recurso), contrato ou aditamento em .docx. Template com numeracao automatica, paragrafos vazios, Century Gothic 12pt, espacamento 1.5x. Os scripts geradores ACOMPANHAM esta skill (scripts/), funcionam na VM e na cmr-002.
+description: Gerar documentos .docx no padrao CMR Advogados usando python-docx. Use quando precisar gerar peca processual (contestacao, replica, peticao inicial, recurso), contrato, aditamento ou resposta a notificacao extrajudicial (carta) em .docx. Peca usa Century Gothic 12pt 1.5x com numeracao automatica; carta usa Arial 12pt 1.15 sem numeracao — cada gerador carrega seu padrao. Os scripts geradores ACOMPANHAM esta skill (scripts/), funcionam na VM e na cmr-002.
 ---
 
 # Gerador de Documentos — Padrao CMR Advogados
@@ -17,6 +17,7 @@ sys.path.insert(0, r"<dir-desta-skill>/scripts")
 from gerar_peca_cmr import PecaCMR          # pecas processuais
 # from gerar_contrato_cmr import ContratoCMR      # contratos
 # from gerar_aditamento_cmr import AditamentoCMR  # aditamentos sobre .docx-base
+# from gerar_resposta_notificacao_cmr import RespostaNotificacaoCMR  # cartas
 ```
 
 **NAO crie outro gerador. NAO copie o codigo. NAO use copias soltas antigas
@@ -34,6 +35,7 @@ formatacao a mao como fallback.
 | Peca processual | `PecaCMR` | API completa abaixo |
 | Contrato | `ContratoCMR` | Recria formatacao CMR |
 | Aditamento (bilingue, sobre template) | `AditamentoCMR` | Usa um .docx de referencia como DOCUMENTO-BASE (formatacao herdada byte a byte); modos FILL (placeholders) e BUILD (clona paragrafos-modelo). Requer `template_path` |
+| Resposta a notificacao extrajudicial (carta) | `RespostaNotificacaoCMR` | Padrao PROPRIO de carta — NAO e o das pecas. API abaixo |
 
 ## API
 
@@ -121,6 +123,48 @@ PecaCMR.NUM_SUBCAP_MERITO  # 13 — subcapitulos merito (A. B. C.)
 PecaCMR.NUM_ITEM_ROMANO    # 14 — itens romano minusculo (i. ii.)
 PecaCMR.NUM_ITEM_LETRA     # 15 — itens letra minuscula (a. b.)
 ```
+
+## API — RespostaNotificacaoCMR (carta)
+
+Padrao proprio, extraido de 2 cartas reais protocoladas (jul/2026): **Arial
+12pt** (nao Century Gothic), espacamento **1,15** (nao 1,5), pagina Letter,
+margens 3/2/4/2cm, corpo justificado **SEM numeracao** de paragrafos e quase
+sem enfase tipografica (bold so no nome do destinatario). Timbre identico ao
+das pecas. Paragrafo vazio (`espaco()`) entre blocos, como sempre.
+
+```python
+carta = RespostaNotificacaoCMR()
+carta.data("São Paulo", "20 de julho de 2026")   # a direita, ponto final automatico
+carta.espaco()
+carta.destinatario(                               # linhas contiguas, a esquerda
+    "À",                                          # ou "Ao" — concordar com destinatario
+    "EMPRESA LTDA.",                              # bold automatico
+    "Avenida X, nº 100, Bairro",                  # endereco (linhas opcionais)
+    "A/C Sr. Fulano de Tal",
+    "Via e-mail: fulano@empresa.com.br",
+)
+carta.espaco()
+carta.ref("Resposta à Notificação Extrajudicial de 08.07.2026 — ...")
+                                                  # prefixo "Ref.: " automatico;
+                                                  # recuo 5,5/1,5cm (left=/hanging= p/ mudar)
+carta.espaco()
+carta.vocativo()                                  # "Prezados Senhores," (customizavel)
+carta.espaco()
+carta.corpo("Na qualidade de advogados da ...")   # justificado, sem numero, sem recuo
+carta.espaco()
+carta.corpo("...")                                # corpo_complexo() p/ enfase (raro)
+carta.espaco()
+carta.corpo("Sem mais para o momento,")
+carta.espaco()
+carta.assinatura("Nome Completo", "OAB/SP 123.456")
+    # emite "Atenciosamente," + 3 vazios + nome + OAB.
+    # centralizada=True (default) ou False = a esquerda; ambos existem nos modelos.
+carta.salvar("resposta.docx")
+```
+
+Regras criticas da carta: NAO usar numeracao de paragrafos; NAO usar recuo de
+primeira linha no corpo; enfase tipografica minima (carta e sobria); os
+metodos ja aplicam alinhamento e recuos corretos — nao ajustar na mao.
 
 ## Template de referencia
 
