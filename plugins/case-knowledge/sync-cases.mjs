@@ -251,7 +251,8 @@ export function memFileType(name, content) {
  *
  * Retorna:
  *   { downloadAuthors: [{ case, author, files: [nome] }],
- *     uploadFiles:     [{ case, name, content, target: "memoria"|"feedback" }] }
+ *     uploadFiles:     [{ case, name, content, target: "memoria"|"feedback" }],
+ *     warnings:        [string] }
  *
  * DOWNLOAD (qualquer autor, peer OU self, sob never-overwrite): baixa um
  * arquivo quando
@@ -266,15 +267,30 @@ export function memFileType(name, content) {
  * UPLOAD (SO o proprio autor): deriva EXCLUSIVAMENTE de
  * localMemoriaState[caso][selfAuthor] -- nunca dos subdirs de peers ja baixados
  * (senao re-uploadaria memoria alheia como se fosse sua). selfAuthor null ->
- * nenhum upload. Um arquivo do self entra em uploadFiles apenas quando
- *   - a VM nao o tem (remoteMd5 === undefined), OU
- *   - local !== VM E o arquivo NAO esta na fila de download deste plano
- *     (se o plano decidiu baixar a versao da VM, subir a local antiga por cima
- *     seria revert acidental da versao mais nova da VM).
- * Roteamento por memFileType (frontmatter, com fallback prefixo).
+ * nenhum upload. Roteamento por memFileType (frontmatter, com fallback prefixo).
+ * O GATE de "ja sincronizado" depende do DESTINO do roteamento (CMR-138):
+ *   - target "memoria" (memoria-de-caso do autor): compara contra o remote do
+ *     CASO (remoteManifest[caso][self][arq]); sobe quando a VM nao tem OU
+ *     local !== VM E o arquivo NAO esta na fila de download deste plano (senao
+ *     subir a local antiga por cima seria revert da versao mais nova da VM).
+ *   - target "feedback" (pool compartilhado do escritorio): o arquivo vive
+ *     fisicamente sob <caso>/.memoria/<self>/ mas remotamente vive no POOL
+ *     (remoteManifest[".feedback"][self][arq]); o gate compara contra o POOL,
+ *     nao contra o remote do caso (que NUNCA tem o arquivo -> remoteMd5 sempre
+ *     undefined -> re-upload perpetuo a cada ciclo). Sobe quando o pool nao tem
+ *     OU local !== pool. SEM consulta a downloadKeys aqui: o download do pool
+ *     atualiza a COPIA em .feedback/<self>/, entidade distinta do original no
+ *     caso -- nao ha revert possivel.
+ * DEDUPE de colisao de nome no pool: o pool tem 1 slot por (autor, nome). Se 2+
+ * casos reais tem um arquivo target-feedback com o MESMO nome, sobe SO o do caso
+ * lexicograficamente MENOR (vencedor deterministico -> sem alternancia entre
+ * ciclos: um perdedor NUNCA sobe, mesmo quando o vencedor esta barrado pelo
+ * gate). Quando os md5 divergem (conflito real de conteudo), registra um aviso
+ * legivel em `warnings`. O pseudo-caso ".feedback" (copias baixadas do pool) nao
+ * participa da disputa -- cai no gate padrao (local == pool pos-seed -> barrado).
  */
 export function planMemoriaActions(remoteManifest, localMemoriaState, baseline, selfAuthor) {
-  const plan = { downloadAuthors: [], uploadFiles: [] };
+  const plan = { downloadAuthors: [], uploadFiles: [], warnings: [] };
   remoteManifest = remoteManifest || {};
   localMemoriaState = localMemoriaState || {};
   baseline = baseline || {};
@@ -312,23 +328,72 @@ export function planMemoriaActions(remoteManifest, localMemoriaState, baseline, 
 
   // ----- UPLOAD (so o proprio autor) -----
   if (selfAuthor !== null && selfAuthor !== undefined) {
+    // Pool remoto de feedback (por-NOME, por-autor): destino de roteamento de
+    // TODO arquivo target "feedback", independente do caso onde vive fisicamente.
+    const feedbackPool = remoteManifest[FEEDBACK_POOL]?.[selfAuthor];
+
+    // Pre-pass: vencedor por nome entre CASOS REAIS que tem um arquivo
+    // target-feedback com aquele nome (exclui o pseudo-caso .feedback). O
+    // vencedor deterministico (menor lexicografico) impede alternancia entre
+    // ciclos; perdedores nunca sobem. Aviso so quando os md5 divergem (conflito).
+    const fbNameToCases = new Map(); // nome -> [{ case, md5 }]
+    for (const [caso, authors] of Object.entries(localMemoriaState)) {
+      if (caso === FEEDBACK_POOL) continue;
+      const selfFiles = authors?.[selfAuthor];
+      if (!selfFiles || typeof selfFiles !== "object") continue;
+      for (const [file, info] of Object.entries(selfFiles)) {
+        if (MEMORIA_IGNORED.has(file)) continue;
+        if (memFileType(file, fileContent(info)) !== "feedback") continue;
+        if (!fbNameToCases.has(file)) fbNameToCases.set(file, []);
+        fbNameToCases.get(file).push({ case: caso, md5: fileMd5(info) });
+      }
+    }
+    const fbWinner = new Map(); // nome -> caso vencedor (menor lexicografico)
+    for (const [name, entries] of fbNameToCases) {
+      let winner = entries[0].case;
+      const md5s = new Set();
+      for (const e of entries) {
+        md5s.add(e.md5);
+        if (e.case < winner) winner = e.case;
+      }
+      fbWinner.set(name, winner);
+      if (entries.length > 1 && md5s.size > 1) {
+        const casos = entries.map((e) => e.case).sort();
+        const losers = casos.filter((c) => c !== winner);
+        plan.warnings.push(
+          `feedback ${name}: colisao de nome entre casos [${casos.join(", ")}] com conteudos distintos; ` +
+            `subindo so ${winner} (menor), ignorando ${losers.join(", ")}`,
+        );
+      }
+    }
+
     for (const [caso, authors] of Object.entries(localMemoriaState)) {
       const selfFiles = authors?.[selfAuthor];
       if (!selfFiles || typeof selfFiles !== "object") continue;
-      const remoteSelf = remoteManifest[caso]?.[selfAuthor];
       for (const [file, info] of Object.entries(selfFiles)) {
         if (MEMORIA_IGNORED.has(file)) continue;
         const localMd5 = fileMd5(info);
-        const remoteMd5 = fileMd5(remoteSelf?.[file]);
-        const queuedForDownload = downloadKeys.has(`${caso} ${selfAuthor} ${file}`);
-        if (remoteMd5 === undefined || (localMd5 !== remoteMd5 && !queuedForDownload)) {
-          const content = fileContent(info);
-          plan.uploadFiles.push({
-            case: caso,
-            name: file,
-            content,
-            target: memFileType(file, content),
-          });
+        const content = fileContent(info);
+        const target = memFileType(file, content);
+
+        let shouldUpload;
+        if (target === "feedback") {
+          // Colisao de nome no pool: perdedor nunca sobe (nem quando o vencedor
+          // esta barrado pelo gate). O pseudo-caso .feedback nao entra em fbWinner.
+          if (caso !== FEEDBACK_POOL && fbWinner.get(file) !== undefined && fbWinner.get(file) !== caso) {
+            continue;
+          }
+          const remoteMd5 = fileMd5(feedbackPool?.[file]);
+          shouldUpload = remoteMd5 === undefined || localMd5 !== remoteMd5;
+        } else {
+          const remoteSelf = remoteManifest[caso]?.[selfAuthor];
+          const remoteMd5 = fileMd5(remoteSelf?.[file]);
+          const queuedForDownload = downloadKeys.has(`${caso} ${selfAuthor} ${file}`);
+          shouldUpload = remoteMd5 === undefined || (localMd5 !== remoteMd5 && !queuedForDownload);
+        }
+
+        if (shouldUpload) {
+          plan.uploadFiles.push({ case: caso, name: file, content, target });
         }
       }
     }
@@ -835,6 +900,11 @@ export async function syncMemoria(apiBase, casesBase, selfAuthor, deps = {}) {
   const localCombined = { ...memoriaState, [FEEDBACK_POOL]: feedbackState };
 
   const plan = planMemoriaActions(remoteCombined, localCombined, baseline, selfAuthor);
+
+  // Avisos do plano (ex: colisao de nome no pool de feedback entre casos) -> log.
+  for (const w of plan.warnings) {
+    appendLog(casesBase, `memoria: aviso: ${w}`);
+  }
 
   // 3+4) Downloads: so casos com dir local (pool sempre elegivel). Escrita atomica
   // em <caso>/.memoria/<autor>/ ou .feedback/<autor>/. Chave de sucesso combina

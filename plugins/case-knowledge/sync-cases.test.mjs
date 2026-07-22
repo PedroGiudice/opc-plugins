@@ -501,6 +501,72 @@ test("memFileType: feedback_ com frontmatter type desconhecido -> feedback (fall
   assert.equal(memFileType("feedback_z.md", content), "feedback");
 });
 
+// --- FIX (CMR-138 review): gate de upload de feedback contra o POOL remoto ---
+// O arquivo de feedback vive fisicamente em <caso>/.memoria/<self>/ mas remotamente
+// no pool (.feedback). O gate deve comparar o md5 local contra o pool -- nao contra
+// o remote do CASO, que nunca tem o arquivo (remoteMd5 sempre undefined -> re-upload
+// perpetuo a cada ciclo, o ping-pong que este fix fecha).
+
+test("upload feedback (a): sob caso, pool remoto SEM o arquivo -> uploada", () => {
+  const local = { "caso-a": { "42": { "feedback_x.md": { md5: "X", content: "corpo" } } } };
+  const plan = planMemoriaActions({}, local, {}, "42");
+  assert.deepEqual(plan.uploadFiles.map((u) => u.name), ["feedback_x.md"]);
+  assert.equal(plan.uploadFiles[0].target, "feedback");
+});
+
+test("upload feedback (b): sob caso, pool remoto com MESMO md5 -> NAO uploada (fecha ping-pong)", () => {
+  const local = { "caso-a": { "42": { "feedback_x.md": { md5: "SAME", content: "corpo" } } } };
+  const remote = { ".feedback": { "42": { "feedback_x.md": "SAME" } } };
+  const plan = planMemoriaActions(remote, local, {}, "42");
+  assert.deepEqual(plan.uploadFiles, []);
+});
+
+test("upload feedback (c): sob caso, pool remoto com md5 DIFERENTE -> uploada", () => {
+  const local = { "caso-a": { "42": { "feedback_x.md": { md5: "NEW", content: "corpo novo" } } } };
+  const remote = { ".feedback": { "42": { "feedback_x.md": "OLD" } } };
+  const plan = planMemoriaActions(remote, local, {}, "42");
+  assert.deepEqual(plan.uploadFiles.map((u) => u.name), ["feedback_x.md"]);
+});
+
+test("upload memoria (d): gate compara contra o remote do CASO (inalterado)", () => {
+  // arquivo de memoria com mesmo md5 no remote do caso -> nao sobe (gate do caso).
+  const local = { "caso-a": { "42": { "estrategia.md": { md5: "M", content: "corpo" } } } };
+  const remote = { "caso-a": { "42": { "estrategia.md": "M" } } };
+  const baseline = { "caso-a": { "42": { "estrategia.md": "M" } } };
+  const plan = planMemoriaActions(remote, local, baseline, "42");
+  assert.deepEqual(plan.uploadFiles, []);
+});
+
+test("upload feedback (e): copia local do pool (.feedback/<self>) == remote -> nao re-sobe", () => {
+  const local = { ".feedback": { "42": { "feedback_meu.md": { md5: "SAME", content: "corpo" } } } };
+  const remote = { ".feedback": { "42": { "feedback_meu.md": "SAME" } } };
+  const plan = planMemoriaActions(remote, local, {}, "42");
+  assert.deepEqual(plan.uploadFiles, []);
+});
+
+test("upload feedback (f): colisao de nome entre 2 casos com md5 distintos -> 1 upload (caso menor) + 1 warning", () => {
+  const local = {
+    "case-b": { "42": { "feedback_dup.md": { md5: "B", content: "corpo b" } } },
+    "case-a": { "42": { "feedback_dup.md": { md5: "A", content: "corpo a" } } },
+  };
+  const plan = planMemoriaActions({}, local, {}, "42");
+  assert.deepEqual(plan.uploadFiles.map((u) => `${u.case}/${u.name}`), ["case-a/feedback_dup.md"]);
+  assert.equal(plan.warnings.length, 1);
+  assert.match(plan.warnings[0], /feedback_dup\.md/);
+  assert.match(plan.warnings[0], /case-a/);
+});
+
+test("upload feedback (f'): colisao de nome com MESMO md5 -> 1 upload (menor), sem warning", () => {
+  // mesmo conteudo em 2 casos: pool tem 1 slot -> sobe so o menor, mas nao e conflito.
+  const local = {
+    "case-b": { "42": { "feedback_dup.md": { md5: "SAME", content: "corpo" } } },
+    "case-a": { "42": { "feedback_dup.md": { md5: "SAME", content: "corpo" } } },
+  };
+  const plan = planMemoriaActions({}, local, {}, "42");
+  assert.deepEqual(plan.uploadFiles.map((u) => u.case), ["case-a"]);
+  assert.deepEqual(plan.warnings, []);
+});
+
 // ---------- Task 9: leitura local (readMemoriaState/readFeedbackState) ----------
 
 test("readMemoriaState: le caso/autor/*.md com md5+content, ignora PEERS.md e nao-.md", () => {
@@ -834,6 +900,36 @@ test("syncMemoria: download+upload de feedback do pool (.feedback como pseudo-ca
     assert.equal(st[".feedback"]["42"]["feedback_meu.md"], md5hex(Buffer.from("meu aprendizado")));
     // nao baixou memoria de caso nenhuma
     assert.ok(!gets.some((u) => u.includes("/cases/")));
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("syncMemoria: feedback sob caso ja no pool (mesmo md5) NAO re-sobe (fecha ping-pong CMR-138)", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr138-pingpong-"));
+  try {
+    // feedback do self vive fisicamente SOB o caso; o pool remoto JA o tem com o
+    // mesmo md5 -> nao pode re-subir todo ciclo (o defeito que o gate corrige).
+    const self42 = join(base, "caso-a", ".memoria", "42");
+    mkdirSync(self42, { recursive: true });
+    writeFileSync(join(self42, "feedback_lig.md"), "ligar pro cliente");
+    const md5 = md5hex(Buffer.from("ligar pro cliente"));
+
+    const { deps, posts } = makeFakeApi({
+      get: {
+        "/memoria-manifest": { cases: {} },
+        "/feedback-manifest": { authors: { "42": { "feedback_lig.md": md5 } } },
+        "/feedback/42": { files: { "feedback_lig.md": { content: "ligar pro cliente", md5 } } },
+      },
+      post: {
+        "/feedback": () => { throw new Error("NAO deveria postar feedback ja sincronizado"); },
+      },
+    });
+
+    await syncMemoria("http://t/api", base, "42", deps);
+
+    // nenhum POST de feedback: o pool ja tem o mesmo conteudo.
+    assert.ok(!posts.some((p) => p.url.endsWith("/feedback")), "feedback ja no pool nao pode re-subir");
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
