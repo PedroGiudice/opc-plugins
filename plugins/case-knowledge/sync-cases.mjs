@@ -187,6 +187,10 @@ function fileContent(v) {
 // autor -- fica fora de download e upload.
 const MEMORIA_IGNORED = new Set(["PEERS.md"]);
 
+// FEEDBACK.md e o indice gerado do pool de feedback (fica na raiz de `.feedback/`,
+// nao em subdir de autor); nunca um arquivo de autor.
+const FEEDBACK_IGNORED = new Set(["FEEDBACK.md"]);
+
 /**
  * Le o `type` declarado no frontmatter YAML (bloco entre `---` no INICIO do
  * arquivo). Sem lib YAML: varre as linhas do bloco e casa `type: <valor>`
@@ -398,6 +402,87 @@ export function computeMemoriaBaseline(remoteManifest, localMemoriaState, prevBa
   return next;
 }
 
+// Indices agregados (PEERS.md / FEEDBACK.md) sao ARTEFATOS do sync: o wiring
+// (Task 10) os regera a partir do estado local e grava dentro de `.memoria`/
+// `.feedback`. O CC le no maximo ~25 KB do MEMORY.md, entao os indices tem cap
+// de 25 KB. Ao estourar, truncamos por ITEM INTEIRO (nunca corte no meio de um
+// arquivo) e escrevemos um trailer VISIVEL com a contagem omitida.
+const INDEX_MAX_BYTES = 25 * 1024;
+// Folga reservada para o trailer; a contagem cabe com varios digitos.
+const INDEX_TRAILER_RESERVE = 96;
+
+function indexTrailer(n) {
+  return `\n> [sync] ${n} itens omitidos por limite de tamanho\n`;
+}
+
+/**
+ * Monta um indice agregado por-autor sobre `{ <autor>: { <arquivo>: {md5,content} } }`.
+ * `header` e o texto de topo (explica a origem). Cada autor vira `## Autor <autor>`
+ * e cada arquivo um bloco `### <nome>` seguido do conteudo. Anexa gulosamente por
+ * byte ate o cap; itens que nao cabem sao contados e sinalizados no trailer. Pura.
+ */
+function buildAggregatedIndex(authorTrees, header) {
+  authorTrees = authorTrees || {};
+  const budget = INDEX_MAX_BYTES - INDEX_TRAILER_RESERVE;
+
+  // Unidades de anexacao: cada arquivo e uma unidade; a primeira de cada autor
+  // carrega o cabecalho do autor (assim um autor 100% omitido nao deixa header
+  // solto). Ordenacao para saida deterministica.
+  const units = [];
+  for (const author of Object.keys(authorTrees).sort()) {
+    const files = authorTrees[author];
+    if (!files || typeof files !== "object") continue;
+    let firstOfAuthor = true;
+    for (const name of Object.keys(files).sort()) {
+      const content = fileContent(files[name]) ?? "";
+      let unit = "";
+      if (firstOfAuthor) { unit += `## Autor ${author}\n\n`; firstOfAuthor = false; }
+      unit += `### ${name}\n\n${content}\n\n`;
+      units.push(unit);
+    }
+  }
+
+  let out = header;
+  let omitted = 0;
+  let stopped = false;
+  for (const unit of units) {
+    if (stopped) { omitted++; continue; }
+    if (Buffer.byteLength(out, "utf-8") + Buffer.byteLength(unit, "utf-8") <= budget) {
+      out += unit;
+    } else {
+      // Trunca por item inteiro: para de anexar e conta o resto como omitido.
+      stopped = true;
+      omitted++;
+    }
+  }
+  if (omitted > 0) out += indexTrailer(omitted);
+  return out;
+}
+
+/**
+ * Indice PEERS.md de um caso: memoria de caso dos OUTROS advogados sobre este
+ * caso, agregada pelo sync. Input: `{ <autor>: { <arquivo>: {md5,content} } }`.
+ */
+export function buildPeersIndex(authorTrees) {
+  const header =
+    "# Memória de peers deste caso (agregada pelo sync)\n\n" +
+    "Memória de caso de outros advogados do escritório sobre ESTE caso. " +
+    "Somente leitura; o sync regenera este arquivo a cada ciclo.\n\n";
+  return buildAggregatedIndex(authorTrees, header);
+}
+
+/**
+ * Indice FEEDBACK.md do pool: feedback do escritório (aprendizados/correções)
+ * agregado por autor pelo sync. Input: `{ <autor>: { <arquivo>: {md5,content} } }`.
+ */
+export function buildFeedbackIndex(authorTrees) {
+  const header =
+    "# Feedback do escritório (agregado pelo sync)\n\n" +
+    "Aprendizados e correções compartilhados pelo escritório, agrupados por autor. " +
+    "Somente leitura; o sync regenera este arquivo a cada ciclo.\n\n";
+  return buildAggregatedIndex(authorTrees, header);
+}
+
 /**
  * Conteudo do <caso>/.claude/settings.local.json a provisionar, a partir do
  * settings.json do scaffolding (<casesBase>/.claude/settings.json). O CC NAO
@@ -494,6 +579,65 @@ function readLocalState(casesBase) {
       if (existsSync(p)) files[f] = md5hex(readFileSync(p));
     }
     state[entry.name] = files;
+  }
+  return state;
+}
+
+/** Le os *.md de um dir de autor -> { <arquivo>: { md5, content } }, aplicando ignore. */
+function readAuthorFiles(authorDir, ignored) {
+  const files = {};
+  for (const fileEntry of readdirSync(authorDir, { withFileTypes: true })) {
+    if (!fileEntry.isFile()) continue;
+    const name = fileEntry.name;
+    if (ignored.has(name)) continue;
+    if (!name.endsWith(".md")) continue;
+    const buf = readFileSync(join(authorDir, name));
+    files[name] = { md5: md5hex(buf), content: buf.toString("utf-8") };
+  }
+  return files;
+}
+
+/**
+ * Le a arvore de memoria de caso local: `<casesBase>/<caso>/.memoria/<autor>/*.md`.
+ * Retorna { <caso>: { <autor>: { <arquivo>: { md5, content } } } } (com content —
+ * o upload do self e os indices precisam do conteudo). Ignora PEERS.md (artefato
+ * do sync), entradas nao-dir, arquivos nao-.md e casos sem `.memoria`. Tolerante:
+ * casesBase/dir ausente -> objeto vazio. md5 dos bytes crus, como readLocalState.
+ */
+export function readMemoriaState(casesBase) {
+  const state = {};
+  if (!existsSync(casesBase)) return state;
+  for (const caseEntry of readdirSync(casesBase, { withFileTypes: true })) {
+    if (!caseEntry.isDirectory()) continue;
+    const memDir = join(casesBase, caseEntry.name, ".memoria");
+    if (!existsSync(memDir)) continue;
+    const authors = {};
+    for (const authorEntry of readdirSync(memDir, { withFileTypes: true })) {
+      if (!authorEntry.isDirectory()) continue;
+      const files = readAuthorFiles(join(memDir, authorEntry.name), MEMORIA_IGNORED);
+      if (Object.keys(files).length > 0) authors[authorEntry.name] = files;
+    }
+    if (Object.keys(authors).length > 0) state[caseEntry.name] = authors;
+  }
+  return state;
+}
+
+/**
+ * Le o pool de feedback do escritorio local: `<casesBase>/.feedback/<autor>/*.md`.
+ * Retorna { <autor>: { <arquivo>: { md5, content } } }. Ignora FEEDBACK.md (indice
+ * na raiz de `.feedback/` — cai fora por nao ser dir; ignorado defensivamente em
+ * qualquer nivel), entradas nao-dir e arquivos nao-.md. Tolerante: `.feedback`
+ * ausente -> objeto vazio.
+ */
+export function readFeedbackState(casesBase) {
+  const state = {};
+  if (!existsSync(casesBase)) return state;
+  const feedbackDir = join(casesBase, ".feedback");
+  if (!existsSync(feedbackDir)) return state;
+  for (const authorEntry of readdirSync(feedbackDir, { withFileTypes: true })) {
+    if (!authorEntry.isDirectory()) continue; // FEEDBACK.md na raiz cai aqui (nao-dir)
+    const files = readAuthorFiles(join(feedbackDir, authorEntry.name), FEEDBACK_IGNORED);
+    if (Object.keys(files).length > 0) state[authorEntry.name] = files;
   }
   return state;
 }

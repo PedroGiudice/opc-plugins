@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   planActions,
   computeBaseline,
@@ -8,6 +11,11 @@ import {
   planMemoriaActions,
   computeMemoriaBaseline,
   memFileType,
+  md5hex,
+  readMemoriaState,
+  readFeedbackState,
+  buildPeersIndex,
+  buildFeedbackIndex,
 } from "./sync-cases.mjs";
 
 test("caso novo: mkdir + download de todos os arquivos do manifest", () => {
@@ -488,4 +496,115 @@ test("memFileType: feedback_ sem frontmatter -> feedback (fallback prefixo manti
 test("memFileType: feedback_ com frontmatter type desconhecido -> feedback (fallback prefixo)", () => {
   const content = "---\ntype: decision\n---\ncorpo";
   assert.equal(memFileType("feedback_z.md", content), "feedback");
+});
+
+// ---------- Task 9: leitura local (readMemoriaState/readFeedbackState) ----------
+
+test("readMemoriaState: le caso/autor/*.md com md5+content, ignora PEERS.md e nao-.md", () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr138-mem-"));
+  try {
+    const a42 = join(base, "caso-x", ".memoria", "42");
+    mkdirSync(a42, { recursive: true });
+    writeFileSync(join(a42, "nota.md"), "conteudo A");
+    writeFileSync(join(a42, "PEERS.md"), "indice gerado pelo sync");
+    writeFileSync(join(a42, "raw.txt"), "nao markdown");
+    const a77 = join(base, "caso-x", ".memoria", "77");
+    mkdirSync(a77, { recursive: true });
+    writeFileSync(join(a77, "b.md"), "conteudo B");
+    // caso sem .memoria -> ausente do resultado
+    mkdirSync(join(base, "caso-y"), { recursive: true });
+
+    const state = readMemoriaState(base);
+    assert.deepEqual(Object.keys(state), ["caso-x"]);
+    assert.deepEqual(Object.keys(state["caso-x"]).sort(), ["42", "77"]);
+    assert.deepEqual(Object.keys(state["caso-x"]["42"]), ["nota.md"]); // PEERS.md e raw.txt fora
+    assert.equal(state["caso-x"]["42"]["nota.md"].content, "conteudo A");
+    assert.equal(state["caso-x"]["42"]["nota.md"].md5, md5hex(Buffer.from("conteudo A")));
+    assert.equal(state["caso-x"]["77"]["b.md"].content, "conteudo B");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("readMemoriaState: casesBase ausente -> {} (tolerante, nunca lanca)", () => {
+  assert.deepEqual(readMemoriaState(join(tmpdir(), "cmr138-nao-existe-abc123")), {});
+});
+
+test("readFeedbackState: le .feedback/autor/*.md, ignora FEEDBACK.md e nao-.md", () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr138-fb-"));
+  try {
+    const fb = join(base, ".feedback");
+    mkdirSync(join(fb, "42"), { recursive: true });
+    writeFileSync(join(fb, "FEEDBACK.md"), "indice na raiz");            // raiz de .feedback, nao e autor
+    writeFileSync(join(fb, "42", "feedback_x.md"), "aprendizado X");
+    writeFileSync(join(fb, "42", "FEEDBACK.md"), "defensivo em subdir"); // ignorado em qualquer nivel
+    writeFileSync(join(fb, "42", "nota.txt"), "nao md");
+
+    const state = readFeedbackState(base);
+    assert.deepEqual(Object.keys(state), ["42"]);
+    assert.deepEqual(Object.keys(state["42"]), ["feedback_x.md"]);
+    assert.equal(state["42"]["feedback_x.md"].content, "aprendizado X");
+    assert.equal(state["42"]["feedback_x.md"].md5, md5hex(Buffer.from("aprendizado X")));
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("readFeedbackState: .feedback ausente -> {}", () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr138-fb2-"));
+  try {
+    assert.deepEqual(readFeedbackState(base), {});
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// ---------- Task 9: indices agregados (buildPeersIndex/buildFeedbackIndex) ----------
+
+test("buildPeersIndex: 2 autores geram marcador `## Autor` por autor com conteudo", () => {
+  const trees = {
+    "42": { "nota.md": { md5: "a", content: "prefira agravo" } },
+    "77": { "estrategia.md": { md5: "b", content: "foco na nulidade" } },
+  };
+  const idx = buildPeersIndex(trees);
+  assert.match(idx, /## Autor 42/);
+  assert.match(idx, /## Autor 77/);
+  assert.match(idx, /nota\.md/);
+  assert.match(idx, /prefira agravo/);
+  assert.match(idx, /foco na nulidade/);
+  assert.ok(Buffer.byteLength(idx, "utf-8") <= 25 * 1024);
+  assert.ok(!/itens omitidos/.test(idx)); // cabe sem truncar
+});
+
+test("buildPeersIndex: entrada gigante trunca <=25KB com trailer visivel", () => {
+  const trees = {};
+  // 100 autores x ~1KB cada -> ~100KB, estoura o cap de 25KB
+  for (let i = 0; i < 100; i++) {
+    trees[`autor${i}`] = { [`nota${i}.md`]: { md5: "x", content: "L".repeat(1000) } };
+  }
+  const idx = buildPeersIndex(trees);
+  assert.ok(Buffer.byteLength(idx, "utf-8") <= 25 * 1024, "index deve caber em 25KB");
+  assert.match(idx, /> \[sync\] \d+ itens omitidos por limite de tamanho/);
+});
+
+test("buildPeersIndex: entrada vazia -> so header, sem trailer, nunca lanca", () => {
+  const idx = buildPeersIndex({});
+  assert.equal(typeof idx, "string");
+  assert.ok(!/itens omitidos/.test(idx));
+});
+
+test("buildFeedbackIndex: agrega por autor; trunca com trailer quando estoura", () => {
+  const small = { "42": { "feedback_a.md": { md5: "a", content: "erro comum X" } } };
+  const idxSmall = buildFeedbackIndex(small);
+  assert.match(idxSmall, /## Autor 42/);
+  assert.match(idxSmall, /erro comum X/);
+  assert.ok(!/itens omitidos/.test(idxSmall)); // sem omissao quando cabe
+
+  const big = {};
+  for (let i = 0; i < 100; i++) {
+    big[`autor${i}`] = { [`f${i}.md`]: { md5: "x", content: "Z".repeat(1000) } };
+  }
+  const idxBig = buildFeedbackIndex(big);
+  assert.ok(Buffer.byteLength(idxBig, "utf-8") <= 25 * 1024);
+  assert.match(idxBig, /> \[sync\] \d+ itens omitidos por limite de tamanho/);
 });
