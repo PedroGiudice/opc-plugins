@@ -168,7 +168,7 @@ export function computeBaseline(manifestCases, localState, prevBaseline, succeed
  * nascimento ele pertence ao usuario/CC (mudar o style ou aprovar permissao
  * edita o mesmo arquivo; o sync nunca sobrescreve).
  */
-export function buildLocalSettings(scaffoldingSettingsRaw, overrideStyle) {
+export function buildLocalSettings(scaffoldingSettingsRaw, overrideStyle, autoMemoryDir) {
   if (typeof scaffoldingSettingsRaw !== "string") return null;
   let parsed;
   try {
@@ -179,7 +179,35 @@ export function buildLocalSettings(scaffoldingSettingsRaw, overrideStyle) {
   if (!parsed || typeof parsed.outputStyle !== "string") return null;
   const out = { outputStyle: overrideStyle || parsed.outputStyle };
   if (parsed.permissions !== undefined) out.permissions = parsed.permissions;
+  // CMR-138: auto memory por-caso. So grava quando o caller passa um dir
+  // (string nao-vazia); a normalizacao do path e do caller — aqui grava literal.
+  if (typeof autoMemoryDir === "string" && autoMemoryDir) out.autoMemoryDirectory = autoMemoryDir;
   return `${JSON.stringify(out, null, 2)}\n`;
+}
+
+/**
+ * Merge de `autoMemoryDirectory` num settings.local.json JA EXISTENTE (caso
+ * legado, nascido antes do CMR-138). Round-trip preservando TODAS as chaves
+ * (outputStyle, permissions, hooks, qualquer outra) — espelha a semantica de
+ * setup.mjs:buildGlobalSettings (nao pisa em config alheia). Regras:
+ *   - raw invalido/array/null/primitivo -> null (nao sobrescreve config corrompida)
+ *   - raw que JA contem autoMemoryDirectory -> retorna o JSON inalterado
+ *     (nunca sobrescreve escolha local do usuario)
+ * O valor gravado e literal — a normalizacao do path (absoluto, `/` no Windows)
+ * e responsabilidade do caller.
+ */
+export function mergeAutoMemoryDir(existingLocalRaw, autoMemoryDir) {
+  if (typeof existingLocalRaw !== "string") return null;
+  let obj;
+  try {
+    obj = JSON.parse(existingLocalRaw);
+  } catch {
+    return null;
+  }
+  if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return null;
+  if (obj.autoMemoryDirectory !== undefined) return `${JSON.stringify(obj, null, 2)}\n`;
+  obj.autoMemoryDirectory = autoMemoryDir;
+  return `${JSON.stringify(obj, null, 2)}\n`;
 }
 
 /**

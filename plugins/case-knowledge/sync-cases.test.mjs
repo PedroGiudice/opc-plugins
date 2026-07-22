@@ -226,3 +226,34 @@ test("buildLocalSettings: override de style do case.yaml vence o default do scaf
   const nul = JSON.parse(buildLocalSettings(scaffolding, null));
   assert.equal(nul.outputStyle, "Legal Main Agent");
 });
+
+// --- autoMemoryDirectory por-caso (CMR-138) ---
+
+test("buildLocalSettings inclui autoMemoryDirectory quando passado", async () => {
+  const { buildLocalSettings } = await import("./sync-cases.mjs");
+  const raw = JSON.stringify({ outputStyle: "Legal Main Agent", permissions: { allow: ["Read"] } });
+  const out = JSON.parse(buildLocalSettings(raw, null, "C:/Users/pedro/cases/x/.memoria/42"));
+  assert.equal(out.autoMemoryDirectory, "C:/Users/pedro/cases/x/.memoria/42");
+  assert.equal(out.outputStyle, "Legal Main Agent");
+});
+
+test("mergeAutoMemoryDir preserva chaves e adiciona", async () => {
+  const { mergeAutoMemoryDir } = await import("./sync-cases.mjs");
+  const r = JSON.parse(mergeAutoMemoryDir(JSON.stringify({ outputStyle: "X", permissions: {} }), "/abs/.memoria/42"));
+  assert.equal(r.autoMemoryDirectory, "/abs/.memoria/42");
+  assert.equal(r.outputStyle, "X");
+});
+
+test("mergeAutoMemoryDir em JSON invalido -> null", async () => {
+  const { mergeAutoMemoryDir } = await import("./sync-cases.mjs");
+  assert.equal(mergeAutoMemoryDir("{quebrado", "/x"), null);
+});
+
+test("mergeAutoMemoryDir: raw que ja contem autoMemoryDirectory preserva a escolha local", async () => {
+  const { mergeAutoMemoryDir } = await import("./sync-cases.mjs");
+  const raw = JSON.stringify({ outputStyle: "X", autoMemoryDirectory: "/escolha/local" });
+  const r = JSON.parse(mergeAutoMemoryDir(raw, "/nova/.memoria/42"));
+  // nao sobrescreve escolha local ja presente
+  assert.equal(r.autoMemoryDirectory, "/escolha/local");
+  assert.equal(r.outputStyle, "X");
+});
