@@ -19,7 +19,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { requestWithAuth } from "./auth.mjs";
+import { requestWithAuth, readCredential, decodeJwtSub } from "./auth.mjs";
 
 // Espelha defaultApiBase/defaultCasesBase do server.mjs. Duplicado de
 // proposito: importar server.mjs executaria o server MCP (connect no
@@ -680,6 +680,25 @@ async function fetchJson(url) {
   return await res.json();
 }
 
+/**
+ * POST autenticado espelhando fetchJson: Bearer S2S via requestWithAuth (injeta
+ * quando ha credencial, refresh em 401, degrada sem credencial), timeout 10s,
+ * lanca em nao-ok. Body JSON. Retorna a resposta parseada. Usado no upload de
+ * memoria/feedback (CMR-138).
+ */
+export async function postJson(url, body) {
+  const res = await requestWithAuth((authHeaders) =>
+    fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10_000),
+    }),
+  );
+  if (!res.ok) throw new Error(`HTTP ${res.status} em ${url}`);
+  return await res.json();
+}
+
 function appendLog(casesBase, line) {
   try {
     appendFileSync(join(casesBase, ".sync.log"), `${new Date().toISOString()} ${line}\n`);
@@ -688,10 +707,284 @@ function appendLog(casesBase, line) {
   }
 }
 
+// ---------- CMR-138: wiring do sync de memoria de caso (Task 10) ----------
+//
+// Liga as puras (planMemoriaActions/computeMemoriaBaseline + read*State +
+// build*Index) a rede e disco. Estado SEPARADO em .memoria-state.json — a
+// invariante dos 3 briefing files (.sync-state.json etc) e INTOCAVEL. Toda
+// falha de I/O/rede loga e continua; nenhum caminho aqui pode derrubar o sync
+// de briefing (main chama em try/catch proprio).
+
+// Estado do sync de memoria — arquivo PROPRIO, distinto de .sync-state.json.
+const STATE_FILE_MEMORIA = ".memoria-state.json";
+
+// Pseudo-caso do pool de feedback nas estruturas de plano/baseline: um unico
+// mapa combinado {...casosReais, ".feedback": authorsDoPool} passa por
+// planMemoriaActions/computeMemoriaBaseline como se fosse mais um caso. Nunca
+// colide com caso real (o server rejeita nome com leading dot).
+const FEEDBACK_POOL = ".feedback";
+
+// Caps de upload — espelham o servidor: 50 arquivos/req, 1 MiB/arquivo, 5 MiB/req.
+const UPLOAD_MAX_FILES = 50;
+const UPLOAD_MAX_FILE_BYTES = 1024 * 1024;
+const UPLOAD_MAX_REQ_BYTES = 5 * 1024 * 1024;
+// Folga por arquivo p/ o envelope JSON ({"files":[{"name","content"}]} + escaping):
+// orcamos sobre content+name para nunca estourar o limite de body do server.
+const UPLOAD_ENVELOPE_RESERVE = 64;
+
+function readMemoriaBaselineFrom(casesBase) {
+  const p = join(casesBase, STATE_FILE_MEMORIA);
+  if (!existsSync(p)) return {};
+  try {
+    return JSON.parse(readFileSync(p, "utf-8"));
+  } catch {
+    return {}; // estado corrompido: trata como bootstrap, nao derruba o sync
+  }
+}
+
+function writeMemoriaBaseline(casesBase, baseline) {
+  const path = join(casesBase, STATE_FILE_MEMORIA);
+  const tmp = `${path}.sync-tmp`;
+  writeFileSync(tmp, JSON.stringify(baseline), "utf-8");
+  renameSync(tmp, path);
+}
+
+/**
+ * Agrupa arquivos de upload em batches respeitando os caps do servidor:
+ * <=UPLOAD_MAX_FILES por batch e custo (content+name+envelope) <=UPLOAD_MAX_REQ_BYTES.
+ * Arquivos sem content string ou acima de UPLOAD_MAX_FILE_BYTES sao pulados
+ * (reportados em `skipped`, nunca derrubam o batch). Pura.
+ * Retorna { batches: [[file]], skipped: [{ name, case, reason }] }.
+ */
+function batchUploads(files) {
+  const batches = [];
+  const skipped = [];
+  let cur = [];
+  let curBytes = 0;
+  for (const f of files) {
+    if (typeof f.content !== "string") {
+      skipped.push({ name: f.name, case: f.case, reason: "sem conteudo" });
+      continue;
+    }
+    const contentBytes = Buffer.byteLength(f.content, "utf-8");
+    if (contentBytes > UPLOAD_MAX_FILE_BYTES) {
+      skipped.push({ name: f.name, case: f.case, reason: ">1MiB" });
+      continue;
+    }
+    const cost = contentBytes + Buffer.byteLength(f.name, "utf-8") + UPLOAD_ENVELOPE_RESERVE;
+    if (cur.length >= UPLOAD_MAX_FILES || (cur.length > 0 && curBytes + cost > UPLOAD_MAX_REQ_BYTES)) {
+      batches.push(cur);
+      cur = [];
+      curBytes = 0;
+    }
+    cur.push(f);
+    curBytes += cost;
+  }
+  if (cur.length > 0) batches.push(cur);
+  return { batches, skipped };
+}
+
+/**
+ * Sincroniza a memoria de caso por-autor: baixa peers (+ self sob never-overwrite)
+ * e sobe SO os arquivos do proprio autor, roteados p/ memoria-de-caso ou pool de
+ * feedback. Orquestra as puras da Task 8/9. `deps` injeta a rede em teste
+ * (getJson/postJson); default usa as reais (fetchJson/postJson). NUNCA lanca —
+ * toda falha loga e continua. selfAuthor null/undefined -> skip total.
+ *
+ * Contratos do servidor:
+ *   GET  /memoria-manifest   -> { cases: { <caso>: { <autor>: { <arq>: md5 } } } }
+ *   GET  /feedback-manifest  -> { authors: { <autor>: { <arq>: md5 } } }
+ *   GET  /cases/{c}/memoria/{a} e /feedback/{a} -> { files: { <arq>: {content,md5} } }
+ *   POST /cases/{c}/memoria e /feedback -> body { files: [{name,content}] };
+ *        resp { author, count, written: [nome], case? }
+ */
+export async function syncMemoria(apiBase, casesBase, selfAuthor, deps = {}) {
+  const doGet = deps.getJson || fetchJson;
+  const doPost = deps.postJson || postJson;
+
+  if (selfAuthor === null || selfAuthor === undefined) {
+    appendLog(casesBase, "memoria: sem autor (credencial ausente/sem sub) -> skip");
+    return;
+  }
+
+  // 1) Dois GETs fixos por ciclo (manifests agregados). Falha -> skip com log.
+  let memManifest, fbManifest;
+  try {
+    memManifest = await doGet(`${apiBase}/memoria-manifest`);
+    fbManifest = await doGet(`${apiBase}/feedback-manifest`);
+  } catch (err) {
+    appendLog(casesBase, `memoria: erro manifest: ${err.message}`);
+    return;
+  }
+
+  const remoteCombined = {
+    ...(memManifest?.cases || {}),
+    [FEEDBACK_POOL]: fbManifest?.authors || {},
+  };
+
+  // 2) Estado local + baseline combinados (pool como pseudo-caso).
+  let memoriaState = {}, feedbackState = {}, baseline = {};
+  try {
+    memoriaState = readMemoriaState(casesBase);
+    feedbackState = readFeedbackState(casesBase);
+    baseline = readMemoriaBaselineFrom(casesBase);
+  } catch (err) {
+    appendLog(casesBase, `memoria: erro lendo estado local: ${err.message}`);
+    return;
+  }
+  const localCombined = { ...memoriaState, [FEEDBACK_POOL]: feedbackState };
+
+  const plan = planMemoriaActions(remoteCombined, localCombined, baseline, selfAuthor);
+
+  // 3+4) Downloads: so casos com dir local (pool sempre elegivel). Escrita atomica
+  // em <caso>/.memoria/<autor>/ ou .feedback/<autor>/. Chave de sucesso combina
+  // com computeMemoriaBaseline (`${caso} ${autor} ${arquivo}`, caso=".feedback" no pool).
+  const succeeded = new Set();
+  let downloaded = 0;
+  for (const d of plan.downloadAuthors) {
+    const isPool = d.case === FEEDBACK_POOL;
+    const caseDir = isPool ? join(casesBase, FEEDBACK_POOL) : join(casesBase, d.case);
+    if (!isPool && !existsSync(caseDir)) {
+      appendLog(casesBase, `memoria: caso ${d.case} sem dir local -> skip download`);
+      continue;
+    }
+    const authorDir = isPool ? join(caseDir, d.author) : join(caseDir, ".memoria", d.author);
+    let payload;
+    try {
+      const path = isPool
+        ? `${apiBase}/feedback/${encodeURIComponent(d.author)}`
+        : `${apiBase}/cases/${encodeURIComponent(d.case)}/memoria/${encodeURIComponent(d.author)}`;
+      payload = await doGet(path);
+    } catch (err) {
+      appendLog(casesBase, `memoria: erro baixando ${d.case}/${d.author}: ${err.message}`);
+      continue;
+    }
+    try {
+      mkdirSync(authorDir, { recursive: true });
+    } catch (err) {
+      appendLog(casesBase, `memoria: erro mkdir ${authorDir}: ${err.message}`);
+      continue;
+    }
+    for (const file of d.files) {
+      const remote = payload?.files?.[file];
+      if (!remote || typeof remote.content !== "string") continue; // sumiu entre manifest e fetch
+      try {
+        writeAtomic(join(authorDir, file), remote.content);
+        succeeded.add(`${d.case} ${d.author} ${file}`);
+        downloaded++;
+      } catch (err) {
+        appendLog(casesBase, `memoria: erro escrevendo ${d.case}/${d.author}/${file}: ${err.message}`);
+      }
+    }
+  }
+
+  // 5) Indices agregados a partir do estado POS-download (reflete o disco real).
+  let postMem = {}, postFb = {};
+  try { postMem = readMemoriaState(casesBase); } catch { /* index degrada p/ vazio */ }
+  try { postFb = readFeedbackState(casesBase); } catch { /* idem */ }
+
+  // PEERS.md por caso: autores do caso EXCLUINDO o self; so escreve se ha >=1 peer com arquivo.
+  for (const [caso, authors] of Object.entries(postMem)) {
+    const peerTrees = {};
+    for (const [author, files] of Object.entries(authors)) {
+      if (author === selfAuthor) continue;
+      if (files && Object.keys(files).length > 0) peerTrees[author] = files;
+    }
+    if (Object.keys(peerTrees).length === 0) continue;
+    try {
+      const memDir = join(casesBase, caso, ".memoria");
+      mkdirSync(memDir, { recursive: true });
+      writeAtomic(join(memDir, "PEERS.md"), buildPeersIndex(peerTrees));
+    } catch (err) {
+      appendLog(casesBase, `memoria: erro PEERS.md ${caso}: ${err.message}`);
+    }
+  }
+
+  // FEEDBACK.md do pool: TODOS os autores do pool (inclui self). So se ha pool.
+  if (Object.keys(postFb).length > 0) {
+    try {
+      const fbDir = join(casesBase, FEEDBACK_POOL);
+      mkdirSync(fbDir, { recursive: true });
+      writeAtomic(join(fbDir, "FEEDBACK.md"), buildFeedbackIndex(postFb));
+    } catch (err) {
+      appendLog(casesBase, `memoria: erro FEEDBACK.md: ${err.message}`);
+    }
+  }
+
+  // 6) Uploads roteados por target (never-overwrite decidido pela pura): target
+  // "feedback" -> POST /feedback (case ignorado no server); "memoria" -> POST por
+  // caso. `uploaded` chaveia por u.case (verbatim) p/ casar computeMemoriaBaseline.
+  const uploaded = new Set();
+  let uploadedCount = 0;
+  const feedbackFiles = plan.uploadFiles.filter((u) => u.target === "feedback");
+  const memoriaByCase = new Map();
+  for (const u of plan.uploadFiles) {
+    if (u.target === "feedback") continue;
+    // target "memoria" com caso invalido (pseudo-caso/leading dot) nunca vira POST
+    // de caso — o server rejeitaria; pula com log (defensivo, nao ocorre no fluxo real).
+    if (typeof u.case !== "string" || u.case.startsWith(".")) {
+      appendLog(casesBase, `memoria: upload memoria com caso invalido ${u.case}/${u.name} -> skip`);
+      continue;
+    }
+    if (!memoriaByCase.has(u.case)) memoriaByCase.set(u.case, []);
+    memoriaByCase.get(u.case).push(u);
+  }
+
+  // Posta batches de uma lista e coleta o `written` do server (so o ACEITO vira baseline).
+  const postBatches = async (files, url, label) => {
+    const { batches, skipped } = batchUploads(files);
+    for (const s of skipped) {
+      appendLog(casesBase, `memoria: upload pulado (${label}) ${s.name}: ${s.reason}`);
+    }
+    for (const batch of batches) {
+      try {
+        const resp = await doPost(url, { files: batch.map((f) => ({ name: f.name, content: f.content })) });
+        const written = new Set(Array.isArray(resp?.written) ? resp.written : []);
+        for (const f of batch) {
+          if (written.has(f.name)) {
+            uploaded.add(`${f.case} ${selfAuthor} ${f.name}`);
+            uploadedCount++;
+          }
+        }
+      } catch (err) {
+        appendLog(casesBase, `memoria: erro upload (${label}): ${err.message}`);
+      }
+    }
+  };
+
+  await postBatches(feedbackFiles, `${apiBase}/feedback`, "feedback");
+  for (const [caso, files] of memoriaByCase) {
+    await postBatches(files, `${apiBase}/cases/${encodeURIComponent(caso)}/memoria`, `memoria ${caso}`);
+  }
+
+  // 7) Baseline combinado (inclui o pseudo-caso .feedback). NUNCA toca .sync-state.json.
+  try {
+    const next = computeMemoriaBaseline(remoteCombined, localCombined, baseline, succeeded, uploaded, selfAuthor);
+    writeMemoriaBaseline(casesBase, next);
+  } catch (err) {
+    appendLog(casesBase, `memoria: erro baseline: ${err.message}`);
+  }
+
+  appendLog(casesBase, `memoria: ok baixados=${downloaded} uploads=${uploadedCount}`);
+}
+
 async function main() {
   const apiBase = process.env.CASE_KNOWLEDGE_API_BASE || defaultApiBase();
   const casesBase = process.env.CASE_KNOWLEDGE_CASES_BASE || defaultCasesBase();
   mkdirSync(casesBase, { recursive: true });
+
+  // CMR-138: autor da memoria (namespace-por-autor) derivado UMA vez do sub do
+  // access_jwt, no INICIO (a injecao de autoMemoryDirectory por-caso da Task 11
+  // precisa do selfAuthor no path). Sem credencial/sub -> null: a memoria e
+  // pulada e o sync de briefing segue normal. Try/catch defensivo: uma falha
+  // rara ao ler a credencial NUNCA pode derrubar o sync de briefing abaixo.
+  let selfAuthor = null;
+  try {
+    const cred = readCredential();
+    selfAuthor = cred && cred.access_jwt ? decodeJwtSub(cred.access_jwt) : null;
+  } catch {
+    selfAuthor = null;
+  }
 
   let manifest;
   try {
@@ -802,6 +1095,16 @@ async function main() {
     (provisioned ? ` settings_provisionados=${provisioned}` : "") +
     (errors.length ? ` ERROS: ${errors.join(" | ")}` : "");
   appendLog(casesBase, summary);
+
+  // CMR-138: sincroniza a memoria de caso por-autor (peers + upload do self).
+  // Roda DEPOIS do briefing/settings, com estado e log PROPRIOS
+  // (.memoria-state.json). syncMemoria nunca lanca; o try/catch e ultima linha
+  // de defesa para garantir que a memoria jamais derrube o sync de briefing.
+  try {
+    await syncMemoria(apiBase, casesBase, selfAuthor);
+  } catch (err) {
+    appendLog(casesBase, `memoria: erro inesperado: ${err.message}`);
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

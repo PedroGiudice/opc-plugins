@@ -16,7 +16,10 @@ import {
   readFeedbackState,
   buildPeersIndex,
   buildFeedbackIndex,
+  syncMemoria,
+  postJson,
 } from "./sync-cases.mjs";
+import { existsSync, readFileSync } from "node:fs";
 
 test("caso novo: mkdir + download de todos os arquivos do manifest", () => {
   const manifest = [
@@ -607,4 +610,231 @@ test("buildFeedbackIndex: agrega por autor; trunca com trailer quando estoura", 
   const idxBig = buildFeedbackIndex(big);
   assert.ok(Buffer.byteLength(idxBig, "utf-8") <= 25 * 1024);
   assert.match(idxBig, /> \[sync\] \d+ itens omitidos por limite de tamanho/);
+});
+
+// ---------- Task 10: syncMemoria (wiring download+upload) + postJson ----------
+
+// exporta postJson (existe como funcao); a validacao de rede real e coberta
+// indiretamente pelos testes de syncMemoria com fake injetavel.
+test("postJson e exportado (funcao)", () => {
+  assert.equal(typeof postJson, "function");
+});
+
+// Fabrica de deps fake para syncMemoria: getJson roteia por URL, postJson coleta.
+function makeFakeApi(routes) {
+  const gets = [];
+  const posts = [];
+  const getJson = async (url) => {
+    gets.push(url);
+    for (const [frag, val] of Object.entries(routes.get || {})) {
+      if (url.endsWith(frag)) return typeof val === "function" ? val(url) : val;
+    }
+    throw new Error(`404 ${url}`);
+  };
+  const postJson = async (url, body) => {
+    posts.push({ url, body });
+    for (const [frag, val] of Object.entries(routes.post || {})) {
+      if (url.endsWith(frag)) return typeof val === "function" ? val(body) : val;
+    }
+    throw new Error(`404 POST ${url}`);
+  };
+  return { deps: { getJson, postJson }, gets, posts };
+}
+
+test("syncMemoria: ciclo download peer + upload roteado; grava .memoria-state.json; nao toca .sync-state.json", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr138-sync-"));
+  try {
+    // self=42 tem memoria (estrategia.md) e um feedback (feedback_lig.md) em caso-a
+    const self42 = join(base, "caso-a", ".memoria", "42");
+    mkdirSync(self42, { recursive: true });
+    writeFileSync(join(self42, "estrategia.md"), "estrategia do self");
+    writeFileSync(join(self42, "feedback_lig.md"), "ligar pro cliente");
+    // caso-ghost NAO existe como dir local -> download deve ser pulado
+
+    // sentinel do sync de briefing: NUNCA deve ser tocado
+    writeFileSync(join(base, ".sync-state.json"), '{"SENTINELA":true}');
+
+    const { deps, gets, posts } = makeFakeApi({
+      get: {
+        "/memoria-manifest": {
+          cases: {
+            "caso-a": { "99": { "peer.md": "vmpeer" } },
+            "caso-ghost": { "99": { "g.md": "gx" } },
+          },
+        },
+        "/feedback-manifest": { authors: {} },
+        "/cases/caso-a/memoria/99": { files: { "peer.md": { content: "conteudo do peer", md5: "vmpeer" } } },
+      },
+      post: {
+        "/cases/caso-a/memoria": { author: "42", case: "caso-a", count: 1, written: ["estrategia.md"] },
+        "/feedback": { author: "42", count: 1, written: ["feedback_lig.md"] },
+      },
+    });
+
+    await syncMemoria("http://t/api", base, "42", deps);
+
+    // peer baixado em caso-a/.memoria/99/peer.md
+    assert.ok(existsSync(join(base, "caso-a", ".memoria", "99", "peer.md")));
+    assert.equal(readFileSync(join(base, "caso-a", ".memoria", "99", "peer.md"), "utf-8"), "conteudo do peer");
+
+    // caso-ghost pulado: nunca buscou o conteudo, nunca criou dir
+    assert.ok(!gets.some((u) => u.includes("caso-ghost/memoria")));
+    assert.ok(!existsSync(join(base, "caso-ghost")));
+
+    // PEERS.md do caso-a inclui o peer 99, exclui o self 42
+    const peers = readFileSync(join(base, "caso-a", ".memoria", "PEERS.md"), "utf-8");
+    assert.match(peers, /## Autor 99/);
+    assert.ok(!/## Autor 42/.test(peers), "PEERS.md nao pode listar o self");
+    assert.match(peers, /conteudo do peer/);
+
+    // uploads roteados: estrategia -> memoria do caso; feedback_lig -> pool
+    const memPost = posts.find((p) => p.url.endsWith("/cases/caso-a/memoria"));
+    const fbPost = posts.find((p) => p.url.endsWith("/feedback"));
+    assert.ok(memPost, "esperava POST na memoria do caso");
+    assert.deepEqual(memPost.body.files.map((f) => f.name), ["estrategia.md"]);
+    assert.ok(fbPost, "esperava POST no pool de feedback");
+    assert.deepEqual(fbPost.body.files.map((f) => f.name), ["feedback_lig.md"]);
+
+    // baseline gravado com md5 do download (VM) e dos uploads (written)
+    const st = JSON.parse(readFileSync(join(base, ".memoria-state.json"), "utf-8"));
+    assert.equal(st["caso-a"]["99"]["peer.md"], "vmpeer");
+    assert.equal(st["caso-a"]["42"]["estrategia.md"], md5hex(Buffer.from("estrategia do self")));
+    assert.equal(st["caso-a"]["42"]["feedback_lig.md"], md5hex(Buffer.from("ligar pro cliente")));
+    // caso-ghost nao entrou no baseline (nao foi baixado)
+    assert.ok(!("caso-ghost" in st));
+
+    // invariante dura: .sync-state.json intocado
+    assert.equal(readFileSync(join(base, ".sync-state.json"), "utf-8"), '{"SENTINELA":true}');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("syncMemoria: arquivo self >1MiB e pulado (nunca no POST, nunca derruba o ciclo)", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr138-big-"));
+  try {
+    const self42 = join(base, "caso-a", ".memoria", "42");
+    mkdirSync(self42, { recursive: true });
+    writeFileSync(join(self42, "ok.md"), "curtinho");
+    writeFileSync(join(self42, "big.md"), "L".repeat(1024 * 1024 + 10)); // > 1 MiB
+
+    const { deps, posts } = makeFakeApi({
+      get: {
+        "/memoria-manifest": { cases: {} },
+        "/feedback-manifest": { authors: {} },
+      },
+      post: {
+        "/cases/caso-a/memoria": (body) => ({ author: "42", case: "caso-a", count: body.files.length, written: body.files.map((f) => f.name) }),
+      },
+    });
+
+    await syncMemoria("http://t/api", base, "42", deps);
+
+    const memPost = posts.find((p) => p.url.endsWith("/cases/caso-a/memoria"));
+    assert.ok(memPost);
+    const names = memPost.body.files.map((f) => f.name);
+    assert.ok(names.includes("ok.md"));
+    assert.ok(!names.includes("big.md"), "arquivo >1MiB nao pode ir no POST");
+
+    // log de skip visivel
+    const log = readFileSync(join(base, ".sync.log"), "utf-8");
+    assert.match(log, /big\.md/);
+
+    // baseline: ok.md gravado (uploaded), big.md ausente
+    const st = JSON.parse(readFileSync(join(base, ".memoria-state.json"), "utf-8"));
+    assert.equal(st["caso-a"]["42"]["ok.md"], md5hex(Buffer.from("curtinho")));
+    assert.ok(!("big.md" in st["caso-a"]["42"]));
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("syncMemoria: selfAuthor null -> skip total (sem rede, sem estado)", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr138-noself-"));
+  try {
+    let called = false;
+    const deps = {
+      getJson: async () => { called = true; throw new Error("nao deveria chamar"); },
+      postJson: async () => { called = true; throw new Error("nao deveria chamar"); },
+    };
+    await syncMemoria("http://t/api", base, null, deps);
+    assert.equal(called, false);
+    assert.ok(!existsSync(join(base, ".memoria-state.json")));
+    const log = readFileSync(join(base, ".sync.log"), "utf-8");
+    assert.match(log, /sem autor/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("syncMemoria: arquivo self rejeitado pelo server (fora de written) NAO entra no baseline", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr138-rej-"));
+  try {
+    const self42 = join(base, "caso-a", ".memoria", "42");
+    mkdirSync(self42, { recursive: true });
+    writeFileSync(join(self42, "aceito.md"), "vai passar");
+    writeFileSync(join(self42, "rejeitado.md"), "server recusa");
+
+    const { deps } = makeFakeApi({
+      get: {
+        "/memoria-manifest": { cases: {} },
+        "/feedback-manifest": { authors: {} },
+      },
+      post: {
+        // server aceita so aceito.md
+        "/cases/caso-a/memoria": { author: "42", case: "caso-a", count: 1, written: ["aceito.md"] },
+      },
+    });
+
+    await syncMemoria("http://t/api", base, "42", deps);
+
+    const st = JSON.parse(readFileSync(join(base, ".memoria-state.json"), "utf-8"));
+    assert.equal(st["caso-a"]["42"]["aceito.md"], md5hex(Buffer.from("vai passar")));
+    assert.ok(!("rejeitado.md" in st["caso-a"]["42"]), "arquivo rejeitado nao pode virar baseline");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("syncMemoria: download+upload de feedback do pool (.feedback como pseudo-caso)", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr138-pool-"));
+  try {
+    // self=42 tem um feedback proprio ja no pool local
+    const poolSelf = join(base, ".feedback", "42");
+    mkdirSync(poolSelf, { recursive: true });
+    writeFileSync(join(poolSelf, "feedback_meu.md"), "meu aprendizado");
+
+    const { deps, gets, posts } = makeFakeApi({
+      get: {
+        "/memoria-manifest": { cases: {} },
+        // pool remoto tem feedback de um peer 99 (seed) e nao tem o do self
+        "/feedback-manifest": { authors: { "99": { "feedback_peer.md": "vmfb" } } },
+        "/feedback/99": { files: { "feedback_peer.md": { content: "aprendizado do peer", md5: "vmfb" } } },
+      },
+      post: {
+        "/feedback": { author: "42", count: 1, written: ["feedback_meu.md"] },
+      },
+    });
+
+    await syncMemoria("http://t/api", base, "42", deps);
+
+    // peer do pool baixado em .feedback/99/
+    assert.ok(existsSync(join(base, ".feedback", "99", "feedback_peer.md")));
+    // FEEDBACK.md agregado gerado
+    const fb = readFileSync(join(base, ".feedback", "FEEDBACK.md"), "utf-8");
+    assert.match(fb, /## Autor 99/);
+    assert.match(fb, /aprendizado do peer/);
+    // upload do self ao pool
+    const fbPost = posts.find((p) => p.url.endsWith("/feedback") && p.body);
+    assert.ok(fbPost);
+    assert.deepEqual(fbPost.body.files.map((f) => f.name), ["feedback_meu.md"]);
+    // baseline usa .feedback como pseudo-caso
+    const st = JSON.parse(readFileSync(join(base, ".memoria-state.json"), "utf-8"));
+    assert.equal(st[".feedback"]["99"]["feedback_peer.md"], "vmfb");
+    assert.equal(st[".feedback"]["42"]["feedback_meu.md"], md5hex(Buffer.from("meu aprendizado")));
+    // nao baixou memoria de caso nenhuma
+    assert.ok(!gets.some((u) => u.includes("/cases/")));
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });
