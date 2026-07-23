@@ -23,10 +23,10 @@
  */
 
 import {
-  existsSync,
   mkdirSync,
   readdirSync,
   copyFileSync,
+  constants,
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -61,6 +61,21 @@ function tokenize(s) {
 // decisao humana que o texto do nome nao carrega. O casamento fuzzy foi usado
 // para GERAR estes candidatos; o humano confirmou. Consultados ANTES do fuzzy.
 //
+// CURATED_CLEAN: slug -> caso UNICO confirmado por humano (match "curated",
+// AUTO-APLICA). Usado quando o token distintivo do slug DIVERGE do nome da
+// pasta -- ali o fuzzy resolveria por coincidencia de um token secundario, sem
+// confianca. Fixar aqui torna a decisao humana explicita em vez de acidental.
+// E tambem o destino de um palpite FUZZY que o CEO confirma no dry-run: ao
+// aprovar, a entrada migra de fuzzy (segurado) para ca (auto-aplicavel).
+//   - salesforce_facilita_attrus -> salesforce-facilita-pagamentos: "attrus"
+//     (contraparte) NAO aparece na pasta ("pagamentos"); so "facilita" liga os
+//     dois. Decisao humana, nao coincidencia lexical.
+const CURATED_CLEAN = {
+  salesforce_facilita_attrus: "salesforce-facilita-pagamentos",
+};
+
+// CURATED_AMBIGUOUS: slug -> candidatos plausiveis; SEMPRE exige decisao humana
+// (nunca auto-aplica), mesmo com 1 unico candidato ("provavel, confirmar").
 // Por que cada um precisa de curadoria (fuzzy puro erraria):
 //   - luiz_henrique_demissao: casaria LIMPO em luiz-henrique-soares (tokens
 //     "luiz"+"henrique"), mas a memoria de demissao pode pertencer a
@@ -68,13 +83,13 @@ function tokenize(s) {
 //   - piggpay_salesforce: salesforce-piggpay e piggpay_sfdc sao o MESMO CNJ em
 //     duas pastas; ambas plausiveis.
 //   - desktop_salesforce_notificacoes: provavel salesforce-desktopsa, mas o
-//     humano marcou "?" (segundo candidato incerto) -- nao auto-resolver.
+//     humano marcou "?" (candidato incerto) -- nao auto-resolver.
 //   - comex_salesforce_agravo / novartis_hed_execucao: multiplas pastas do
 //     mesmo grupo, sem token que desempate.
 //   - odmgt_contratos_modelo: compartilha o token raro "odmgt" com
 //     odmgt-jf-beleza e casaria LIMPO no fuzzy, mas e um modelo de contrato
-//     avulso, nao pertence aquele caso -> orfao.
-//   - otsuka_primeq: sem pasta correspondente -> orfao.
+//     avulso -- EXISTE o candidato, mas a pertinencia e duvida humana, nao
+//     orfandade. 1 candidato -> ambiguo (confirmar), nunca auto-aplica.
 const CURATED_AMBIGUOUS = {
   luiz_henrique_demissao: ["luiz-henrique-soares", "carlos-eduardo"],
   desktop_salesforce_notificacoes: ["salesforce-desktopsa"],
@@ -88,8 +103,12 @@ const CURATED_AMBIGUOUS = {
     "novartis-hosp-dornelles",
     "novartis-medfarma",
   ],
+  odmgt_contratos_modelo: ["odmgt-jf-beleza"],
 };
-const CURATED_ORPHAN = new Set(["otsuka_primeq", "odmgt_contratos_modelo"]);
+
+// CURATED_ORPHAN: slug SEM nenhuma pasta correspondente no disco -> orfao.
+//   - otsuka_primeq: sem caso correspondente.
+const CURATED_ORPHAN = new Set(["otsuka_primeq"]);
 
 // ---------------------------------------------------------------------------
 // Resolucao fuzzy de slug -> pasta (para tudo que NAO esta no mapa curado)
@@ -106,7 +125,9 @@ const CURATED_ORPHAN = new Set(["otsuka_primeq", "odmgt_contratos_modelo"]);
  * vence a pasta cujo nome esta mais contido no slug ("compassion" = 100%).
  * Unico vencedor -> limpo, empate real -> ambiguo, nenhum candidato -> orfao.
  *
- * Retorna: { casePath } | { ambiguous: [...] } | { orphan: true }.
+ * Retorna: { casePath, via:"exact" } | { casePath, via:"fuzzy", score } |
+ * { ambiguous: [...] } | { orphan: true }. `via` distingue casamento exato de
+ * palpite; `score` (idf/cov do vencedor) alimenta o dry-run.
  * Nunca produz um casePath que falhe em isSafeMemoriaCase.
  */
 function resolveProjectSlug(slug, casePaths) {
@@ -115,7 +136,7 @@ function resolveProjectSlug(slug, casePaths) {
 
   // (1) match exato normalizado (cobre casing misto, ex: abrafarma-ML-Ifood)
   const exact = safe.filter((cp) => norm(cp) === slugN);
-  if (exact.length === 1) return { casePath: exact[0] };
+  if (exact.length === 1) return { casePath: exact[0], via: "exact" };
   if (exact.length > 1) return { ambiguous: exact };
 
   // (2) score por token IDF + cobertura
@@ -150,9 +171,12 @@ function resolveProjectSlug(slug, casePaths) {
   const maxIdf = Math.max(...scored.map((s) => s.idf));
   const topIdf = scored.filter((s) => s.idf === maxIdf);
   const maxCov = Math.max(...topIdf.map((s) => s.cov));
-  const winners = topIdf.filter((s) => s.cov === maxCov).map((s) => s.cp);
-  if (winners.length === 1) return { casePath: winners[0] };
-  return { ambiguous: winners };
+  const winners = topIdf.filter((s) => s.cov === maxCov);
+  if (winners.length === 1) {
+    const w = winners[0];
+    return { casePath: w.cp, via: "fuzzy", score: { idf: w.idf, cov: w.cov } };
+  }
+  return { ambiguous: winners.map((s) => s.cp) };
 }
 
 // ---------------------------------------------------------------------------
@@ -166,8 +190,10 @@ function resolveProjectSlug(slug, casePaths) {
  *
  * @param {string} name       nome do arquivo (ex: "project_bianka_salesforce.md")
  * @param {string[]} casePaths pastas de caso reais lidas do disco
- * @returns {{kind:string, casePath?:string, ambiguous?:string[], orphan?:true}}
- *   kind: "feedback" | "project" | "reference" | "index" | "other"
+ * @returns {{kind:string, casePath?:string, match?:string, score?:object, ambiguous?:string[], orphan?:true}}
+ *   kind: "feedback" | "project" | "reference" | "index" | "other".
+ *   match (so quando casePath resolvido): "exact" | "curated" | "fuzzy".
+ *   Apenas "exact" e "curated" auto-aplicam; "fuzzy" e palpite (segurado).
  */
 export function classifyLegacyMemFile(name, casePaths) {
   if (typeof name !== "string") return { kind: "other" };
@@ -183,11 +209,18 @@ export function classifyLegacyMemFile(name, casePaths) {
   if (name.startsWith("project_")) {
     const slug = name.slice("project_".length).replace(/\.md$/, "");
 
-    // (a) mapa curado: julgamento humano vence o fuzzy
+    // (a) mapa curado: julgamento humano vence o fuzzy.
+    // (a.1) curado LIMPO: destino unico confirmado -> auto-aplica (match curated).
+    const clean = CURATED_CLEAN[slug];
+    if (clean && paths.includes(clean) && isSafeMemoriaCase(clean)) {
+      return { kind: "project", casePath: clean, match: "curated" };
+    }
+    // (a.2) curado ORFAO: sem pasta correspondente.
     if (CURATED_ORPHAN.has(slug)) return { kind: "project", orphan: true };
+    // (a.3) curado AMBIGUO: exige decisao humana (nunca auto-aplica), mesmo com
+    // 1 candidato. So candidatos que existem no disco E sao seguros.
     const curated = CURATED_AMBIGUOUS[slug];
     if (curated) {
-      // So candidatos que existem no disco E sao seguros; ordem preservada.
       const cands = curated.filter(
         (c) => paths.includes(c) && isSafeMemoriaCase(c),
       );
@@ -198,7 +231,11 @@ export function classifyLegacyMemFile(name, casePaths) {
     // (b) fuzzy
     const r = resolveProjectSlug(slug, paths);
     if (r.casePath && isSafeMemoriaCase(r.casePath)) {
-      return { kind: "project", casePath: r.casePath };
+      if (r.via === "exact") {
+        return { kind: "project", casePath: r.casePath, match: "exact" };
+      }
+      // Palpite: casePath e o chute, match "fuzzy" segura no --apply.
+      return { kind: "project", casePath: r.casePath, match: "fuzzy", score: r.score };
     }
     if (r.ambiguous) return { kind: "project", ambiguous: r.ambiguous };
     return { kind: "project", orphan: true };
@@ -212,13 +249,16 @@ export function classifyLegacyMemFile(name, casePaths) {
 // ---------------------------------------------------------------------------
 
 /**
- * Classifica uma lista de nomes e agrega contagens por categoria de RESOLUCAO
- * (nao so por kind): clean/ambiguous/orphan/feedback/reference/index/other.
+ * Classifica uma lista de nomes e agrega contagens por TIER de RESOLUCAO (nao so
+ * por kind): exact/curated/fuzzy/ambiguous/orphan/feedback/reference/index/other.
+ * exact+curated auto-aplicam; fuzzy e palpite segurado (como ambiguo/orfao).
  */
 export function planMigration(names, casePaths) {
   const rows = [];
   const counts = {
-    clean: 0,
+    exact: 0,
+    curated: 0,
+    fuzzy: 0,
     ambiguous: 0,
     orphan: 0,
     feedback: 0,
@@ -231,7 +271,7 @@ export function planMigration(names, casePaths) {
     const row = { name, ...c };
     rows.push(row);
     if (c.kind === "project") {
-      if (c.casePath) counts.clean++;
+      if (c.casePath) counts[c.match] = (counts[c.match] || 0) + 1; // exact|curated|fuzzy
       else if (c.ambiguous) counts.ambiguous++;
       else counts.orphan++;
     } else {
@@ -242,17 +282,24 @@ export function planMigration(names, casePaths) {
 }
 
 /**
- * Caminho de destino de um arquivo que MIGRA, ou null se nao migra
- * (ambiguo/orfao/reference/index/other). Puro (so join de path).
+ * Caminho de destino de um arquivo que AUTO-MIGRA, ou null. So retorna path para
+ * project EXATO/CURADO (nunca fuzzy) e feedback -- por construcao, a lista de
+ * copias derivada de migrationDest EXCLUI palpites fuzzy, ambiguos e orfaos.
+ * Puro (so join de path).
  */
 export function migrationDest(entry, casesBase, author) {
   if (!entry || typeof author !== "string") return null;
-  if (entry.kind === "project" && entry.casePath) {
-    return join(casesBase, entry.casePath, ".memoria", author, entry.name);
-  }
   if (entry.kind === "feedback") {
     return join(casesBase, ".feedback", author, entry.name);
   }
+  if (
+    entry.kind === "project" &&
+    entry.casePath &&
+    (entry.match === "exact" || entry.match === "curated")
+  ) {
+    return join(casesBase, entry.casePath, ".memoria", author, entry.name);
+  }
+  // fuzzy (palpite) / ambiguo / orfao / reference / index / other -> nao auto-migra.
   return null;
 }
 
@@ -299,12 +346,19 @@ function readCasePaths(casesBase) {
     .filter((n) => !n.startsWith(".") && !EXCLUDED.has(n));
 }
 
-/** Rotulo legivel do destino para a tabela de dry-run. */
+/** Rotulo legivel do destino para a tabela de dry-run, POR TIER. Deixa obvio o
+ * que sera copiado (EXATO/CURADO) vs o que fica retido (FUZZY/AMBIGUO/ORFAO). */
 function destLabel(row) {
-  if (row.kind === "project" && row.casePath) return `-> ${row.casePath}/.memoria/`;
-  if (row.kind === "project" && row.ambiguous) return `AMBIGUO: ${row.ambiguous.join(" | ")}`;
+  if (row.kind === "project" && row.casePath) {
+    if (row.match === "exact") return `EXATO   -> ${row.casePath}/.memoria/`;
+    if (row.match === "curated") return `CURADO  -> ${row.casePath}/.memoria/`;
+    // fuzzy: mostra o palpite + score; NAO auto-aplica.
+    const s = row.score ? `idf=${row.score.idf} cov=${row.score.cov}` : "?";
+    return `FUZZY?  -> ${row.casePath} (${s}; confirmar)`;
+  }
+  if (row.kind === "project" && row.ambiguous) return `AMBIGUO [${row.ambiguous.join(" | ")}]`;
   if (row.kind === "project" && row.orphan) return "ORFAO (sem pasta)";
-  if (row.kind === "feedback") return "-> .feedback/ (pool)";
+  if (row.kind === "feedback") return "feedback -> .feedback/ (pool)";
   if (row.kind === "reference") return "PULADO (reference)";
   if (row.kind === "index") return "PULADO (index MEMORY.md)";
   return "PULADO (fora de padrao)";
@@ -377,9 +431,12 @@ function main() {
   }
 
   console.log(
-    `\nresumo: ${counts.clean} limpos, ${counts.ambiguous} ambiguos, ${counts.orphan} orfaos, ` +
-      `${counts.feedback} feedback, ${counts.reference} reference (pulados), ` +
-      `${counts.index} index (pulado), ${counts.other} fora-de-padrao (pulados)`,
+    `\nresumo (auto-aplica): ${counts.exact} EXATO + ${counts.curated} CURADO + ` +
+      `${counts.feedback} feedback` +
+      `\nresumo (retido, decisao humana): ${counts.fuzzy} FUZZY? + ` +
+      `${counts.ambiguous} AMBIGUO + ${counts.orphan} ORFAO` +
+      `\nresumo (pulados): ${counts.reference} reference + ${counts.index} index + ` +
+      `${counts.other} fora-de-padrao`,
   );
 
   if (!args.apply) {
@@ -387,14 +444,18 @@ function main() {
     return 0;
   }
 
-  // APPLY: copia so os que migram (clean + feedback). Nunca sobrescreve.
+  // APPLY: copia so os que AUTO-APLICAM (EXATO + CURADO + feedback -- ver
+  // migrationDest, que retorna null p/ fuzzy/ambiguo/orfao). FUZZY (palpite)
+  // fica retido junto de ambiguo/orfao: NUNCA copia sem confirmacao do CEO.
   let copied = 0;
   let skippedExisting = 0;
   const heldBack = [];
   for (const row of rows) {
     const dest = migrationDest(row, args.casesBase, author);
     if (!dest) {
-      if (row.kind === "project" && (row.ambiguous || row.orphan)) heldBack.push(row);
+      if (row.kind === "project" && (row.match === "fuzzy" || row.ambiguous || row.orphan)) {
+        heldBack.push(row);
+      }
       continue;
     }
     // Guard de seguranca no ponto de escrita (defense-in-depth).
@@ -402,24 +463,29 @@ function main() {
       console.log(`  pulado (nome inseguro): ${row.name}`);
       continue;
     }
-    if (existsSync(dest)) {
-      console.log(`  pulado (destino ja existe): ${dest}`);
-      skippedExisting++;
-      continue;
-    }
     try {
       mkdirSync(dirname(dest), { recursive: true });
       const src = join(args.legacyDir, row.name);
-      copyFileSync(src, dest);
+      // Never-overwrite ATOMICO: COPYFILE_EXCL falha com EEXIST se o destino ja
+      // existe (fecha o TOCTOU do existsSync + copy). Nunca sobrescreve.
+      copyFileSync(src, dest, constants.COPYFILE_EXCL);
       copied++;
     } catch (err) {
-      console.log(`  ERRO copiando ${row.name}: ${err.message}`);
+      if (err.code === "EEXIST") {
+        console.log(`  pulado (destino ja existe): ${dest}`);
+        skippedExisting++;
+      } else {
+        console.log(`  ERRO copiando ${row.name}: ${err.message}`);
+      }
     }
   }
 
   console.log(`\nAPPLY concluido: ${copied} copiados, ${skippedExisting} pulados (ja existiam).`);
   if (heldBack.length) {
-    console.log(`\n${heldBack.length} arquivos NAO migrados (decisao manual do CEO):`);
+    console.log(
+      `\n${heldBack.length} arquivos NAO migrados (decisao manual do CEO -- ` +
+        `FUZZY: confirmar e adicionar ao mapa curado se correto):`,
+    );
     for (const row of heldBack) {
       console.log(`  ${pad(row.name, 48)} ${destLabel(row)}`);
     }
