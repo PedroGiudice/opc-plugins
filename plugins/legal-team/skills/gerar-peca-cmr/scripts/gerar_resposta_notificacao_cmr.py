@@ -12,8 +12,9 @@ de carta: header sem recuo à direita, footer com recuo 283 twips.
 Divergências entre os 2 modelos, parametrizadas:
   - alinhamento do bloco de assinatura: centro (Candeias, mais recente,
     default) ou esquerda (PH Brasil) — assinatura(..., centralizada=False)
-  - recuo da linha Ref.: default 5,5/1,5cm (Candeias); PH usou 7,0/2,0
-    — ref(..., left=Cm(7), hanging=Cm(2))
+  - recuo da linha Ref.: por decisão do CEO (23/07/2026) o default é SEM
+    recuo, alinhada à margem como o corpo — os modelos recuavam (5,5/1,5 e
+    7,0/2,0cm), recuperável via ref(..., left=Cm(5.5), hanging=Cm(1.5))
 
 Uso:
     from gerar_resposta_notificacao_cmr import RespostaNotificacaoCMR
@@ -59,8 +60,6 @@ class RespostaNotificacaoCMR:
     FONT_TIMBRE = "Verdana"  # papel timbrado (cabeçalho/rodapé)
     SIZE = Pt(12)
     LINE_SPACING = 1.15  # w:line=276 auto — carta NÃO usa o 1,5 das peças
-    REF_LEFT = Cm(5.5)
-    REF_HANGING = Cm(1.5)
 
     def __init__(self):
         self.doc = Document()
@@ -227,16 +226,17 @@ class RespostaNotificacaoCMR:
             self._add_run(p, linha)
 
     def ref(self, texto, prefixo="Ref.: ", left=None, hanging=None):
-        """Linha de referência — recuo esquerdo com hanging indent.
+        """Linha de referência — alinhada à margem, como o corpo (sem recuo).
 
         texto: assunto SEM o prefixo (o 'Ref.: ' é adicionado aqui).
-        Default 5,5/1,5cm (modelo mais recente); PH Brasil usou 7,0/2,0.
+        left/hanging (Cm) reproduzem o recuo dos modelos antigos, se pedido.
         """
         p = self._p(WD_ALIGN_PARAGRAPH.LEFT)
         pf = p.paragraph_format
-        pf.left_indent = left if left is not None else self.REF_LEFT
-        h = hanging if hanging is not None else self.REF_HANGING
-        pf.first_line_indent = -h
+        if left is not None:
+            pf.left_indent = left
+        if hanging is not None:
+            pf.first_line_indent = -hanging
         self._add_run(p, f"{prefixo}{texto}")
 
     def vocativo(self, texto="Prezados Senhores,"):

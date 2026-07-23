@@ -146,7 +146,7 @@ carta.destinatario(                               # linhas contiguas, a esquerda
 carta.espaco()
 carta.ref("Resposta à Notificação Extrajudicial de 08.07.2026 — ...")
                                                   # prefixo "Ref.: " automatico;
-                                                  # recuo 5,5/1,5cm (left=/hanging= p/ mudar)
+                                                  # sem recuo (alinhada a margem)
 carta.espaco()
 carta.vocativo()                                  # "Prezados Senhores," (customizavel)
 carta.espaco()
