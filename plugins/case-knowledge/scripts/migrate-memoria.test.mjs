@@ -4,6 +4,7 @@ import {
   classifyLegacyMemFile,
   planMigration,
   migrationDest,
+  CURATED_CLEAN,
 } from "./migrate-memoria.mjs";
 
 // Subconjunto REAL das pastas de caso da cmr-002 (a lista completa o script LE
@@ -80,12 +81,9 @@ const FUZZY = [
   ["project_oxigenio_marli_querela.md", "oxigenio-marli-marcon"],
   ["project_oxigenio_retificacao.md", "oxigenio-acao-retificacao"],
   ["project_salesforce_goias.md", "salesforce-goias-esporte-clube"],
-];
-
-// CURADO LIMPO: mapeamento slug->caso confirmado por humano (o token distintivo
-// do slug diverge do nome da pasta -- "attrus" nao aparece em "pagamentos").
-// Auto-aplica (decisao humana, nao coincidencia lexical).
-const CURATED = [
+  // CURATED_CLEAN nasce VAZIO (facilita decide no dry-run, nao pre-cozido): este
+  // slug deixa de ser "curated" e cai como fuzzy igual aos demais palpites de
+  // token raro unico -- "facilita" (df=1) so existe em salesforce-facilita-pagamentos.
   ["project_salesforce_facilita_attrus.md", "salesforce-facilita-pagamentos"],
 ];
 
@@ -110,13 +108,37 @@ test("classifyLegacyMemFile: FUZZY -> casePath (palpite) + match 'fuzzy' + score
   }
 });
 
-test("classifyLegacyMemFile: CURADO LIMPO -> casePath + match 'curated'", () => {
-  for (const [name, expected] of CURATED) {
-    const r = classifyLegacyMemFile(name, CASE_PATHS);
-    assert.equal(r.kind, "project", `${name}: kind`);
-    assert.equal(r.casePath, expected, `${name}: casePath`);
-    assert.equal(r.match, "curated", `${name}: match curated`);
+// Contrato mudou (decisao do controller): CURATED_CLEAN nasce VAZIO. Nenhum
+// slug e pre-decidido como "curated" -- salesforce_facilita_attrus (antes
+// pre-cozido) agora cai como fuzzy (segurado), coberto pela FUZZY array acima.
+// O tier "curated" segue existindo no codigo; estes dois testes provam ambos os
+// lados: o default vazio e o mecanismo funcionando quando o CEO popula a mao.
+test("mecanismo curated: CURATED_CLEAN nasce VAZIO -> nenhum project vira 'curated' por default", () => {
+  assert.equal(Object.keys(CURATED_CLEAN).length, 0, "sem entradas pre-cozidas");
+  const r = classifyLegacyMemFile("project_salesforce_facilita_attrus.md", CASE_PATHS);
+  assert.equal(r.match, "fuzzy", "sem entrada curada -> palpite fuzzy, nao curated");
+  assert.equal(r.casePath, "salesforce-facilita-pagamentos");
+});
+
+test("mecanismo curated: uma entrada em CURATED_CLEAN AUTO-APLICA (match 'curated')", () => {
+  // O caminho curated segue existindo: quando o CEO confirma um palpite fuzzy no
+  // dry-run e adiciona a entrada AQUI, o classify passa a AUTO-APLICAR. Injetamos
+  // uma entrada ficticia no mesmo objeto que o classify consome (binding vivo do
+  // ES module) e limpamos ao fim -- node:test roda sequencial, estado restaurado.
+  const slug = "salesforce_facilita_attrus";
+  const caso = "salesforce-facilita-pagamentos";
+  CURATED_CLEAN[slug] = caso;
+  try {
+    const r = classifyLegacyMemFile(`project_${slug}.md`, CASE_PATHS);
+    assert.equal(r.kind, "project");
+    assert.equal(r.casePath, caso, "curado -> caso confirmado");
+    assert.equal(r.match, "curated", "entrada curada auto-aplica");
+    assert.equal(r.score, undefined, "curated nao carrega score (nao e palpite)");
+  } finally {
+    delete CURATED_CLEAN[slug];
   }
+  // Restaurado: volta a ser fuzzy apos a limpeza.
+  assert.equal(Object.keys(CURATED_CLEAN).length, 0, "estado do modulo restaurado");
 });
 
 test("classifyLegacyMemFile: bianka casa EXATO (caso nomeado do brief)", () => {
@@ -266,7 +288,6 @@ test("classifyLegacyMemFile: casePath resolvido sempre passa nos guards de segur
 test("planMigration: mapeia todos os nomes e conta por TIER de resolucao", () => {
   const names = [
     "project_bianka_salesforce.md", // exact
-    "project_salesforce_facilita_attrus.md", // curated
     "project_salesforce_goias.md", // fuzzy
     "project_comex_salesforce_agravo.md", // ambiguous
     "project_otsuka_primeq.md", // orphan
@@ -278,7 +299,7 @@ test("planMigration: mapeia todos os nomes e conta por TIER de resolucao", () =>
   const { rows, counts } = planMigration(names, CASE_PATHS);
   assert.equal(rows.length, names.length);
   assert.equal(counts.exact, 1);
-  assert.equal(counts.curated, 1);
+  assert.equal(counts.curated, 0, "CURATED_CLEAN vazio -> nenhum curated por default");
   assert.equal(counts.fuzzy, 1);
   assert.equal(counts.ambiguous, 1);
   assert.equal(counts.orphan, 1);

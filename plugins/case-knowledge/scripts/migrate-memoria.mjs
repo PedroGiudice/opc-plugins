@@ -65,14 +65,18 @@ function tokenize(s) {
 // AUTO-APLICA). Usado quando o token distintivo do slug DIVERGE do nome da
 // pasta -- ali o fuzzy resolveria por coincidencia de um token secundario, sem
 // confianca. Fixar aqui torna a decisao humana explicita em vez de acidental.
-// E tambem o destino de um palpite FUZZY que o CEO confirma no dry-run: ao
-// aprovar, a entrada migra de fuzzy (segurado) para ca (auto-aplicavel).
-//   - salesforce_facilita_attrus -> salesforce-facilita-pagamentos: "attrus"
-//     (contraparte) NAO aparece na pasta ("pagamentos"); so "facilita" liga os
-//     dois. Decisao humana, nao coincidencia lexical.
-const CURATED_CLEAN = {
-  salesforce_facilita_attrus: "salesforce-facilita-pagamentos",
-};
+// E o destino de um palpite FUZZY que o CEO confirma no dry-run: ao aprovar, a
+// entrada migra de fuzzy (segurado) para ca (auto-aplicavel).
+//
+// NASCE VAZIO por decisao de contrato: um subagente NAO pre-decide onde vai a
+// memoria curada do CEO. Todo palpite fuzzy fica SEGURADO no --apply ate o CEO
+// confirmar no dry-run e adicionar a entrada AQUI a mao. Exemplo do tipo de
+// entrada que o CEO adicionaria depois de confirmar:
+//   salesforce_facilita_attrus: "salesforce-facilita-pagamentos",
+//   ("attrus" -- a contraparte -- nao aparece na pasta "pagamentos"; so
+//    "facilita" liga os dois. Enquanto nao confirmado, cai como fuzzy.)
+// Exportado para o teste do mecanismo do tier "curated" (injeta entrada e limpa).
+export const CURATED_CLEAN = {};
 
 // CURATED_AMBIGUOUS: slug -> candidatos plausiveis; SEMPRE exige decisao humana
 // (nunca auto-aplica), mesmo com 1 unico candidato ("provavel, confirmar").
