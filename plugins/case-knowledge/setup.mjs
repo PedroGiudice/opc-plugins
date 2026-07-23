@@ -9,6 +9,7 @@
  *   4. scaffolding via GET {API}/scaffolding (nunca sobrescreve arquivo local)
  *   5. env vars das 3 APIs publicas (setx, Windows)
  *   6. scheduled task do espelho de casos (CaseKnowledge-SyncCases) + 1o sync
+ *   extra: autoUpdate do marketplace opc-plugins (releases chegam sozinhos)
  *
  * REGRA DURA: este arquivo e STANDALONE — zero imports de pacotes npm no
  * top-level (so builtins do Node; fetch e global no Node 18+). E isso que
@@ -447,6 +448,67 @@ export function ensureFeedbackImport(homedir = os.homedir()) {
 }
 
 /**
+ * known_marketplaces.json com autoUpdate ligado no marketplace opc-plugins
+ * (CMR-143). Marketplaces de terceiros nascem com auto-update DESLIGADO no
+ * CC; sem isso, cada release nosso exige `claude plugin update` manual do
+ * usuario. Pura, mesmo contrato de buildGlobalSettings:
+ *   - raw ausente/invalido/nao-objeto -> null (arquivo e do CC; nao inventamos
+ *     formato nem criamos entrada sem source/installLocation reais)
+ *   - entrada `name` ausente ou nao-objeto -> null (marketplace nao registrado)
+ *   - entrada presente -> autoUpdate: true; `changed` distingue no-op
+ */
+export function mergeMarketplaceAutoUpdate(existingRaw, name = "opc-plugins") {
+  if (!existingRaw || !existingRaw.trim()) return null;
+  let obj;
+  try {
+    obj = JSON.parse(existingRaw);
+  } catch {
+    return null;
+  }
+  if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return null;
+  const entry = obj[name];
+  if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return null;
+  const changed = entry.autoUpdate !== true;
+  entry.autoUpdate = true;
+  return { json: `${JSON.stringify(obj, null, 2)}\n`, changed };
+}
+
+/**
+ * Aplica mergeMarketplaceAutoUpdate em ~/.claude/plugins/known_marketplaces.json.
+ * Best-effort: qualquer impossibilidade vira pendencia em `failures` com a
+ * instrucao manual (nunca lanca, nunca cria o arquivo — ele e do CC).
+ */
+export function applyMarketplaceAutoUpdate(failures, homedir = os.homedir()) {
+  log("[extra] Auto-update do marketplace opc-plugins");
+  const target = join(homedir, ".claude", "plugins", "known_marketplaces.json");
+  const manual =
+    `adicione "autoUpdate": true na entrada "opc-plugins" de ${target} ` +
+    "(ou atualize plugins manualmente com: claude plugin update).";
+  let raw = null;
+  try {
+    if (existsSync(target)) raw = readFileSync(target, "utf-8");
+  } catch (err) {
+    failures.push(`nao consegui ler ${target} (${err.message}) — ${manual}`);
+    return;
+  }
+  const merged = mergeMarketplaceAutoUpdate(raw);
+  if (merged === null) {
+    failures.push(`marketplace opc-plugins nao registrado em ${target} — ${manual}`);
+    return;
+  }
+  if (!merged.changed) {
+    log("      Ja ligado — sem alteracao.");
+    return;
+  }
+  try {
+    writeAtomic(target, merged.json);
+    log("      Ligado: plugins passam a atualizar sozinhos apos o startup do CC.");
+  } catch (err) {
+    failures.push(`nao consegui escrever ${target} (${err.message}) — ${manual}`);
+  }
+}
+
+/**
  * Verificacao extra (best-effort, nao instala nada): os geradores de peca
  * .docx da skill gerar-peca-cmr (plugin legal-team) exigem Python +
  * python-docx. Falta vira pendencia no resumo com o comando pronto.
@@ -515,6 +577,7 @@ async function main() {
   applyEnvVars(failures);
   installSyncTask(pluginDir, failures);
   applyGlobalOutputStyle(failures);
+  applyMarketplaceAutoUpdate(failures);
 
   log("[extra] Feedback do escritorio (@import no CLAUDE.md global)");
   const fb = ensureFeedbackImport();

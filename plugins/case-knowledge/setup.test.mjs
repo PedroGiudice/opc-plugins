@@ -358,3 +358,76 @@ test("ensureFeedbackImport: ja contem a linha (em qualquer posicao) -> no-op, se
     assert.equal(baks.length, 0);
   });
 });
+
+// --- autoUpdate do marketplace opc-plugins (CMR-143) ---
+
+test("mergeMarketplaceAutoUpdate: null para raw ausente/vazio/invalido/nao-objeto", async () => {
+  const { mergeMarketplaceAutoUpdate } = await import("./setup.mjs");
+  assert.equal(mergeMarketplaceAutoUpdate(null), null);
+  assert.equal(mergeMarketplaceAutoUpdate("   "), null);
+  assert.equal(mergeMarketplaceAutoUpdate("{nao-json"), null);
+  assert.equal(mergeMarketplaceAutoUpdate("[]"), null);
+  assert.equal(mergeMarketplaceAutoUpdate('"str"'), null);
+});
+
+test("mergeMarketplaceAutoUpdate: null sem a entrada opc-plugins ou entrada nao-objeto", async () => {
+  const { mergeMarketplaceAutoUpdate } = await import("./setup.mjs");
+  assert.equal(mergeMarketplaceAutoUpdate("{}"), null);
+  assert.equal(mergeMarketplaceAutoUpdate('{"outro": {}}'), null);
+  assert.equal(mergeMarketplaceAutoUpdate('{"opc-plugins": "str"}'), null);
+});
+
+test("mergeMarketplaceAutoUpdate: seta true preservando o resto; changed distingue no-op", async () => {
+  const { mergeMarketplaceAutoUpdate } = await import("./setup.mjs");
+  const raw = JSON.stringify({
+    "claude-plugins-official": { source: { source: "github", repo: "anthropics/claude-plugins-official" } },
+    "opc-plugins": {
+      source: { source: "github", repo: "PedroGiudice/opc-plugins" },
+      installLocation: "/x/marketplaces/opc-plugins",
+      lastUpdated: "2026-07-23T00:00:00.000Z",
+    },
+  });
+  const r = mergeMarketplaceAutoUpdate(raw);
+  assert.ok(r && r.changed === true);
+  const obj = JSON.parse(r.json);
+  assert.equal(obj["opc-plugins"].autoUpdate, true);
+  assert.equal(obj["opc-plugins"].installLocation, "/x/marketplaces/opc-plugins");
+  assert.deepEqual(obj["claude-plugins-official"], {
+    source: { source: "github", repo: "anthropics/claude-plugins-official" },
+  });
+
+  // false -> true e changed
+  const r2 = mergeMarketplaceAutoUpdate(JSON.stringify({ "opc-plugins": { autoUpdate: false } }));
+  assert.ok(r2 && r2.changed === true && JSON.parse(r2.json)["opc-plugins"].autoUpdate === true);
+
+  // ja true -> changed false
+  const r3 = mergeMarketplaceAutoUpdate(JSON.stringify({ "opc-plugins": { autoUpdate: true } }));
+  assert.ok(r3 && r3.changed === false);
+});
+
+test("applyMarketplaceAutoUpdate: aplica em disco; ausencia vira pendencia sem criar arquivo", async () => {
+  const { applyMarketplaceAutoUpdate } = await import("./setup.mjs");
+  const home = mkdtempSync(join(tmpdir(), "setup-autoupd-"));
+  const dir = join(home, ".claude", "plugins");
+  mkdirSync(dir, { recursive: true });
+  const target = join(dir, "known_marketplaces.json");
+
+  // ausente -> pendencia, arquivo nao criado
+  const f1 = [];
+  applyMarketplaceAutoUpdate(f1, home);
+  assert.equal(f1.length, 1);
+  assert.equal(existsSync(target), false);
+
+  // presente -> aplica e nao gera pendencia
+  writeFileSync(target, JSON.stringify({ "opc-plugins": { source: {} } }), "utf-8");
+  const f2 = [];
+  applyMarketplaceAutoUpdate(f2, home);
+  assert.deepEqual(f2, []);
+  assert.equal(JSON.parse(readFileSync(target, "utf-8"))["opc-plugins"].autoUpdate, true);
+
+  // idempotente
+  const f3 = [];
+  applyMarketplaceAutoUpdate(f3, home);
+  assert.deepEqual(f3, []);
+  rmSync(home, { recursive: true, force: true });
+});
