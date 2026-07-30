@@ -10,6 +10,8 @@ import {
   planScaffoldingWrites,
   psSingleQuote,
   buildSyncTaskCommand,
+  USER_BIN_PATH_PS_SCRIPT,
+  parseEnsurePathOutput,
   buildGlobalSettings,
   DEFAULT_OUTPUT_STYLE,
   applyGlobalOutputStyle,
@@ -32,6 +34,25 @@ test("defaultApiBase: publico no Windows, loopback fora", () => {
 
 test("defaultCasesBase: termina em cases", () => {
   assert.match(defaultCasesBase(), /cases$/);
+});
+
+// --- PATH do usuario (%USERPROFILE%\.local\bin, claude nativo) ---
+
+test("USER_BIN_PATH_PS_SCRIPT: .NET User scope, .local\\bin, nunca setx", () => {
+  assert.ok(USER_BIN_PATH_PS_SCRIPT.includes("'.local\\bin'"));
+  assert.ok(USER_BIN_PATH_PS_SCRIPT.includes("SetEnvironmentVariable"));
+  assert.ok(USER_BIN_PATH_PS_SCRIPT.includes("'User'"));
+  assert.ok(!USER_BIN_PATH_PS_SCRIPT.includes("setx"));
+  // estatico de verdade: nada a interpolar do lado JS
+  assert.ok(!USER_BIN_PATH_PS_SCRIPT.includes("${"));
+});
+
+test("parseEnsurePathOutput: ADDED/PRESENT/desconhecido", () => {
+  assert.equal(parseEnsurePathOutput("ADDED\r\n"), "added");
+  assert.equal(parseEnsurePathOutput("  present  "), "present");
+  assert.equal(parseEnsurePathOutput("garbage"), "unknown");
+  assert.equal(parseEnsurePathOutput(""), "unknown");
+  assert.equal(parseEnsurePathOutput(null), "unknown");
 });
 
 test("SETUP_ENV_VARS: as 3 APIs publicas com Bearer", () => {

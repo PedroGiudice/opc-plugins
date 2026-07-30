@@ -276,7 +276,66 @@ async function applyScaffolding(auth, apiBase, casesBase) {
   return plan;
 }
 
-/** Passo 5: persiste as env vars das 3 APIs (setx no Windows). */
+/**
+ * Script PowerShell ESTATICO (zero interpolacao JS — nada do ambiente do
+ * usuario passa por quoting) que garante %USERPROFILE%\.local\bin no PATH de
+ * USUARIO. E onde o instalador nativo do Claude Code poe o claude.exe — ele
+ * avisa que o dir falta no PATH mas nao corrige (caso real: onboarding 30/07).
+ *
+ * Metodo .NET SetEnvironmentVariable, NUNCA setx: setx trunca o PATH em 1024
+ * chars (corrompe o que existe); o .NET nao tem limite e ainda emite o
+ * WM_SETTINGCHANGE (novos terminais abertos pelo Explorer enxergam).
+ * Trade-off aceito: Get/Set expandem eventuais %VAR% pre-existentes no valor
+ * (REG_EXPAND_SZ vira literal). PATH de maquina provisionada por este setup e
+ * REG_SZ simples — irrelevante aqui. Idempotente: segunda execucao e no-op.
+ */
+export const USER_BIN_PATH_PS_SCRIPT = [
+  "$dir = Join-Path $env:USERPROFILE '.local\\bin'",
+  "$path = [Environment]::GetEnvironmentVariable('Path','User')",
+  "if ($null -eq $path) { $path = '' }",
+  "$parts = $path -split ';' | Where-Object { $_ -ne '' }",
+  "if ($parts -contains $dir) { 'PRESENT' }",
+  "else {",
+  "  $new = @($path.TrimEnd(';'), $dir) | Where-Object { $_ -ne '' }",
+  "  [Environment]::SetEnvironmentVariable('Path', ($new -join ';'), 'User')",
+  "  'ADDED'",
+  "}",
+].join("\n");
+
+/** Interpreta o stdout do script acima. Pura, exportada para teste. */
+export function parseEnsurePathOutput(stdout) {
+  const s = (stdout || "").trim().toUpperCase();
+  if (s.endsWith("ADDED")) return "added";
+  if (s.endsWith("PRESENT")) return "present";
+  return "unknown";
+}
+
+/** Garante %USERPROFILE%\.local\bin no PATH de usuario (Windows). */
+function ensureUserBinOnPath(failures) {
+  const hint =
+    "abra um PowerShell e rode: [Environment]::SetEnvironmentVariable('Path', " +
+    "[Environment]::GetEnvironmentVariable('Path','User') + ';' + " +
+    '"$env:USERPROFILE\\.local\\bin", \'User\')';
+  const r = spawnSync(
+    "powershell",
+    ["-NoProfile", "-NonInteractive", "-Command", USER_BIN_PATH_PS_SCRIPT],
+    { stdio: "pipe", encoding: "utf-8" },
+  );
+  if (r.error || r.status !== 0) {
+    failures.push(`nao consegui garantir %USERPROFILE%\\.local\\bin no PATH do usuario — ${hint}`);
+    return;
+  }
+  const verdict = parseEnsurePathOutput(r.stdout);
+  if (verdict === "added") {
+    log("      PATH do usuario: %USERPROFILE%\\.local\\bin adicionado (claude nativo).");
+  } else if (verdict === "present") {
+    log("      PATH do usuario: %USERPROFILE%\\.local\\bin ja presente.");
+  } else {
+    failures.push(`resultado inesperado ao garantir o PATH do usuario — ${hint}`);
+  }
+}
+
+/** Passo 5: persiste as env vars das 3 APIs (setx no Windows) + PATH do claude. */
 function applyEnvVars(failures) {
   log("[5/6] Variaveis de ambiente das 3 APIs");
   if (!IS_WIN) {
@@ -292,6 +351,7 @@ function applyEnvVars(failures) {
       log(`      setx ${k} ok`);
     }
   }
+  ensureUserBinOnPath(failures);
   log("      (valem para NOVOS terminais/sessoes; feche e reabra o terminal)");
 }
 
