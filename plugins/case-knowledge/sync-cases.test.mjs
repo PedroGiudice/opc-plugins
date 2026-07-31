@@ -22,6 +22,8 @@ import {
   syncMemoria,
   postJson,
   provisionCaseSettings,
+  migrateAuthorDirs,
+  updateAutoMemoryDirIfAliased,
 } from "./sync-cases.mjs";
 import { existsSync, readFileSync, statSync, readdirSync } from "node:fs";
 
@@ -954,16 +956,23 @@ test("syncMemoria: arquivo self >1MiB e pulado (nunca no POST, nunca derruba o c
   }
 });
 
-test("syncMemoria: selfAuthor null -> skip total (sem rede, sem estado)", async () => {
+test("syncMemoria: selfAuthor null -> so os manifests (migracao) e skip do resto", async () => {
   const base = mkdtempSync(join(tmpdir(), "cmr138-noself-"));
   try {
-    let called = false;
+    // Os 2 GETs de manifest passaram a ser feitos ANTES do gate de autor: e deles
+    // que vem `aliases`, que dirige a migracao dos dirs de peers (independente de
+    // haver credencial). Sem autor, o resto do ciclo (download/upload/baseline)
+    // segue pulado.
+    const gets = [];
     const deps = {
-      getJson: async () => { called = true; throw new Error("nao deveria chamar"); },
-      postJson: async () => { called = true; throw new Error("nao deveria chamar"); },
+      getJson: async (url) => {
+        gets.push(url);
+        return url.includes("feedback-manifest") ? { authors: {} } : { cases: {} };
+      },
+      postJson: async () => { throw new Error("nao deveria chamar"); },
     };
     await syncMemoria("http://t/api", base, null, deps);
-    assert.equal(called, false);
+    assert.equal(gets.length, 2);
     assert.ok(!existsSync(join(base, ".memoria-state.json")));
     const log = readFileSync(join(base, ".sync.log"), "utf-8");
     assert.match(log, /sem autor/);
@@ -1210,5 +1219,374 @@ test("isSafeMemoriaFile: aceita *.md comum; rejeita traversal, nao-.md e artefat
   }
   for (const bad of ["../evil.md", "a/b.md", "a\\b.md", "x.txt", "evil", "PEERS.md", "FEEDBACK.md", "..md", "", null, undefined]) {
     assert.equal(isSafeMemoriaFile(bad), false, `deveria rejeitar ${String(bad)}`);
+  }
+});
+
+// ---------- Migracao dos dirs de autor para slug legivel (author_dir) ----------
+
+/** Semeia `<base>/<caso>/.memoria/<autor>/<arq>` com conteudo. */
+function seedMem(base, caso, autor, arquivos) {
+  const dir = join(base, caso, ".memoria", autor);
+  mkdirSync(dir, { recursive: true });
+  for (const [name, content] of Object.entries(arquivos)) {
+    writeFileSync(join(dir, name), content, "utf-8");
+  }
+  return dir;
+}
+
+test("migrateAuthorDirs: rename simples quando o destino nao existe", () => {
+  withCasesBase((base) => {
+    seedMem(base, "caso-a", "1", { "nota.md": "minha nota" });
+    const out = migrateAuthorDirs(base, { 1: "pedro-giudice" }, {});
+    assert.equal(existsSync(join(base, "caso-a", ".memoria", "1")), false);
+    assert.equal(
+      readFileSync(join(base, "caso-a", ".memoria", "pedro-giudice", "nota.md"), "utf-8"),
+      "minha nota",
+    );
+    assert.equal(out.renames.length, 1);
+    assert.deepEqual(out.renames[0], {
+      case: "caso-a",
+      from: "1",
+      to: "pedro-giudice",
+      mode: "rename",
+    });
+    assert.equal(out.changed, true);
+  });
+});
+
+test("migrateAuthorDirs: merge conservador — conflito preserva o destino, ausente e movido", () => {
+  withCasesBase((base) => {
+    seedMem(base, "caso-a", "1", { "nota.md": "versao ANTIGA", "so-no-velho.md": "unico" });
+    seedMem(base, "caso-a", "pedro-giudice", { "nota.md": "versao NOVA" });
+
+    const out = migrateAuthorDirs(base, { 1: "pedro-giudice" }, {});
+
+    const novo = join(base, "caso-a", ".memoria", "pedro-giudice");
+    // conflito: destino intocado
+    assert.equal(readFileSync(join(novo, "nota.md"), "utf-8"), "versao NOVA");
+    // ausente no destino: movido
+    assert.equal(readFileSync(join(novo, "so-no-velho.md"), "utf-8"), "unico");
+    // o dir velho sobrevive SO com o conflito (nada e destruido)
+    const velho = join(base, "caso-a", ".memoria", "1");
+    assert.equal(existsSync(velho), true);
+    assert.deepEqual(readdirSync(velho), ["nota.md"]);
+    assert.equal(readFileSync(join(velho, "nota.md"), "utf-8"), "versao ANTIGA");
+
+    assert.equal(out.renames[0].mode, "merge");
+    assert.deepEqual(out.conflicts, [
+      { case: "caso-a", from: "1", to: "pedro-giudice", file: "nota.md" },
+    ]);
+  });
+});
+
+test("migrateAuthorDirs: merge sem conflito remove o dir velho vazio", () => {
+  withCasesBase((base) => {
+    seedMem(base, "caso-a", "1", { "a.md": "a" });
+    seedMem(base, "caso-a", "pedro-giudice", { "b.md": "b" });
+    migrateAuthorDirs(base, { 1: "pedro-giudice" }, {});
+    assert.equal(existsSync(join(base, "caso-a", ".memoria", "1")), false);
+    const novo = join(base, "caso-a", ".memoria", "pedro-giudice");
+    assert.deepEqual(readdirSync(novo).sort(), ["a.md", "b.md"]);
+  });
+});
+
+test("migrateAuthorDirs: pseudo-caso .feedback tambem migra", () => {
+  withCasesBase((base) => {
+    const fb = join(base, ".feedback", "6");
+    mkdirSync(fb, { recursive: true });
+    writeFileSync(join(fb, "aprendizado.md"), "licao", "utf-8");
+    const out = migrateAuthorDirs(base, { 6: "ana-beatriz-paoli" }, {});
+    assert.equal(existsSync(join(base, ".feedback", "6")), false);
+    assert.equal(
+      readFileSync(join(base, ".feedback", "ana-beatriz-paoli", "aprendizado.md"), "utf-8"),
+      "licao",
+    );
+    assert.ok(out.renames.some((r) => r.case === ".feedback" && r.to === "ana-beatriz-paoli"));
+  });
+});
+
+test("migrateAuthorDirs: baseline rekeyed (casos + .feedback), conteudo preservado", () => {
+  withCasesBase((base) => {
+    seedMem(base, "caso-a", "1", { "nota.md": "x" });
+    const state = {
+      "caso-a": { 1: { "nota.md": "md5a" }, 6: { "peer.md": "md5p" } },
+      ".feedback": { 1: { "fb.md": "md5f" } },
+      "caso-sem-dir-local": { 1: { "y.md": "md5y" } },
+    };
+    const out = migrateAuthorDirs(
+      base,
+      { 1: "pedro-giudice", 6: "ana-beatriz-paoli" },
+      state,
+    );
+    assert.deepEqual(out.baseline, {
+      "caso-a": {
+        "pedro-giudice": { "nota.md": "md5a" },
+        "ana-beatriz-paoli": { "peer.md": "md5p" },
+      },
+      ".feedback": { "pedro-giudice": { "fb.md": "md5f" } },
+      "caso-sem-dir-local": { "pedro-giudice": { "y.md": "md5y" } },
+    });
+    // input nao e mutado
+    assert.ok("1" in state["caso-a"]);
+    assert.equal(out.changed, true);
+  });
+});
+
+test("migrateAuthorDirs: baseline com chave nova ja presente — merge sem sobrescrever", () => {
+  withCasesBase((base) => {
+    const state = {
+      "caso-a": {
+        1: { "nota.md": "velho", "so-velho.md": "v" },
+        "pedro-giudice": { "nota.md": "novo" },
+      },
+    };
+    const out = migrateAuthorDirs(base, { 1: "pedro-giudice" }, state);
+    assert.deepEqual(out.baseline["caso-a"]["pedro-giudice"], {
+      "nota.md": "novo",
+      "so-velho.md": "v",
+    });
+    assert.equal("1" in out.baseline["caso-a"], false);
+  });
+});
+
+test("migrateAuthorDirs: idempotente — 2a rodada e no-op", () => {
+  withCasesBase((base) => {
+    seedMem(base, "caso-a", "1", { "nota.md": "x" });
+    const first = migrateAuthorDirs(base, { 1: "pedro-giudice" }, { "caso-a": { 1: { "nota.md": "m" } } });
+    assert.equal(first.changed, true);
+    const second = migrateAuthorDirs(base, { 1: "pedro-giudice" }, first.baseline);
+    assert.deepEqual(second.renames, []);
+    assert.deepEqual(second.conflicts, []);
+    assert.deepEqual(second.settings, []);
+    assert.equal(second.changed, false);
+    assert.deepEqual(second.baseline, first.baseline);
+  });
+});
+
+test("migrateAuthorDirs: alias identidade, invalido ou traversal e ignorado", () => {
+  withCasesBase((base) => {
+    seedMem(base, "caso-a", "1", { "nota.md": "x" });
+    seedMem(base, "caso-a", "2", { "y.md": "y" });
+    const out = migrateAuthorDirs(
+      base,
+      { 1: "1", 2: "../../PWNED", 3: "", 4: null, "../x": "slug" },
+      {},
+    );
+    assert.deepEqual(out.renames, []);
+    assert.equal(existsSync(join(base, "caso-a", ".memoria", "1")), true);
+    assert.equal(existsSync(join(base, "caso-a", ".memoria", "2")), true);
+    assert.equal(existsSync(join(base, "PWNED")), false);
+  });
+});
+
+test("migrateAuthorDirs: aliases vazio/ausente -> no-op sem erro", () => {
+  withCasesBase((base) => {
+    seedMem(base, "caso-a", "1", { "nota.md": "x" });
+    for (const aliases of [undefined, null, {}, "nao-e-objeto"]) {
+      const out = migrateAuthorDirs(base, aliases, {});
+      assert.equal(out.changed, false);
+      assert.deepEqual(out.renames, []);
+    }
+    assert.equal(existsSync(join(base, "caso-a", ".memoria", "1")), true);
+  });
+});
+
+test("migrateAuthorDirs: _archive e dirs sem .memoria sao ignorados", () => {
+  withCasesBase((base) => {
+    seedMem(base, "_archive", "1", { "nota.md": "arquivado" });
+    mkdirSync(join(base, "caso-sem-memoria"), { recursive: true });
+    const out = migrateAuthorDirs(base, { 1: "pedro-giudice" }, {});
+    assert.deepEqual(out.renames, []);
+    assert.equal(existsSync(join(base, "_archive", ".memoria", "1")), true);
+  });
+});
+
+test("migrateAuthorDirs: atualiza autoMemoryDirectory do settings.local.json de cada caso", () => {
+  withCasesBase((base) => {
+    seedMem(base, "caso-a", "1", { "nota.md": "x" });
+    const claudeDir = join(base, "caso-a", ".claude");
+    mkdirSync(claudeDir, { recursive: true });
+    const target = join(claudeDir, "settings.local.json");
+    writeFileSync(
+      target,
+      JSON.stringify({ outputStyle: "Legal Main Agent", autoMemoryDirectory: `${base}/caso-a/.memoria/1`.replace(/\\/g, "/") }, null, 2),
+      "utf-8",
+    );
+
+    const out = migrateAuthorDirs(base, { 1: "pedro-giudice" }, {});
+    const settings = JSON.parse(readFileSync(target, "utf-8"));
+    assert.equal(
+      settings.autoMemoryDirectory,
+      `${base}/caso-a/.memoria/pedro-giudice`.replace(/\\/g, "/"),
+    );
+    assert.equal(settings.outputStyle, "Legal Main Agent");
+    assert.equal(existsSync(`${target}.bak`), true);
+    assert.deepEqual(out.settings, [{ case: "caso-a", from: "1", to: "pedro-giudice" }]);
+  });
+});
+
+test("migrateAuthorDirs: settings atualizado mesmo sem dir de memoria local", () => {
+  withCasesBase((base) => {
+    // caso existe, tem settings apontando pro dir velho, mas nunca teve memoria
+    const claudeDir = join(base, "caso-b", ".claude");
+    mkdirSync(claudeDir, { recursive: true });
+    const target = join(claudeDir, "settings.local.json");
+    writeFileSync(target, JSON.stringify({ autoMemoryDirectory: `${base}/caso-b/.memoria/1` }, null, 2), "utf-8");
+    const out = migrateAuthorDirs(base, { 1: "pedro-giudice" }, {});
+    assert.deepEqual(out.renames, []);
+    assert.equal(out.settings.length, 1);
+    assert.equal(out.changed, true);
+    assert.match(JSON.parse(readFileSync(target, "utf-8")).autoMemoryDirectory, /\/pedro-giudice$/);
+  });
+});
+
+test("updateAutoMemoryDirIfAliased: so o sufixo EXATO e regravado", () => {
+  withCasesBase((base) => {
+    const write = (name, obj) => {
+      const p = join(base, name);
+      writeFileSync(p, JSON.stringify(obj, null, 2), "utf-8");
+      return p;
+    };
+    // sufixo exato -> troca
+    const ok = write("ok.json", { autoMemoryDirectory: "C:/Users/x/cases/caso-a/.memoria/1", outros: 7 });
+    assert.equal(updateAutoMemoryDirIfAliased(ok, "1", "pedro-giudice"), true);
+    const okOut = JSON.parse(readFileSync(ok, "utf-8"));
+    assert.equal(okOut.autoMemoryDirectory, "C:/Users/x/cases/caso-a/.memoria/pedro-giudice");
+    assert.equal(okOut.outros, 7);
+
+    // prefixo do segmento (11 vs 1) NAO casa
+    const p11 = write("p11.json", { autoMemoryDirectory: "/c/caso-a/.memoria/11" });
+    assert.equal(updateAutoMemoryDirIfAliased(p11, "1", "pedro-giudice"), false);
+    assert.equal(JSON.parse(readFileSync(p11, "utf-8")).autoMemoryDirectory, "/c/caso-a/.memoria/11");
+
+    // valor apontando pra fora de .memoria -> intocado
+    const fora = write("fora.json", { autoMemoryDirectory: "/c/outro/lugar/1" });
+    assert.equal(updateAutoMemoryDirIfAliased(fora, "1", "pedro-giudice"), false);
+    assert.equal(existsSync(`${fora}.bak`), false);
+
+    // ja migrado -> no-op
+    const migrado = write("migrado.json", { autoMemoryDirectory: "/c/caso-a/.memoria/pedro-giudice" });
+    assert.equal(updateAutoMemoryDirIfAliased(migrado, "1", "pedro-giudice"), false);
+
+    // sem o campo / corrompido / ausente
+    const semCampo = write("sem.json", { outputStyle: "x" });
+    assert.equal(updateAutoMemoryDirIfAliased(semCampo, "1", "pedro-giudice"), false);
+    const corrompido = join(base, "bad.json");
+    writeFileSync(corrompido, "{nao e json", "utf-8");
+    assert.equal(updateAutoMemoryDirIfAliased(corrompido, "1", "pedro-giudice"), false);
+    assert.equal(readFileSync(corrompido, "utf-8"), "{nao e json");
+    assert.equal(updateAutoMemoryDirIfAliased(join(base, "nao-existe.json"), "1", "p"), false);
+  });
+});
+
+test("syncMemoria: ciclo completo migra dirs antigos, rekeya baseline, atualiza settings e gera PEERS legivel", async () => {
+  const base = mkdtempSync(join(tmpdir(), "author-dir-"));
+  try {
+    // self=1 (agora "pedro-giudice" pelo claim) e peer=6 ainda em dirs numericos
+    seedMem(base, "caso-a", "1", { "estrategia.md": "minha estrategia" });
+    seedMem(base, "caso-a", "6", { "peer.md": "nota da peer" });
+    const claudeDir = join(base, "caso-a", ".claude");
+    mkdirSync(claudeDir, { recursive: true });
+    const settingsPath = join(claudeDir, "settings.local.json");
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({ outputStyle: "Legal Main Agent", autoMemoryDirectory: `${base}/caso-a/.memoria/1`.replace(/\\/g, "/") }, null, 2),
+      "utf-8",
+    );
+    // baseline antigo chaveado por sub
+    writeFileSync(
+      join(base, ".memoria-state.json"),
+      JSON.stringify({ "caso-a": { 1: { "estrategia.md": md5hex(Buffer.from("minha estrategia")) }, 6: { "peer.md": md5hex(Buffer.from("nota da peer")) } } }),
+      "utf-8",
+    );
+    writeFileSync(join(base, ".sync-state.json"), '{"SENTINELA":true}', "utf-8");
+
+    const aliases = { 1: "pedro-giudice", 6: "ana-beatriz-paoli" };
+    const { deps } = makeFakeApi({
+      get: {
+        // pos-rename no server: manifest ja fala em slugs
+        "/memoria-manifest": {
+          cases: { "caso-a": { "ana-beatriz-paoli": { "peer.md": md5hex(Buffer.from("nota da peer")) } } },
+          aliases,
+        },
+        "/feedback-manifest": { authors: {}, aliases },
+      },
+      post: {
+        "/cases/caso-a/memoria": (body) => ({ author: "pedro-giudice", case: "caso-a", count: body.files.length, written: body.files.map((f) => f.name) }),
+      },
+    });
+
+    await syncMemoria("http://t/api", base, "pedro-giudice", deps);
+
+    const memDir = join(base, "caso-a", ".memoria");
+    assert.equal(existsSync(join(memDir, "1")), false);
+    assert.equal(existsSync(join(memDir, "6")), false);
+    assert.equal(readFileSync(join(memDir, "pedro-giudice", "estrategia.md"), "utf-8"), "minha estrategia");
+    assert.equal(readFileSync(join(memDir, "ana-beatriz-paoli", "peer.md"), "utf-8"), "nota da peer");
+
+    // PEERS.md legivel: heading com o slug, e sem o self
+    const peers = readFileSync(join(memDir, "PEERS.md"), "utf-8");
+    assert.match(peers, /## Autor ana-beatriz-paoli/);
+    assert.ok(!peers.includes("## Autor 6"));
+    assert.ok(!peers.includes("## Autor pedro-giudice"));
+
+    // baseline rekeyed (e nao re-sobe nem re-baixa nada: local == VM)
+    const st = JSON.parse(readFileSync(join(base, ".memoria-state.json"), "utf-8"));
+    assert.ok("pedro-giudice" in st["caso-a"]);
+    assert.ok("ana-beatriz-paoli" in st["caso-a"]);
+    assert.ok(!("1" in st["caso-a"]));
+    assert.ok(!("6" in st["caso-a"]));
+
+    // settings apontando pro dir novo
+    assert.equal(
+      JSON.parse(readFileSync(settingsPath, "utf-8")).autoMemoryDirectory,
+      `${base}/caso-a/.memoria/pedro-giudice`.replace(/\\/g, "/"),
+    );
+
+    // invariante dura: .sync-state.json intocado
+    assert.equal(readFileSync(join(base, ".sync-state.json"), "utf-8"), '{"SENTINELA":true}');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("syncMemoria: migracao roda SEM selfAuthor (dirs de peers migram; upload segue pulado)", async () => {
+  const base = mkdtempSync(join(tmpdir(), "author-dir-noself-"));
+  try {
+    seedMem(base, "caso-a", "6", { "peer.md": "nota da peer" });
+    const aliases = { 1: "pedro-giudice", 6: "ana-beatriz-paoli" };
+    const { deps, posts } = makeFakeApi({
+      get: {
+        "/memoria-manifest": { cases: {}, aliases },
+        "/feedback-manifest": { authors: {}, aliases },
+      },
+    });
+
+    await syncMemoria("http://t/api", base, null, deps);
+
+    assert.equal(existsSync(join(base, "caso-a", ".memoria", "6")), false);
+    assert.equal(
+      readFileSync(join(base, "caso-a", ".memoria", "ana-beatriz-paoli", "peer.md"), "utf-8"),
+      "nota da peer",
+    );
+    assert.deepEqual(posts, []);
+    const log = readFileSync(join(base, ".sync.log"), "utf-8");
+    assert.match(log, /sem autor/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("syncMemoria: manifest indisponivel -> nenhuma migracao (sem aliases nao ha o que dirigir)", async () => {
+  const base = mkdtempSync(join(tmpdir(), "author-dir-nomanifest-"));
+  try {
+    seedMem(base, "caso-a", "1", { "nota.md": "x" });
+    const deps = { getJson: async () => { throw new Error("401"); }, postJson: async () => { throw new Error("nao"); } };
+    await syncMemoria("http://t/api", base, "pedro-giudice", deps);
+    assert.equal(existsSync(join(base, "caso-a", ".memoria", "1")), true);
+    const log = readFileSync(join(base, ".sync.log"), "utf-8");
+    assert.match(log, /erro manifest/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
   }
 });

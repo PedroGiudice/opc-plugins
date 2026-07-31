@@ -238,6 +238,37 @@ export function decodeJwtSub(jwt) {
   }
 }
 
+/**
+ * Nome de diretorio de autor aceitavel no cliente. Espelha `isSafeMemoriaAuthor`
+ * do sync (`^[A-Za-z0-9._-]+$`, nunca `.`/`..`) e ADICIONA a recusa de ponto
+ * inicial: o valor vira nome de diretorio sob `<caso>/.memoria/` e um dir oculto
+ * (ou uma colisao com o pseudo-caso `.feedback`) nao e um autor legitimo.
+ */
+const VALID_AUTHOR_DIR = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * Nome do DIRETORIO de autor da memoria: claim `author_dir` (slug legivel
+ * emitido pelo Laravel, ex. `pedro-giudice`) quando presente e valido; senao o
+ * `sub` (tokens antigos, janela <=15min de rotacao). Sem assinatura verificada,
+ * como as demais decodeJwt* — o valor so vira segmento de path apos passar pela
+ * whitelist acima. Retorna null quando o JWT nao e parseavel/sem sub.
+ */
+export function decodeJwtAuthorDir(jwt) {
+  try {
+    if (typeof jwt !== "string") return null;
+    const parts = jwt.split(".");
+    if (parts.length < 2 || !parts[1]) return null;
+    const payload = JSON.parse(
+      Buffer.from(parts[1], "base64url").toString("utf-8"),
+    );
+    const dir = payload.author_dir;
+    if (typeof dir === "string" && VALID_AUTHOR_DIR.test(dir)) return dir;
+    return typeof payload.sub === "string" ? payload.sub : null;
+  } catch {
+    return null;
+  }
+}
+
 // --- D7: file-lock para serializar refresh entre processos (MCP + sync) ---
 
 /** Sleep interno (auth.mjs nao tinha um). */

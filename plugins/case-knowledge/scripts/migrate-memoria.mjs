@@ -30,7 +30,7 @@ import {
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { pathToFileURL } from "node:url";
-import { readCredential, decodeJwtSub } from "../auth.mjs";
+import { readCredential, decodeJwtAuthorDir } from "../auth.mjs";
 import {
   isSafeMemoriaCase,
   isSafeMemoriaAuthor,
@@ -377,18 +377,19 @@ function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     console.log(
-      "uso: node scripts/migrate-memoria.mjs [--legacy-dir <path>] [--cases-base <path>] [--author <sub>] [--apply]\n" +
+      "uso: node scripts/migrate-memoria.mjs [--legacy-dir <path>] [--cases-base <path>] [--author <dir>] [--apply]\n" +
         "  sem --apply = DRY-RUN (nada e escrito). COPIA (nunca move). Nunca sobrescreve.",
     );
     return 0;
   }
 
-  // Autor: --author ou derivado do sub do JWT da credencial (keychain/arquivo).
+  // Autor: --author ou derivado do JWT da credencial (keychain/arquivo) — claim
+  // `author_dir` (slug legivel), com fallback pro `sub` em token antigo.
   let author = args.author;
   if (!author) {
     try {
       const cred = readCredential();
-      author = cred && cred.access_jwt ? decodeJwtSub(cred.access_jwt) : null;
+      author = cred && cred.access_jwt ? decodeJwtAuthorDir(cred.access_jwt) : null;
     } catch {
       author = null;
     }
@@ -396,7 +397,7 @@ function main() {
   if (!author) {
     console.error(
       "ERRO: nao foi possivel derivar o autor da credencial. Rode o login do plugin\n" +
-        "(node server.mjs login) ou passe --author <sub> explicitamente.",
+        "(node server.mjs login) ou passe --author <dir> explicitamente.",
     );
     return 1;
   }

@@ -15,11 +15,11 @@
 import { createHash } from "node:crypto";
 import {
   existsSync, mkdirSync, readdirSync, readFileSync,
-  writeFileSync, renameSync, appendFileSync, copyFileSync,
+  writeFileSync, renameSync, appendFileSync, copyFileSync, rmdirSync,
 } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { requestWithAuth, readCredential, decodeJwtSub } from "./auth.mjs";
+import { requestWithAuth, readCredential, decodeJwtAuthorDir } from "./auth.mjs";
 
 // Espelha defaultApiBase/defaultCasesBase do server.mjs. Duplicado de
 // proposito: importar server.mjs executaria o server MCP (connect no
@@ -989,6 +989,184 @@ function batchUploads(files) {
   return { batches, skipped };
 }
 
+// ---------- Migracao dos dirs de autor para slug legivel (author_dir) ----------
+//
+// Ate 07/2026 o subdir de autor era o `sub` numerico do JWT ("1", "6"). O server
+// passou a emitir/gravar um slug legivel (`pedro-giudice`) e os manifests trazem
+// `aliases: { "<sub>": "<slug>" }` — o mapa que DIRIGE a migracao local, sem
+// heuristica. Esta migracao roda no inicio de cada ciclo de memoria; e idempotente
+// (2a rodada = no-op, porque os dirs antigos ja nao existem).
+
+// Dir de autor migravel: espelha `isSafeMemoriaAuthor` e ADICIONA a recusa de
+// ponto inicial (dir oculto / colisao com o pseudo-caso `.feedback` nao e autor).
+// Mesma regra do `decodeJwtAuthorDir` (auth.mjs).
+const MIGRATABLE_AUTHOR = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+function isMigratableAuthor(v) {
+  return typeof v === "string" && MIGRATABLE_AUTHOR.test(v);
+}
+
+function isPlainObject(v) {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+/**
+ * Regrava `autoMemoryDirectory` de um `settings.local.json` SOMENTE quando o
+ * valor atual termina no sufixo EXATO `/.memoria/<oldDir>` (comparacao de string,
+ * sem heuristica: `.../.memoria/11` NAO casa com oldDir `1`). Qualquer outro
+ * valor — apontando pra fora, ja migrado, ausente — fica intocado.
+ *
+ * Nao viola o espirito never-overwrite (CMR-103): so troca o valor que NOS mesmos
+ * provisionamos, casado por igualdade exata, preservando todas as outras chaves;
+ * backup `.bak` + escrita atomica. Arquivo ausente/corrompido/sem o campo -> false
+ * sem tocar em nada. Retorna true se regravou.
+ */
+export function updateAutoMemoryDirIfAliased(settingsPath, oldDir, newDir) {
+  if (!isMigratableAuthor(oldDir) || !isMigratableAuthor(newDir)) return false;
+  if (!existsSync(settingsPath)) return false;
+  let obj;
+  try {
+    obj = JSON.parse(readFileSync(settingsPath, "utf-8"));
+  } catch {
+    return false; // corrompido: nunca pisa
+  }
+  if (!isPlainObject(obj)) return false;
+  const cur = obj.autoMemoryDirectory;
+  if (typeof cur !== "string") return false;
+  if (!cur.endsWith(`/.memoria/${oldDir}`)) return false;
+  obj.autoMemoryDirectory = `${cur.slice(0, cur.length - oldDir.length)}${newDir}`;
+  try {
+    copyFileSync(settingsPath, `${settingsPath}.bak`);
+    writeAtomic(settingsPath, `${JSON.stringify(obj, null, 2)}\n`);
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Migra os dirs de autor locais de `<sub>` para `<slug>`, dirigido pelos
+ * `aliases` do manifest. Tres efeitos, todos idempotentes:
+ *
+ *  (a) DISCO: para cada (oldDir -> newDir) com `<caso>/.memoria/<oldDir>` (ou
+ *      `.feedback/<oldDir>`) presente: rename quando o destino nao existe; senao
+ *      MERGE CONSERVADOR — move so os arquivos ausentes no destino, conflito
+ *      PRESERVA o destino e mantem o arquivo no dir velho (reportado em
+ *      `conflicts`). Nunca sobrescreve, nunca deleta conteudo; o dir velho so e
+ *      removido quando fica vazio.
+ *  (b) BASELINE: devolve `baseline` com as chaves de autor reescritas (casos reais
+ *      e pseudo-caso `.feedback`); o destino ja existente vence na fusao. O input
+ *      NAO e mutado — o caller grava.
+ *  (c) SETTINGS: `<caso>/.claude/settings.local.json` com `autoMemoryDirectory`
+ *      terminando no sufixo exato do dir antigo e reapontado (ver
+ *      `updateAutoMemoryDirIfAliased`).
+ *
+ * NAO depende de `selfAuthor`: dirs de PEERS (cujo par o proprio JWT nao carrega)
+ * migram igual, e o mapa vem do manifest. Nunca lanca — falhas por par vao para
+ * `errors` e o ciclo segue.
+ *
+ * Retorna { renames, conflicts, settings, errors, baseline, changed }.
+ */
+export function migrateAuthorDirs(casesBase, aliases, state) {
+  const out = { renames: [], conflicts: [], settings: [], errors: [], baseline: state, changed: false };
+
+  const pairs = [];
+  if (isPlainObject(aliases)) {
+    for (const [oldDir, newDir] of Object.entries(aliases)) {
+      if (!isMigratableAuthor(oldDir) || !isMigratableAuthor(newDir)) continue;
+      if (oldDir === newDir) continue;
+      pairs.push([oldDir, newDir]);
+    }
+  }
+  if (pairs.length === 0) {
+    out.baseline = isPlainObject(state) ? state : {};
+    return out;
+  }
+  const aliasOf = new Map(pairs);
+
+  // (b) baseline rekeyed (em memoria; o caller grava).
+  const src = isPlainObject(state) ? state : {};
+  const baseline = {};
+  let rekeyed = false;
+  for (const [caso, authors] of Object.entries(src)) {
+    if (!isPlainObject(authors)) {
+      baseline[caso] = authors;
+      continue;
+    }
+    const next = {};
+    for (const [author, files] of Object.entries(authors)) {
+      if (!aliasOf.has(author)) next[author] = files;
+    }
+    for (const [author, files] of Object.entries(authors)) {
+      if (!aliasOf.has(author)) continue;
+      const to = aliasOf.get(author);
+      rekeyed = true;
+      // destino ja existente VENCE (mesma regra do merge em disco)
+      next[to] = { ...(isPlainObject(files) ? files : {}), ...(isPlainObject(next[to]) ? next[to] : {}) };
+    }
+    baseline[caso] = next;
+  }
+  out.baseline = baseline;
+
+  // (a)+(c) disco e settings, por caso local (pseudo-caso `.feedback` incluso).
+  let entries = [];
+  try {
+    entries = existsSync(casesBase) ? readdirSync(casesBase, { withFileTypes: true }) : [];
+  } catch (err) {
+    out.errors.push(`listando ${casesBase}: ${err.message}`);
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name === "_archive") continue;
+    const isPool = entry.name === FEEDBACK_POOL;
+    if (!isPool && entry.name.startsWith(".")) continue; // .claude e afins
+    const caso = entry.name;
+    const memDir = isPool ? join(casesBase, FEEDBACK_POOL) : join(casesBase, caso, ".memoria");
+
+    for (const [oldDir, newDir] of pairs) {
+      // (a) disco
+      const from = join(memDir, oldDir);
+      if (existsSync(memDir) && existsSync(from)) {
+        const to = join(memDir, newDir);
+        try {
+          if (!existsSync(to)) {
+            renameSync(from, to);
+            out.renames.push({ case: caso, from: oldDir, to: newDir, mode: "rename" });
+          } else {
+            for (const f of readdirSync(from, { withFileTypes: true })) {
+              if (!f.isFile()) continue;
+              if (existsSync(join(to, f.name))) {
+                out.conflicts.push({ case: caso, from: oldDir, to: newDir, file: f.name });
+                continue;
+              }
+              renameSync(join(from, f.name), join(to, f.name));
+            }
+            // so remove o dir velho se ficou vazio (nada e destruido)
+            if (readdirSync(from).length === 0) rmdirSync(from);
+            out.renames.push({ case: caso, from: oldDir, to: newDir, mode: "merge" });
+          }
+        } catch (err) {
+          out.errors.push(`migrando ${caso}/${oldDir} -> ${newDir}: ${err.message}`);
+        }
+      }
+
+      // (c) settings (o pool nao tem .claude/)
+      if (isPool) continue;
+      try {
+        const settingsPath = join(casesBase, caso, ".claude", "settings.local.json");
+        if (updateAutoMemoryDirIfAliased(settingsPath, oldDir, newDir)) {
+          out.settings.push({ case: caso, from: oldDir, to: newDir });
+        }
+      } catch (err) {
+        out.errors.push(`settings ${caso} (${oldDir} -> ${newDir}): ${err.message}`);
+      }
+    }
+  }
+
+  out.changed = rekeyed || out.renames.length > 0 || out.settings.length > 0;
+  return out;
+}
+
 /**
  * Sincroniza a memoria de caso por-autor: baixa peers (+ self sob never-overwrite)
  * e sobe SO os arquivos do proprio autor, roteados p/ memoria-de-caso ou pool de
@@ -1007,18 +1185,46 @@ export async function syncMemoria(apiBase, casesBase, selfAuthor, deps = {}) {
   const doGet = deps.getJson || fetchJson;
   const doPost = deps.postJson || postJson;
 
-  if (selfAuthor === null || selfAuthor === undefined) {
-    appendLog(casesBase, "memoria: sem autor (credencial ausente/sem sub) -> skip");
-    return;
-  }
-
   // 1) Dois GETs fixos por ciclo (manifests agregados). Falha -> skip com log.
+  // ANTES do gate de autor: e dos manifests que vem `aliases`, que dirige a
+  // migracao dos dirs de autor (inclusive de PEERS, cujo par o JWT nao carrega).
   let memManifest, fbManifest;
   try {
     memManifest = await doGet(`${apiBase}/memoria-manifest`);
     fbManifest = await doGet(`${apiBase}/feedback-manifest`);
   } catch (err) {
     appendLog(casesBase, `memoria: erro manifest: ${err.message}`);
+    return;
+  }
+
+  // 1b) Migracao <sub> -> <slug> dirigida pelos aliases. Idempotente, no-op quando
+  // nao ha dir antigo. Roda ANTES de ler o estado local (o plano tem que ver o
+  // disco ja migrado) e INDEPENDE de selfAuthor.
+  try {
+    const aliases = { ...(fbManifest?.aliases || {}), ...(memManifest?.aliases || {}) };
+    const prevBaseline = readMemoriaBaselineFrom(casesBase);
+    const mig = migrateAuthorDirs(casesBase, aliases, prevBaseline);
+    for (const r of mig.renames) {
+      appendLog(casesBase, `memoria: migracao de autor ${r.case}: ${r.from} -> ${r.to} (${r.mode})`);
+    }
+    for (const c of mig.conflicts) {
+      appendLog(casesBase, `memoria: migracao ${c.case}: ${c.from}/${c.file} ja existe em ${c.to} -> destino preservado, arquivo mantido no dir antigo`);
+    }
+    for (const s of mig.settings) {
+      appendLog(casesBase, `memoria: migracao settings ${s.case}: autoMemoryDirectory ${s.from} -> ${s.to}`);
+    }
+    for (const e of mig.errors) {
+      appendLog(casesBase, `memoria: erro na migracao de autor: ${e}`);
+    }
+    // Persiste o baseline rekeyed ja aqui: se o ciclo parar adiante (sem autor),
+    // a migracao nao se perde nem re-dispara no proximo ciclo.
+    if (mig.changed) writeMemoriaBaseline(casesBase, mig.baseline);
+  } catch (err) {
+    appendLog(casesBase, `memoria: erro na migracao de autor: ${err.message}`);
+  }
+
+  if (selfAuthor === null || selfAuthor === undefined) {
+    appendLog(casesBase, "memoria: sem autor (credencial ausente/sem sub) -> skip");
     return;
   }
 
@@ -1195,15 +1401,16 @@ async function main() {
   const casesBase = process.env.CASE_KNOWLEDGE_CASES_BASE || defaultCasesBase();
   mkdirSync(casesBase, { recursive: true });
 
-  // CMR-138: autor da memoria (namespace-por-autor) derivado UMA vez do sub do
-  // access_jwt, no INICIO (a injecao de autoMemoryDirectory por-caso da Task 11
-  // precisa do selfAuthor no path). Sem credencial/sub -> null: a memoria e
+  // CMR-138: autor da memoria (namespace-por-autor) derivado UMA vez do access_jwt,
+  // no INICIO (a injecao de autoMemoryDirectory por-caso da Task 11 precisa do
+  // selfAuthor no path). E o claim `author_dir` (slug legivel, ex. `pedro-giudice`),
+  // com fallback pro `sub` em token antigo. Sem credencial -> null: a memoria e
   // pulada e o sync de briefing segue normal. Try/catch defensivo: uma falha
   // rara ao ler a credencial NUNCA pode derrubar o sync de briefing abaixo.
   let selfAuthor = null;
   try {
     const cred = readCredential();
-    selfAuthor = cred && cred.access_jwt ? decodeJwtSub(cred.access_jwt) : null;
+    selfAuthor = cred && cred.access_jwt ? decodeJwtAuthorDir(cred.access_jwt) : null;
   } catch {
     selfAuthor = null;
   }

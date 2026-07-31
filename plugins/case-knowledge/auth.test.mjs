@@ -19,6 +19,7 @@ import {
   getAccessToken,
   decodeJwtExp,
   decodeJwtSub,
+  decodeJwtAuthorDir,
   refreshOnce,
   getFreshAccessToken,
   requestWithAuth,
@@ -106,6 +107,46 @@ test("decodeJwtSub extrai sub do payload", () => {
   const payload = Buffer.from(JSON.stringify({ sub: "42", exp: 9999999999 })).toString("base64url");
   assert.equal(decodeJwtSub(`h.${payload}.sig`), "42");
   assert.equal(decodeJwtSub("lixo"), null);
+});
+
+test("decodeJwtAuthorDir: claim author_dir valido vence o sub", () => {
+  const jwt = (p) => `h.${Buffer.from(JSON.stringify(p)).toString("base64url")}.sig`;
+  assert.equal(
+    decodeJwtAuthorDir(jwt({ sub: "1", author_dir: "pedro-giudice" })),
+    "pedro-giudice",
+  );
+  assert.equal(
+    decodeJwtAuthorDir(jwt({ sub: "6", author_dir: "ana-beatriz-paoli" })),
+    "ana-beatriz-paoli",
+  );
+});
+
+test("decodeJwtAuthorDir: sem claim (token antigo) cai no sub", () => {
+  const jwt = (p) => `h.${Buffer.from(JSON.stringify(p)).toString("base64url")}.sig`;
+  assert.equal(decodeJwtAuthorDir(jwt({ sub: "1" })), "1");
+  assert.equal(decodeJwtAuthorDir(jwt({ sub: "1", author_dir: null })), "1");
+  assert.equal(decodeJwtAuthorDir(jwt({ sub: "1", author_dir: 7 })), "1");
+});
+
+test("decodeJwtAuthorDir: claim invalido (traversal/vazio/dot) cai no sub", () => {
+  const jwt = (p) => `h.${Buffer.from(JSON.stringify(p)).toString("base64url")}.sig`;
+  assert.equal(decodeJwtAuthorDir(jwt({ sub: "1", author_dir: "../../PWNED" })), "1");
+  assert.equal(decodeJwtAuthorDir(jwt({ sub: "1", author_dir: "a/b" })), "1");
+  assert.equal(decodeJwtAuthorDir(jwt({ sub: "1", author_dir: "a\\b" })), "1");
+  assert.equal(decodeJwtAuthorDir(jwt({ sub: "1", author_dir: "" })), "1");
+  assert.equal(decodeJwtAuthorDir(jwt({ sub: "1", author_dir: "." })), "1");
+  assert.equal(decodeJwtAuthorDir(jwt({ sub: "1", author_dir: ".." })), "1");
+  // leading dot: viraria dir oculto / colidiria com o pseudo-caso .feedback
+  assert.equal(decodeJwtAuthorDir(jwt({ sub: "1", author_dir: ".feedback" })), "1");
+  assert.equal(decodeJwtAuthorDir(jwt({ sub: "1", author_dir: "ana paoli" })), "1");
+});
+
+test("decodeJwtAuthorDir: jwt nao parseavel -> null", () => {
+  assert.equal(decodeJwtAuthorDir("lixo"), null);
+  assert.equal(decodeJwtAuthorDir(null), null);
+  assert.equal(decodeJwtAuthorDir(undefined), null);
+  const semSub = `h.${Buffer.from(JSON.stringify({ tenant_id: 1 })).toString("base64url")}.sig`;
+  assert.equal(decodeJwtAuthorDir(semSub), null);
 });
 
 test("refreshOnce: 2xx grava novo par e retorna access_jwt", async (t) => {
