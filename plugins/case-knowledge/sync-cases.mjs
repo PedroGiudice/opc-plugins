@@ -1448,6 +1448,23 @@ const TRANSCRIPT_TIMEOUT_MS = 30_000;
 // `..` espelha o servidor: um id que o server recusaria viraria 400 em loop.
 const VALID_SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
 
+// Chave RESERVADA dentro do estado: `{ "<path>": <size no momento da recusa> }`.
+// Nunca colide com uma chave real (as demais sao paths absolutos).
+const TRANSCRIPT_BLOCKED_KEY = "__blocked";
+
+/**
+ * Recusa DETERMINISTICA do daemon sobre o conteudo: 400 (slug de caso invalido,
+ * jsonl vazio) e 403 (caso nao pertence ao tenant). Reenviar os MESMOS bytes
+ * falha de novo por definicao — sem isso a janela consome o orcamento do ciclo
+ * para sempre e mata o backlog legitimo (observado na cmr-002: um diretorio de
+ * trabalho local sob `cases/` com nome fora do alfabeto de slug).
+ *
+ * 401 (credencial), 413, 5xx e rede fora NAO entram: sao transitorios.
+ */
+function isRecusaDeterministica(status) {
+  return status === 400 || status === 403;
+}
+
 /**
  * Raizes onde o Claude Code guarda transcripts. Mesmo layout nas duas
  * plataformas (`<home>/.claude/projects`); `platform` fica no contrato para o
@@ -1561,17 +1578,24 @@ export function alignToLineStart(path, offset, lookback = TRANSCRIPT_ALIGN_LOOKB
  * `size < offset` (arquivo truncado/rotacionado) reseta para 0 — o dedupe
  * impede duplicata do que ja foi capturado.
  *
+ * Arquivo com recusa deterministica registrada (`__blocked`) fica de fora
+ * ENQUANTO o tamanho nao mudar: o mesmo conteudo tomaria a mesma recusa e so
+ * queimaria o orcamento do ciclo. O offset NAO avanca (nada e dado como
+ * enviado); crescer o arquivo destrava sozinho.
+ *
  * Retorna `[{ path, sessionId, from, to }]`.
  */
 export function planTranscriptUploads(files, state = {}, caps = {}) {
   const maxReq = caps.maxRequestBytes ?? TRANSCRIPT_MAX_REQUEST_BYTES;
   const maxCycle = caps.maxCycleBytes ?? TRANSCRIPT_MAX_CYCLE_BYTES;
   const lookback = Math.max(1, Math.min(TRANSCRIPT_ALIGN_LOOKBACK, Math.floor(maxReq / 2)));
+  const blocked = (state && state[TRANSCRIPT_BLOCKED_KEY]) || {};
   const out = [];
   let budget = maxCycle;
   for (const f of files || []) {
     if (budget <= 0) break;
     const size = Number(f.size) || 0;
+    if (Number(blocked[f.path]) === size) continue; // recusado e inalterado
     const saved = Number(state?.[f.path]);
     let from = Number.isFinite(saved) && saved > 0 ? saved : 0;
     if (from > size) from = 0; // truncado/rotacionado
@@ -1734,15 +1758,43 @@ export async function syncTranscripts(memApiBase, casesBase, deps = {}) {
       continue;
     }
     if (!res || !res.ok) {
-      const detalhe = String(res?.json?.error ?? res?.text ?? "sem resposta").slice(0, 200);
+      const detalhe = String(res?.json?.error ?? res?.json?.message ?? res?.text ?? "sem resposta").slice(0, 200);
       appendLog(casesBase, `transcripts: HTTP ${res?.status ?? "?"} em ${w.sessionId}: ${detalhe}`);
       falhas++;
+      // Recusa deterministica: registra o tamanho atual e para de tentar ate o
+      // arquivo mudar. O offset NAO avanca (nada foi dado como capturado) —
+      // se o caso passar a existir/pertencer e a sessao continuar, destrava.
+      if (res && isRecusaDeterministica(res.status)) {
+        let sizeAtual = 0;
+        try {
+          sizeAtual = statSync(w.path).size;
+        } catch {
+          /* sumiu: nao ha o que bloquear */
+        }
+        if (sizeAtual > 0) {
+          state = {
+            ...state,
+            [TRANSCRIPT_BLOCKED_KEY]: { ...(state[TRANSCRIPT_BLOCKED_KEY] || {}), [w.path]: sizeAtual },
+          };
+          try {
+            writeTranscriptState(casesBase, state);
+          } catch (err) {
+            appendLog(casesBase, `transcripts: erro gravando estado: ${err.message}`);
+          }
+          appendLog(casesBase, `transcripts: ${w.sessionId} bloqueado ate o arquivo mudar (recusa ${res.status})`);
+        }
+      }
       continue; // NAO avanca o offset: o proximo ciclo reenvia (dedupe absorve)
     }
 
     // 2xx (inclusive `skipped:true`, sessao fora de caso): o delta esta
     // resolvido do lado do servidor -> avanca e PERSISTE imediatamente.
     state = { ...state, [w.path]: w.from + slice.bytes };
+    if (state[TRANSCRIPT_BLOCKED_KEY]?.[w.path] !== undefined) {
+      const restante = { ...state[TRANSCRIPT_BLOCKED_KEY] };
+      delete restante[w.path]; // destravou de vez: nao deixa entrada morta
+      state = { ...state, [TRANSCRIPT_BLOCKED_KEY]: restante };
+    }
     try {
       writeTranscriptState(casesBase, state);
     } catch (err) {

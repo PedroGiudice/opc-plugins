@@ -1995,3 +1995,81 @@ test("syncTranscripts: nada novo -> nenhum POST e nenhuma escrita de estado", as
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("planTranscriptUploads: arquivo com recusa deterministica registrada fica fora ate mudar de tamanho", () => {
+  const root = mkdtempSync(join(tmpdir(), "cmr135-plan6-"));
+  try {
+    const p = seedTranscript(root, "-x-cases-a", "s1", ['{"n":1}']);
+    const size = statSync(p).size;
+    const file = { path: p, sessionId: "s1", size };
+    // bloqueado com o MESMO tamanho -> nao entra no plano
+    assert.deepEqual(planTranscriptUploads([file], { __blocked: { [p]: size } }), []);
+    // tamanho mudou (sessao continuou) -> volta ao plano, do offset zero
+    assert.deepEqual(planTranscriptUploads([file], { __blocked: { [p]: size - 1 } }), [
+      { path: p, sessionId: "s1", from: 0, to: size },
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("syncTranscripts: 400/403 bloqueia o arquivo (sem avancar offset) e o ciclo seguinte nao reenvia", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr135-w9-"));
+  const home = mkdtempSync(join(tmpdir(), "cmr135-h9-"));
+  try {
+    const root = join(home, ".claude", "projects");
+    const p = seedTranscript(root, "-x-cases-analise de relatorios", "sess-1", ['{"type":"user","cwd":"/x/cases/x y"}']);
+    const { deps, posts } = fakeUploader(() => ({
+      ok: false, status: 400, json: { status: "error", message: "slug de caso invalido" }, text: "{}",
+    }));
+    await syncTranscripts("http://t/api", base, { ...deps, roots: [root] });
+    assert.equal(posts.length, 1);
+
+    const st = JSON.parse(readFileSync(join(base, ".transcripts-state.json"), "utf-8"));
+    assert.equal(st[p], undefined, "offset nao avanca em recusa");
+    assert.equal(st.__blocked[p], statSync(p).size);
+    assert.match(readFileSync(join(base, ".sync.log"), "utf-8"), /bloqueado ate o arquivo mudar \(recusa 400\)/);
+
+    // ciclo seguinte: nao gasta request nem orcamento com o mesmo conteudo
+    await syncTranscripts("http://t/api", base, { ...deps, roots: [root] });
+    assert.equal(posts.length, 1, "arquivo bloqueado nao volta a ser enviado");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("syncTranscripts: 401 NAO bloqueia (falha transitoria de credencial)", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr135-w10-"));
+  const home = mkdtempSync(join(tmpdir(), "cmr135-h10-"));
+  try {
+    const root = join(home, ".claude", "projects");
+    seedTranscript(root, "-x-cases-alpha", "sess-1", ['{"type":"user","cwd":"/x/cases/alpha"}']);
+    const { deps, posts } = fakeUploader(() => ({ ok: false, status: 401, json: { error: "bearer ausente ou invalido" }, text: "{}" }));
+    await syncTranscripts("http://t/api", base, { ...deps, roots: [root] });
+    await syncTranscripts("http://t/api", base, { ...deps, roots: [root] });
+    assert.equal(posts.length, 2, "401 deve continuar tentando no proximo ciclo");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("syncTranscripts: 2xx apos bloqueio limpa a entrada de __blocked", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr135-w11-"));
+  const home = mkdtempSync(join(tmpdir(), "cmr135-h11-"));
+  try {
+    const root = join(home, ".claude", "projects");
+    const p = seedTranscript(root, "-x-cases-alpha", "sess-1", ['{"type":"user","cwd":"/x/cases/alpha"}']);
+    writeFileSync(join(base, ".transcripts-state.json"), JSON.stringify({ __blocked: { [p]: 1 } })); // tamanho velho
+    const { deps, posts } = fakeUploader();
+    await syncTranscripts("http://t/api", base, { ...deps, roots: [root] });
+    assert.equal(posts.length, 1);
+    const st = JSON.parse(readFileSync(join(base, ".transcripts-state.json"), "utf-8"));
+    assert.equal(st[p], statSync(p).size);
+    assert.deepEqual(st.__blocked, {});
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});

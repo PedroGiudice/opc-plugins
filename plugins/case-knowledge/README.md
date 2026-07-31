@@ -72,6 +72,15 @@ o offset e o proximo ciclo reenvia (o reenvio e idempotente pelo dedupe do
 daemon). Caps: 3 MiB por request e 12 MiB por ciclo — arquivo maior continua
 no ciclo seguinte. Sem credencial, o uploader loga uma linha e pula.
 
+Recusa DETERMINISTICA do daemon (400 slug de caso invalido / jsonl vazio, 403
+caso nao pertence ao tenant) registra o arquivo em `__blocked` dentro do
+`.transcripts-state.json` e para de tentar ate o arquivo MUDAR DE TAMANHO —
+sem isso, um diretorio de trabalho local sob `cases/` (nome com espaco ou
+acento, ou caso que nao existe na VM) reenviaria a mesma janela a cada 5 min e
+comeria o orcamento do ciclo para sempre. O offset nao avanca (nada e dado
+como capturado); crescer o arquivo destrava. 401, 413 e 5xx sao transitorios e
+NAO bloqueiam. Para forcar um retry, apague a entrada de `__blocked`.
+
 ## Variaveis de ambiente
 
 | Var | Default | Funcao |
