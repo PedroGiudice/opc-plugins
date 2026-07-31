@@ -14,6 +14,8 @@ import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { readCredential } from "../auth.mjs";
+
 const MEM_API_BASE =
   process.env.LEGAL_COGMEM_API_BASE || "http://100.123.73.128:3940/api";
 const FETCH_TIMEOUT_MS = 2500;
@@ -93,14 +95,49 @@ export function buildHookOutput(context) {
   };
 }
 
+/**
+ * Headers do POST /api/context a partir de uma credencial JA LIDA. PURA (sem
+ * I/O): o Bearer entra so quando ha `access_jwt` string nao-vazia; sem
+ * credencial sai apenas o Content-Type (degrade — preserva o uso tailnet).
+ */
+export function contextHeaders(cred) {
+  const headers = { "Content-Type": "application/json" };
+  const jwt =
+    cred && typeof cred.access_jwt === "string" ? cred.access_jwt : "";
+  if (jwt) headers.Authorization = `Bearer ${jwt}`;
+  return headers;
+}
+
+/**
+ * Credencial local lida de forma SINCRONA e SEM refresh, ou null.
+ *
+ * Deliberadamente NAO usa requestWithAuth/getFreshAccessToken: o refresh tem
+ * budget de 60s (REFRESH_TIMEOUT_MS) e pode ate esperar o lock entre processos,
+ * o que estouraria o orcamento de 10s do hook. Token vencido aqui vira 401 no
+ * daemon -> fetchContext devolve null -> hook degrada em silencio; o refresh
+ * acontece na proxima chamada de uma tool MCP. Nunca lanca.
+ */
+export function readCredentialSafe() {
+  try {
+    return readCredential();
+  } catch {
+    return null;
+  }
+}
+
 /** POST /api/context com timeout; retorna chunks ou null em qualquer falha. */
-export async function fetchContext(prompt, repoPath, fetchImpl = fetch) {
+export async function fetchContext(
+  prompt,
+  repoPath,
+  fetchImpl = fetch,
+  cred = readCredentialSafe(),
+) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
     const res = await fetchImpl(`${MEM_API_BASE}/context`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: contextHeaders(cred),
       body: JSON.stringify({ prompt, repo_path: repoPath }),
       signal: controller.signal,
     });

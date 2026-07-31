@@ -1,10 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import os from "node:os";
 import {
   caseSlugFromCwd,
   shouldSkipPrompt,
   formatContext,
   buildHookOutput,
+  contextHeaders,
+  readCredentialSafe,
+  fetchContext,
 } from "./memoria-context.mjs";
 
 test("caseSlugFromCwd: gate por CASES_BASE (alinhado ao detectCase do server.mjs)", () => {
@@ -79,4 +85,93 @@ test("buildHookOutput embrulha no shape do UserPromptSubmit", () => {
       additionalContext: "CTX",
     },
   });
+});
+
+// --- Bearer (CMR-135): sincrono, sem refresh, degrade sem credencial ---
+
+test("contextHeaders: Bearer so quando ha access_jwt utilizavel", () => {
+  assert.deepEqual(contextHeaders(null), { "Content-Type": "application/json" });
+  assert.deepEqual(contextHeaders(undefined), { "Content-Type": "application/json" });
+  assert.deepEqual(contextHeaders({}), { "Content-Type": "application/json" });
+  // credencial so com refresh (login parcial) nao vira Bearer
+  assert.deepEqual(contextHeaders({ refresh: "r1" }), {
+    "Content-Type": "application/json",
+  });
+  // access_jwt vazio ou de tipo errado nao vira Bearer
+  assert.deepEqual(contextHeaders({ access_jwt: "" }), {
+    "Content-Type": "application/json",
+  });
+  assert.deepEqual(contextHeaders({ access_jwt: 42 }), {
+    "Content-Type": "application/json",
+  });
+  assert.deepEqual(contextHeaders({ access_jwt: "a.b.c", refresh: "r1" }), {
+    "Content-Type": "application/json",
+    Authorization: "Bearer a.b.c",
+  });
+});
+
+/** AIDVLABS_CREDENTIALS_FILE bypassa o keychain -> deterministico no teste. */
+function credFixture(t, cred) {
+  const dir = mkdtempSync(join(os.tmpdir(), "aidvlabs-hook-"));
+  const file = join(dir, "aidvlabs", "credentials.json");
+  const prev = process.env.AIDVLABS_CREDENTIALS_FILE;
+  process.env.AIDVLABS_CREDENTIALS_FILE = file;
+  if (cred) {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify(cred), "utf-8");
+  }
+  t.after(() => {
+    if (prev === undefined) delete process.env.AIDVLABS_CREDENTIALS_FILE;
+    else process.env.AIDVLABS_CREDENTIALS_FILE = prev;
+    rmSync(dir, { recursive: true, force: true });
+  });
+}
+
+test("readCredentialSafe: le a credencial local; ausente/corrompida -> null", (t) => {
+  credFixture(t, { access_jwt: "a.b.c", refresh: "r1" });
+  assert.deepEqual(readCredentialSafe(), { access_jwt: "a.b.c", refresh: "r1" });
+});
+
+test("readCredentialSafe: sem arquivo -> null (nunca lanca)", (t) => {
+  credFixture(t);
+  assert.equal(readCredentialSafe(), null);
+});
+
+test("fetchContext: manda o Bearer da credencial lida", async (t) => {
+  credFixture(t, { access_jwt: "a.b.c", refresh: "r1" });
+  let captured;
+  const fakeFetch = async (url, opts) => {
+    captured = { url, headers: opts.headers, body: JSON.parse(opts.body) };
+    return { ok: true, json: async () => ({ status: "ok", chunks: [{ score: 1, content: "x" }] }) };
+  };
+  const chunks = await fetchContext("prompt de teste valido", "/x/cases/y", fakeFetch);
+  assert.ok(captured.url.endsWith("/context"));
+  assert.equal(captured.headers.Authorization, "Bearer a.b.c");
+  assert.equal(captured.body.repo_path, "/x/cases/y");
+  assert.equal(chunks.length, 1);
+});
+
+test("fetchContext: sem credencial -> sem Authorization, segue funcionando", async (t) => {
+  credFixture(t);
+  let captured;
+  const fakeFetch = async (url, opts) => {
+    captured = { headers: opts.headers };
+    return { ok: true, json: async () => ({ status: "ok", chunks: [] }) };
+  };
+  const chunks = await fetchContext("prompt de teste valido", "/x/cases/y", fakeFetch);
+  assert.equal(captured.headers.Authorization, undefined);
+  assert.deepEqual(chunks, []);
+});
+
+test("fetchContext: 401 (token vencido) -> null, sem refresh e sem lancar", async (t) => {
+  credFixture(t, { access_jwt: "a.b.c", refresh: "r1" });
+  let calls = 0;
+  const fakeFetch = async () => {
+    calls += 1;
+    return { ok: false, status: 401 };
+  };
+  const chunks = await fetchContext("prompt de teste valido", "/x/cases/y", fakeFetch);
+  assert.equal(chunks, null);
+  // UMA unica chamada: o hook NAO tenta refresh (budget de 10s do hook)
+  assert.equal(calls, 1);
 });

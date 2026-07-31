@@ -3,6 +3,9 @@
  * Mesmo endpoint default do hook memoria-context.mjs; override via
  * LEGAL_COGMEM_API_BASE.
  */
+
+import { requestWithAuth } from "./auth.mjs";
+
 export const MEM_API_BASE =
   process.env.LEGAL_COGMEM_API_BASE || "http://100.123.73.128:3940/api";
 
@@ -29,11 +32,18 @@ export async function memoriaSearch(params, caseInfo, fetchImpl = fetch) {
   };
   if (params.threshold !== undefined) body.threshold = params.threshold;
   try {
-    const res = await fetchImpl(`${MEM_API_BASE}/search`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
+    // requestWithAuth injeta o Bearer quando ha credencial (mesmo login dos
+    // demais MCPs, keychain aidvlabs-mcp), refresca proativo (<60s) e reativo
+    // (401 -> refresh -> 1 retry). SEM credencial segue SEM Bearer — preserva
+    // o uso tailnet enquanto o daemon aceita fallback. Erro de auth cai no
+    // catch abaixo e vira "memoria indisponivel: ..."; a tool nunca lanca.
+    const res = await requestWithAuth((authHeaders) =>
+      fetchImpl(`${MEM_API_BASE}/search`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders },
+        body: JSON.stringify(body),
+      }),
+    );
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       return `memoria indisponivel: HTTP ${res.status} ${text}`.trim();
