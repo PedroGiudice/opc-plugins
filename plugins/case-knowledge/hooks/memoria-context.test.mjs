@@ -11,6 +11,7 @@ import {
   contextHeaders,
   readCredentialSafe,
   fetchContext,
+  defaultMemApiBase,
 } from "./memoria-context.mjs";
 
 test("caseSlugFromCwd: gate por CASES_BASE (alinhado ao detectCase do server.mjs)", () => {
@@ -174,4 +175,15 @@ test("fetchContext: 401 (token vencido) -> null, sem refresh e sem lancar", asyn
   assert.equal(chunks, null);
   // UMA unica chamada: o hook NAO tenta refresh (budget de 10s do hook)
   assert.equal(calls, 1);
+});
+
+// --- CMR-135 Task 6b: default por plataforma (duplicado de memoria.mjs) ---
+
+test("defaultMemApiBase (hook): win32 -> URL publica; unix -> tailnet", () => {
+  assert.equal(defaultMemApiBase("win32"), "https://cogmem.aidvlabs.com/api");
+  assert.equal(defaultMemApiBase("linux"), "http://100.123.73.128:3940/api");
+});
+
+test("defaultMemApiBase (hook): sem argumento usa a plataforma do processo", () => {
+  assert.equal(defaultMemApiBase(), defaultMemApiBase(process.platform));
 });

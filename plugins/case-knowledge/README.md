@@ -9,7 +9,7 @@ memoria de sessoes de cada caso juridico, roteado pelo cwd da sessao
 | Backend | Endereco | Papel |
 |---|---|---|
 | case-knowledge-api (Rust) | unix `127.0.0.1:8422`; Win via Tailscale `100.123.73.128:8422` | documentos do caso (collections `case-{slug}`) |
-| legal-cogmem (Rust) | `100.123.73.128:3940` | memoria de sessoes (collections `case-{slug}-mem`) |
+| legal-cogmem (Rust) | Win `https://cogmem.aidvlabs.com`; unix `100.123.73.128:3940` | memoria de sessoes (collections `case-{slug}-mem`) |
 
 ## Componentes
 
@@ -62,13 +62,31 @@ Task Scheduler (a cada 5 min + logon, via sync-cases-hidden.vbs sem janela); exi
 `~/cases/.sync.log` e o proximo ciclo e o retry. Usa as mesmas envs
 `CASE_KNOWLEDGE_API_BASE` e `CASE_KNOWLEDGE_CASES_BASE`.
 
+O mesmo script sobe, no fim do ciclo, os **transcripts de sessao** desta
+maquina para o legal-cogmem (`POST /api/ingest-transcript`) — o watcher do
+daemon so enxerga os JSONLs da VM. So sobem sessoes de projeto SOB `cases/`
+(dir `<home>/.claude/projects/*-cases-*`); sessao pessoal ou de dev NUNCA sai
+da maquina. Estado proprio em `.transcripts-state.json` (offset em bytes por
+arquivo), gravado apos CADA request e so em 2xx: 500/401/413/rede fora mantem
+o offset e o proximo ciclo reenvia (o reenvio e idempotente pelo dedupe do
+daemon). Caps: 3 MiB por request e 12 MiB por ciclo — arquivo maior continua
+no ciclo seguinte. Sem credencial, o uploader loga uma linha e pula.
+
 ## Variaveis de ambiente
 
 | Var | Default | Funcao |
 |---|---|---|
 | `CASE_KNOWLEDGE_API_BASE` | win32 `http://100.123.73.128:8422/api`; unix `http://127.0.0.1:8422/api` | API de documentos |
 | `CASE_KNOWLEDGE_CASES_BASE` | win32 `%USERPROFILE%\cases` (fallback `C:\Users\pedro\cases`); unix `/home/opc/case-docs/cases` | base canonica dos casos (server E hook) |
-| `LEGAL_COGMEM_API_BASE` | `http://100.123.73.128:3940/api` | API de memoria (tool e hook) |
+| `LEGAL_COGMEM_API_BASE` | win32 `https://cogmem.aidvlabs.com/api`; unix `http://100.123.73.128:3940/api` | API de memoria (tool, hook e uploader de transcripts) |
+
+No Windows (maquina cliente, fora da tailnet) o default do legal-cogmem e a
+URL PUBLICA `https://cogmem.aidvlabs.com/api` — tunnel Cloudflare fail-closed
+com path-filter: so `/api/context`, `/api/search`, `/api/ingest-transcript` e
+`/api/health` passam pela borda; telemetria (`/api/events`, `/api/stats`,
+`/api/sessions`, ...) fica tailnet-only. Na VM o default segue tailnet direto.
+A env e soberana nas duas plataformas (a cmr-002 pode voltar ao tailnet
+apontando `LEGAL_COGMEM_API_BASE=http://100.123.73.128:3940/api`).
 
 Atencao ao customizar `CASE_KNOWLEDGE_CASES_BASE`: o daemon legal-cogmem
 roteia memoria pelo componente `cases` do path enviado. Uma base SEM

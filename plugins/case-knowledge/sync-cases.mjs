@@ -16,10 +16,13 @@ import { createHash } from "node:crypto";
 import {
   existsSync, mkdirSync, readdirSync, readFileSync,
   writeFileSync, renameSync, appendFileSync, copyFileSync, rmdirSync, unlinkSync,
+  statSync, openSync, readSync, closeSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { requestWithAuth, readCredential, decodeJwtAuthorDir } from "./auth.mjs";
+import { defaultMemApiBase } from "./memoria.mjs";
 
 // Espelha defaultApiBase/defaultCasesBase do server.mjs. Duplicado de
 // proposito: importar server.mjs executaria o server MCP (connect no
@@ -1409,6 +1412,352 @@ export async function syncMemoria(apiBase, casesBase, selfAuthor, deps = {}) {
   appendLog(casesBase, `memoria: ok baixados=${downloaded} uploads=${uploadedCount}`);
 }
 
+// ---------- CMR-135: uploader de transcripts de sessao (Task 9) ----------
+//
+// O watcher do legal-cogmem so enxerga os JSONLs da VM. Nas maquinas cliente
+// (cmr-002, Ana) os transcripts do Claude Code ficam em
+// `<home>/.claude/projects/<projeto-encodado>/<sessao>.jsonl` e chegam ao
+// daemon por HTTP (`POST /api/ingest-transcript`, Bearer obrigatorio).
+//
+// Invariantes:
+//  - MINIMIZACAO: so sobem sessoes de projeto SOB `cases/` (dir com `-cases-`
+//    no nome encodado). Sessao pessoal/dev NUNCA sai da maquina.
+//  - Estado PROPRIO em `.transcripts-state.json` (offset em bytes por arquivo);
+//    `.sync-state.json` e `.memoria-state.json` sao INTOCAVEIS.
+//  - So avanca o offset em 2xx. 500 (captura parcial), 401, 413 ou rede fora
+//    mantem o offset e o proximo ciclo reenvia — o reenvio e idempotente pelo
+//    dedupe do daemon (chunk_id_v2), entao overlap nao duplica.
+//  - Grava o estado APOS CADA request: a tarefa do Windows tem
+//    ExecutionTimeLimit de 5 min e um kill no meio nao pode perder progresso.
+
+const TRANSCRIPT_STATE_FILE = ".transcripts-state.json";
+
+// Teto do corpo no daemon e 4 MiB; 3 MiB de JSONL cru deixam folga para o
+// escaping do envelope JSON ({"session_id","jsonl"}).
+export const TRANSCRIPT_MAX_REQUEST_BYTES = 3 * 1024 * 1024;
+// Teto por CICLO (soma de todas as janelas): o sync roda a cada 5 min e nao
+// pode virar upload sustentado num backfill grande.
+export const TRANSCRIPT_MAX_CYCLE_BYTES = 12 * 1024 * 1024;
+// Recuo maximo ao alinhar o delta a fronteira de linha.
+const TRANSCRIPT_ALIGN_LOOKBACK = 1024 * 1024;
+// O embed de um delta grande e lento no daemon — timeout folgado (o do sync de
+// briefing e 10s).
+const TRANSCRIPT_TIMEOUT_MS = 30_000;
+
+// Alfabeto do `session_id` aceito pelo daemon (`validate_session_id`). O veto a
+// `..` espelha o servidor: um id que o server recusaria viraria 400 em loop.
+const VALID_SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
+
+/**
+ * Raizes onde o Claude Code guarda transcripts. Mesmo layout nas duas
+ * plataformas (`<home>/.claude/projects`); `platform` fica no contrato para o
+ * dia em que divergirem. Pura.
+ */
+export function transcriptRoots(home, platform = process.platform) {
+  void platform;
+  return [join(home, ".claude", "projects")];
+}
+
+/**
+ * Dir de projeto do Claude Code que corresponde a uma sessao SOB `cases/`.
+ * O CC encoda o path do projeto trocando separadores por `-`, entao
+ * `/home/opc/case-docs/cases/alpha` vira `-home-opc-case-docs-cases-alpha` e
+ * `C:\Users\pedro\cases\alpha` vira `C--Users-pedro-cases-alpha`. Pura.
+ */
+export function isCaseTranscriptDir(name) {
+  return /-cases-/.test(name || "");
+}
+
+/** `session_id` aceitavel pelo daemon. Pura. */
+export function isValidSessionId(id) {
+  return typeof id === "string" && VALID_SESSION_ID.test(id) && !id.includes("..");
+}
+
+/**
+ * Enumera os `.jsonl` de sessoes de caso nas raizes dadas, em ordem estavel de
+ * path (o orcamento do ciclo depende de ordem deterministica). Raiz ausente ou
+ * ilegivel e ignorada — o uploader nunca derruba o sync.
+ * Retorna `[{ path, sessionId, size }]`.
+ */
+export function listTranscriptFiles(roots) {
+  const out = [];
+  for (const root of roots || []) {
+    let dirs;
+    try {
+      dirs = readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue; // raiz inexistente (maquina sem CC nesse home) nao e erro
+    }
+    for (const d of dirs) {
+      if (!d.isDirectory() || !isCaseTranscriptDir(d.name)) continue;
+      const dirPath = join(root, d.name);
+      let entries;
+      try {
+        entries = readdirSync(dirPath, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const e of entries) {
+        if (!e.isFile() || !e.name.endsWith(".jsonl")) continue;
+        const path = join(dirPath, e.name);
+        let size;
+        try {
+          size = statSync(path).size;
+        } catch {
+          continue; // sumiu entre readdir e stat
+        }
+        out.push({ path, sessionId: e.name.slice(0, -".jsonl".length), size });
+      }
+    }
+  }
+  out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return out;
+}
+
+/**
+ * Inicio da linha que contem `offset` (recuo maximo `lookback`).
+ *
+ * O offset salvo e o FIM da ultima janela enviada e cai no meio de uma linha
+ * quando a janela foi cortada pelo cap. Comecar a proxima janela ali entregaria
+ * um fragmento de JSON que o parser do daemon descarta — o turno se perderia.
+ * Recuando para a fronteira de linha, o pedaco ja enviado volta junto e o
+ * dedupe absorve o overlap.
+ *
+ * O recuo e LIMITADO por construcao: com `lookback <= maxRequestBytes/2` cada
+ * ciclo avanca pelo menos metade da janela, entao nem uma linha maior que a
+ * janela prende o arquivo em reenvio eterno. Sem `\n` na janela de lookback (ou
+ * erro de I/O) nao recua — perder a linha da borda e melhor que travar.
+ */
+export function alignToLineStart(path, offset, lookback = TRANSCRIPT_ALIGN_LOOKBACK) {
+  if (!offset || offset <= 0) return 0;
+  const start = Math.max(0, offset - lookback);
+  const len = offset - start;
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    const buf = Buffer.alloc(len);
+    const read = readSync(fd, buf, 0, len, start);
+    const idx = buf.subarray(0, read).lastIndexOf(0x0a); // \n
+    if (idx === -1) return start === 0 ? 0 : offset;
+    return start + idx + 1;
+  } catch {
+    return offset;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* fd ja fechado */
+      }
+    }
+  }
+}
+
+/**
+ * Janelas a enviar neste ciclo: no maximo UMA por arquivo (arquivo maior que o
+ * cap continua no proximo ciclo), respeitando o teto por request e o teto do
+ * ciclo. `state` e `{ "<path-absoluto>": bytesEnviados }`.
+ *
+ * `size < offset` (arquivo truncado/rotacionado) reseta para 0 — o dedupe
+ * impede duplicata do que ja foi capturado.
+ *
+ * Retorna `[{ path, sessionId, from, to }]`.
+ */
+export function planTranscriptUploads(files, state = {}, caps = {}) {
+  const maxReq = caps.maxRequestBytes ?? TRANSCRIPT_MAX_REQUEST_BYTES;
+  const maxCycle = caps.maxCycleBytes ?? TRANSCRIPT_MAX_CYCLE_BYTES;
+  const lookback = Math.max(1, Math.min(TRANSCRIPT_ALIGN_LOOKBACK, Math.floor(maxReq / 2)));
+  const out = [];
+  let budget = maxCycle;
+  for (const f of files || []) {
+    if (budget <= 0) break;
+    const size = Number(f.size) || 0;
+    const saved = Number(state?.[f.path]);
+    let from = Number.isFinite(saved) && saved > 0 ? saved : 0;
+    if (from > size) from = 0; // truncado/rotacionado
+    if (from >= size) continue; // nada novo
+    if (from > 0) from = alignToLineStart(f.path, from, lookback);
+    const span = Math.min(maxReq, budget, size - from);
+    if (span <= 0) continue;
+    out.push({ path: f.path, sessionId: f.sessionId, from, to: from + span });
+    budget -= span;
+  }
+  return out;
+}
+
+function readTranscriptState(casesBase) {
+  const p = join(casesBase, TRANSCRIPT_STATE_FILE);
+  if (!existsSync(p)) return {};
+  try {
+    const st = JSON.parse(readFileSync(p, "utf-8"));
+    return st && typeof st === "object" ? st : {};
+  } catch {
+    return {}; // estado corrompido: reenvia (dedupe absorve), nao derruba o ciclo
+  }
+}
+
+function writeTranscriptState(casesBase, state) {
+  const path = join(casesBase, TRANSCRIPT_STATE_FILE);
+  const tmp = `${path}.sync-tmp`;
+  writeFileSync(tmp, JSON.stringify(state), "utf-8");
+  renameSync(tmp, path);
+}
+
+/** Le `[from, to)` do arquivo. Retorna `{ text, bytes }` (bytes REALMENTE lidos). */
+function readTranscriptSlice(path, from, to) {
+  const len = Math.max(0, to - from);
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    const buf = Buffer.alloc(len);
+    const bytes = readSync(fd, buf, 0, len, from);
+    // Corte em `to` pode partir um caractere multibyte: a linha da borda ja e
+    // fragmento e o parser do daemon a descarta de qualquer forma.
+    return { text: buf.subarray(0, bytes).toString("utf-8"), bytes };
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* fd ja fechado */
+      }
+    }
+  }
+}
+
+/**
+ * `POST /api/ingest-transcript`. Nao lanca em resposta nao-ok: devolve
+ * `{ ok, status, json, text }` para o chamador decidir. O 413 do axum vem em
+ * TEXTO (nao JSON) — por isso o parse e tolerante.
+ */
+export async function postTranscript(url, body) {
+  const res = await requestWithAuth((authHeaders) =>
+    fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(TRANSCRIPT_TIMEOUT_MS),
+    }),
+  );
+  const text = await res.text().catch(() => "");
+  let json = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    /* resposta nao-JSON (413 do axum) */
+  }
+  return { ok: res.ok, status: res.status, json, text };
+}
+
+/**
+ * Sobe os deltas de transcript das sessoes de caso para o legal-cogmem.
+ * NUNCA lanca: toda falha loga em `.sync.log` e o ciclo segue. `deps` injeta
+ * rede/credencial/raizes nos testes.
+ */
+export async function syncTranscripts(memApiBase, casesBase, deps = {}) {
+  const doPost = deps.postTranscript || postTranscript;
+  const readCred = deps.readCredential || readCredential;
+  const roots = deps.roots || transcriptRoots(homedir(), process.platform);
+
+  // O ingest e ESCRITA: o daemon responde 401 sem claims mesmo com
+  // REQUIRE_BEARER=false. Sem credencial nao ha o que tentar — 1 log e skip.
+  let cred = null;
+  try {
+    cred = readCred();
+  } catch {
+    cred = null;
+  }
+  if (!cred || !cred.access_jwt) {
+    appendLog(casesBase, "transcripts: sem credencial -> skip (rode o login do plugin)");
+    return;
+  }
+
+  let state = readTranscriptState(casesBase);
+  let files = [];
+  try {
+    files = listTranscriptFiles(roots);
+  } catch (err) {
+    appendLog(casesBase, `transcripts: erro listando transcripts: ${err.message}`);
+    return;
+  }
+
+  const elegiveis = [];
+  for (const f of files) {
+    if (!isValidSessionId(f.sessionId)) {
+      appendLog(casesBase, `transcripts: session_id invalido (${f.sessionId}) -> skip`);
+      continue;
+    }
+    elegiveis.push(f);
+  }
+
+  let plan = [];
+  try {
+    plan = planTranscriptUploads(elegiveis, state, deps.caps);
+  } catch (err) {
+    appendLog(casesBase, `transcripts: erro planejando: ${err.message}`);
+    return;
+  }
+  if (plan.length === 0) return; // nada novo: ciclo silencioso
+
+  const url = `${memApiBase}/ingest-transcript`;
+  let janelas = 0;
+  let capturados = 0;
+  let falhas = 0;
+
+  for (const w of plan) {
+    let slice;
+    try {
+      slice = readTranscriptSlice(w.path, w.from, w.to);
+    } catch (err) {
+      appendLog(casesBase, `transcripts: erro lendo ${w.sessionId}: ${err.message}`);
+      falhas++;
+      continue;
+    }
+    // Janela so com espaco em branco: o daemon devolveria 400 "jsonl vazio" e o
+    // arquivo travaria. Nao ha turno a perder — avanca o offset e segue.
+    if (!slice.text.trim()) {
+      state = { ...state, [w.path]: w.from + slice.bytes };
+      try {
+        writeTranscriptState(casesBase, state);
+      } catch (err) {
+        appendLog(casesBase, `transcripts: erro gravando estado: ${err.message}`);
+      }
+      continue;
+    }
+
+    let res;
+    try {
+      res = await doPost(url, { session_id: w.sessionId, jsonl: slice.text });
+    } catch (err) {
+      appendLog(casesBase, `transcripts: erro no POST ${w.sessionId}: ${err.message}`);
+      falhas++;
+      continue;
+    }
+    if (!res || !res.ok) {
+      const detalhe = String(res?.json?.error ?? res?.text ?? "sem resposta").slice(0, 200);
+      appendLog(casesBase, `transcripts: HTTP ${res?.status ?? "?"} em ${w.sessionId}: ${detalhe}`);
+      falhas++;
+      continue; // NAO avanca o offset: o proximo ciclo reenvia (dedupe absorve)
+    }
+
+    // 2xx (inclusive `skipped:true`, sessao fora de caso): o delta esta
+    // resolvido do lado do servidor -> avanca e PERSISTE imediatamente.
+    state = { ...state, [w.path]: w.from + slice.bytes };
+    try {
+      writeTranscriptState(casesBase, state);
+    } catch (err) {
+      appendLog(casesBase, `transcripts: erro gravando estado: ${err.message}`);
+    }
+    janelas++;
+    capturados += Number(res.json?.captured) || 0;
+  }
+
+  appendLog(
+    casesBase,
+    `transcripts: ok janelas=${janelas} capturados=${capturados}` + (falhas ? ` falhas=${falhas}` : ""),
+  );
+}
+
 async function main() {
   const apiBase = process.env.CASE_KNOWLEDGE_API_BASE || defaultApiBase();
   const casesBase = process.env.CASE_KNOWLEDGE_CASES_BASE || defaultCasesBase();
@@ -1522,6 +1871,17 @@ async function main() {
     await syncMemoria(apiBase, casesBase, selfAuthor);
   } catch (err) {
     appendLog(casesBase, `memoria: erro inesperado: ${err.message}`);
+  }
+
+  // CMR-135: sobe os transcripts de sessao de caso desta maquina para o
+  // legal-cogmem (o watcher do daemon so ve os JSONLs da VM). Estado e log
+  // PROPRIOS (.transcripts-state.json); nunca toca os estados vizinhos.
+  // syncTranscripts nunca lanca; o try/catch e ultima linha de defesa.
+  try {
+    const memApiBase = process.env.LEGAL_COGMEM_API_BASE || defaultMemApiBase();
+    await syncTranscripts(memApiBase, casesBase);
+  } catch (err) {
+    appendLog(casesBase, `transcripts: erro inesperado: ${err.message}`);
   }
 }
 

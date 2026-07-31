@@ -6,8 +6,26 @@
 
 import { requestWithAuth } from "./auth.mjs";
 
+/**
+ * Base default do legal-cogmem por PLATAFORMA (CMR-135 Task 6b).
+ *
+ * Windows (maquina cliente, fora da tailnet) -> URL PUBLICA
+ * `https://cogmem.aidvlabs.com/api` (tunnel Cloudflare fail-closed, so
+ * /api/context, /api/search, /api/ingest-transcript e /api/health passam).
+ * Unix (VM) -> tailnet/loopback direto, sem sair pela borda.
+ *
+ * `LEGAL_COGMEM_API_BASE` e SOBERANA em qualquer plataforma.
+ *
+ * Duplicada de proposito em hooks/memoria-context.mjs: o hook nao pode
+ * importar a tool (mudou aqui, mudar la).
+ */
+export function defaultMemApiBase(platform = process.platform) {
+  if (platform === "win32") return "https://cogmem.aidvlabs.com/api";
+  return "http://100.123.73.128:3940/api";
+}
+
 export const MEM_API_BASE =
-  process.env.LEGAL_COGMEM_API_BASE || "http://100.123.73.128:3940/api";
+  process.env.LEGAL_COGMEM_API_BASE || defaultMemApiBase();
 
 export function formatMemoriaResults(chunks) {
   if (!chunks || chunks.length === 0) {

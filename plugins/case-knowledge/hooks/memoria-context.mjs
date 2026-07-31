@@ -16,8 +16,23 @@ import { pathToFileURL } from "node:url";
 
 import { readCredential } from "../auth.mjs";
 
+/**
+ * Base default do legal-cogmem por PLATAFORMA (CMR-135 Task 6b).
+ *
+ * Windows (maquina cliente, fora da tailnet) -> URL PUBLICA
+ * `https://cogmem.aidvlabs.com/api`; Unix (VM) -> tailnet direto.
+ * `LEGAL_COGMEM_API_BASE` e SOBERANA em qualquer plataforma.
+ *
+ * Duplicada de proposito (mesma funcao em memoria.mjs): o hook e processo
+ * proprio e nao importa a tool. Mudou aqui, mudar la.
+ */
+export function defaultMemApiBase(platform = process.platform) {
+  if (platform === "win32") return "https://cogmem.aidvlabs.com/api";
+  return "http://100.123.73.128:3940/api";
+}
+
 const MEM_API_BASE =
-  process.env.LEGAL_COGMEM_API_BASE || "http://100.123.73.128:3940/api";
+  process.env.LEGAL_COGMEM_API_BASE || defaultMemApiBase();
 const FETCH_TIMEOUT_MS = 2500;
 const MIN_PROMPT_LENGTH = 15;
 const DISPLAY_MAX_CHARS = 1500; // truncamento de EXIBICAO (storage e integral)

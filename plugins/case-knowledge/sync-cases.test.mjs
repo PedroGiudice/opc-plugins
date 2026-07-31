@@ -24,6 +24,15 @@ import {
   provisionCaseSettings,
   migrateAuthorDirs,
   updateAutoMemoryDirIfAliased,
+  transcriptRoots,
+  isCaseTranscriptDir,
+  isValidSessionId,
+  listTranscriptFiles,
+  alignToLineStart,
+  planTranscriptUploads,
+  syncTranscripts,
+  TRANSCRIPT_MAX_REQUEST_BYTES,
+  TRANSCRIPT_MAX_CYCLE_BYTES,
 } from "./sync-cases.mjs";
 import { existsSync, readFileSync, statSync, readdirSync } from "node:fs";
 
@@ -1624,4 +1633,365 @@ test("migrateAuthorDirs: dir antigo 100% duplicado some por completo (2a rodada 
     assert.deepEqual(second.renames, []);
     assert.equal(second.changed, false);
   });
+});
+
+// ---------- CMR-135 Task 9: uploader de transcripts ----------
+
+test("transcriptRoots: <home>/.claude/projects nas duas plataformas", () => {
+  assert.deepEqual(transcriptRoots("C:\\Users\\pedro", "win32"), [
+    join("C:\\Users\\pedro", ".claude", "projects"),
+  ]);
+  assert.deepEqual(transcriptRoots("/home/opc", "linux"), [
+    join("/home/opc", ".claude", "projects"),
+  ]);
+});
+
+test("isCaseTranscriptDir: so dir de projeto SOB cases sobe (minimizacao)", () => {
+  // encoding do Claude Code: separadores viram `-`
+  assert.equal(isCaseTranscriptDir("-home-opc-case-docs-cases-bianka-salesforce"), true);
+  assert.equal(isCaseTranscriptDir("C--Users-pedro-cases-novartis"), true);
+  // sessoes pessoais/dev NUNCA sobem
+  assert.equal(isCaseTranscriptDir("-home-opc-legal-cogmem"), false);
+  assert.equal(isCaseTranscriptDir("-home-opc-case-docs"), false);
+  assert.equal(isCaseTranscriptDir("C--Users-pedro-dev-app"), false);
+  // `cases` como sufixo/prefixo sem delimitador nao conta
+  assert.equal(isCaseTranscriptDir("-home-opc-meus-cases"), false);
+  assert.equal(isCaseTranscriptDir(""), false);
+});
+
+test("isValidSessionId: alfabeto fechado do servidor", () => {
+  assert.equal(isValidSessionId("2155ea8d-2969-432a-8993-3bcbb595fcc7"), true);
+  assert.equal(isValidSessionId("a.b_c-1"), true);
+  assert.equal(isValidSessionId(""), false);
+  assert.equal(isValidSessionId("com espaco"), false);
+  assert.equal(isValidSessionId("../evil"), false);
+  assert.equal(isValidSessionId("x".repeat(129)), false);
+  assert.equal(isValidSessionId(null), false);
+});
+
+/** Cria <root>/<dir>/<sessao>.jsonl com `linhas` (uma por turno) e devolve o path. */
+function seedTranscript(root, dir, sessao, linhas) {
+  const d = join(root, dir);
+  mkdirSync(d, { recursive: true });
+  const p = join(d, `${sessao}.jsonl`);
+  writeFileSync(p, linhas.join("\n") + "\n");
+  return p;
+}
+
+test("listTranscriptFiles: so .jsonl de dirs -cases-; sessionId = basename; root ausente -> []", () => {
+  const root = mkdtempSync(join(tmpdir(), "cmr135-list-"));
+  try {
+    seedTranscript(root, "-home-opc-case-docs-cases-alpha", "sess-1", ['{"a":1}']);
+    seedTranscript(root, "-home-opc-legal-cogmem", "sess-dev", ['{"a":1}']);
+    writeFileSync(join(root, "-home-opc-case-docs-cases-alpha", "nota.txt"), "x");
+
+    const files = listTranscriptFiles([root, join(root, "nao-existe")]);
+    assert.equal(files.length, 1);
+    assert.equal(files[0].sessionId, "sess-1");
+    assert.ok(files[0].path.endsWith("sess-1.jsonl"));
+    assert.equal(files[0].size, Buffer.byteLength('{"a":1}\n'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("alignToLineStart: recua ate o inicio da linha do offset; offset ja alinhado nao move", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cmr135-align-"));
+  try {
+    const p = join(dir, "t.jsonl");
+    writeFileSync(p, "aaaa\nbbbb\ncccc\n"); // \n em 4, 9, 14
+    assert.equal(alignToLineStart(p, 0), 0);
+    assert.equal(alignToLineStart(p, 5), 5); // ja e inicio de linha
+    assert.equal(alignToLineStart(p, 7), 5); // meio de "bbbb" -> volta pro inicio
+    assert.equal(alignToLineStart(p, 12), 10);
+    assert.equal(alignToLineStart(p, 3), 0); // primeira linha
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("alignToLineStart: lookback limita o recuo (garante progresso)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cmr135-align2-"));
+  try {
+    const p = join(dir, "t.jsonl");
+    writeFileSync(p, "x".repeat(500) + "\n"); // 1 linha gigante, sem \n antes
+    // lookback 10: nao acha \n na janela e NAO recua (progresso garantido)
+    assert.equal(alignToLineStart(p, 400, 10), 400);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("planTranscriptUploads: arquivo novo sobe inteiro; ja sincronizado nao entra", () => {
+  const root = mkdtempSync(join(tmpdir(), "cmr135-plan-"));
+  try {
+    const p = seedTranscript(root, "-x-cases-a", "s1", ['{"n":1}', '{"n":2}']);
+    const size = statSync(p).size;
+    const novo = planTranscriptUploads([{ path: p, sessionId: "s1", size }], {});
+    assert.deepEqual(novo, [{ path: p, sessionId: "s1", from: 0, to: size }]);
+    assert.deepEqual(planTranscriptUploads([{ path: p, sessionId: "s1", size }], { [p]: size }), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("planTranscriptUploads: delta alinhado a linha (overlap absorvido pelo dedupe)", () => {
+  const root = mkdtempSync(join(tmpdir(), "cmr135-plan2-"));
+  try {
+    const p = seedTranscript(root, "-x-cases-a", "s1", ["aaaa", "bbbb", "cccc"]);
+    const size = statSync(p).size; // 15
+    // offset salvo no MEIO de "bbbb" (7) -> recua pro inicio da linha (5)
+    const plan = planTranscriptUploads([{ path: p, sessionId: "s1", size }], { [p]: 7 });
+    assert.deepEqual(plan, [{ path: p, sessionId: "s1", from: 5, to: size }]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("planTranscriptUploads: truncamento (size < offset) reseta from=0", () => {
+  const root = mkdtempSync(join(tmpdir(), "cmr135-plan3-"));
+  try {
+    const p = seedTranscript(root, "-x-cases-a", "s1", ["aaaa"]);
+    const size = statSync(p).size; // 5
+    const plan = planTranscriptUploads([{ path: p, sessionId: "s1", size }], { [p]: 99999 });
+    assert.deepEqual(plan, [{ path: p, sessionId: "s1", from: 0, to: size }]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("planTranscriptUploads: arquivo maior que o cap -> janela por ciclo, continua no proximo", () => {
+  const root = mkdtempSync(join(tmpdir(), "cmr135-plan4-"));
+  try {
+    // 10 linhas de 10 bytes ("012345678\n") = 100 bytes
+    const p = seedTranscript(root, "-x-cases-a", "s1", Array.from({ length: 10 }, () => "012345678"));
+    const size = statSync(p).size; // 100
+    const caps = { maxRequestBytes: 40, maxCycleBytes: 1000 };
+    const file = { path: p, sessionId: "s1", size };
+
+    const c1 = planTranscriptUploads([file], {}, caps);
+    assert.deepEqual(c1, [{ path: p, sessionId: "s1", from: 0, to: 40 }]);
+    // ciclo 2 continua do offset salvo, alinhando a linha (40 ja e inicio de linha)
+    const c2 = planTranscriptUploads([file], { [p]: 40 }, caps);
+    assert.deepEqual(c2, [{ path: p, sessionId: "s1", from: 40, to: 80 }]);
+    const c3 = planTranscriptUploads([file], { [p]: 80 }, caps);
+    assert.deepEqual(c3, [{ path: p, sessionId: "s1", from: 80, to: 100 }]);
+    assert.deepEqual(planTranscriptUploads([file], { [p]: 100 }, caps), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("planTranscriptUploads: cap de ciclo corta o total enviado (resto no proximo ciclo)", () => {
+  const root = mkdtempSync(join(tmpdir(), "cmr135-plan5-"));
+  try {
+    const linhas = Array.from({ length: 10 }, () => "012345678"); // 100 bytes
+    const a = seedTranscript(root, "-x-cases-a", "s1", linhas);
+    const b = seedTranscript(root, "-x-cases-b", "s2", linhas);
+    const c = seedTranscript(root, "-x-cases-c", "s3", linhas);
+    const files = [
+      { path: a, sessionId: "s1", size: 100 },
+      { path: b, sessionId: "s2", size: 100 },
+      { path: c, sessionId: "s3", size: 100 },
+    ];
+    const plan = planTranscriptUploads(files, {}, { maxRequestBytes: 40, maxCycleBytes: 90 });
+    // 40 + 40 = 80; sobra 10 para o terceiro
+    assert.deepEqual(plan.map((w) => [w.sessionId, w.from, w.to]), [
+      ["s1", 0, 40],
+      ["s2", 0, 40],
+      ["s3", 0, 10],
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("caps default do uploader: 3 MiB por request, 12 MiB por ciclo", () => {
+  assert.equal(TRANSCRIPT_MAX_REQUEST_BYTES, 3 * 1024 * 1024);
+  assert.equal(TRANSCRIPT_MAX_CYCLE_BYTES, 12 * 1024 * 1024);
+});
+
+// --- wiring ---
+
+/** deps padrao de syncTranscripts com postFn colecionavel. */
+function fakeUploader(postImpl) {
+  const posts = [];
+  return {
+    posts,
+    deps: {
+      readCredential: () => ({ access_jwt: "jwt-fake" }),
+      postTranscript: async (url, body) => {
+        posts.push({ url, body });
+        return postImpl ? postImpl(posts.length, body) : { ok: true, status: 200, json: { status: "ok", captured: 1, total_turns: 1, skipped: false } };
+      },
+    },
+  };
+}
+
+test("syncTranscripts: 2xx -> POST com session_id+jsonl, offset persistido, estados vizinhos intocados", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr135-w1-"));
+  const home = mkdtempSync(join(tmpdir(), "cmr135-h1-"));
+  try {
+    writeFileSync(join(base, ".sync-state.json"), '{"SENTINELA":true}');
+    writeFileSync(join(base, ".memoria-state.json"), '{"SENTINELA":true}');
+    const root = join(home, ".claude", "projects");
+    const p = seedTranscript(root, "-x-cases-alpha", "sess-1", ['{"type":"user","cwd":"/x/cases/alpha"}']);
+    const size = statSync(p).size;
+
+    const { deps, posts } = fakeUploader();
+    await syncTranscripts("http://t/api", base, { ...deps, roots: [root] });
+
+    assert.equal(posts.length, 1);
+    assert.ok(posts[0].url.endsWith("/ingest-transcript"));
+    assert.equal(posts[0].body.session_id, "sess-1");
+    assert.ok(posts[0].body.jsonl.includes('"cwd":"/x/cases/alpha"'));
+
+    const st = JSON.parse(readFileSync(join(base, ".transcripts-state.json"), "utf-8"));
+    assert.equal(st[p], size);
+    assert.equal(readFileSync(join(base, ".sync-state.json"), "utf-8"), '{"SENTINELA":true}');
+    assert.equal(readFileSync(join(base, ".memoria-state.json"), "utf-8"), '{"SENTINELA":true}');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("syncTranscripts: 500 (captura parcial) NAO avanca o offset", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr135-w2-"));
+  const home = mkdtempSync(join(tmpdir(), "cmr135-h2-"));
+  try {
+    const root = join(home, ".claude", "projects");
+    seedTranscript(root, "-x-cases-alpha", "sess-1", ['{"type":"user","cwd":"/x/cases/alpha"}']);
+
+    const { deps, posts } = fakeUploader(() => ({
+      ok: false,
+      status: 500,
+      json: { error: "captura parcial: 3 falhas" },
+      text: '{"error":"captura parcial: 3 falhas"}',
+    }));
+    await syncTranscripts("http://t/api", base, { ...deps, roots: [root] });
+
+    assert.equal(posts.length, 1);
+    assert.ok(!existsSync(join(base, ".transcripts-state.json")), "offset nao pode avancar em 500");
+    assert.match(readFileSync(join(base, ".sync.log"), "utf-8"), /transcripts: HTTP 500/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("syncTranscripts: 413 em TEXTO (nao-JSON) e tratado como falha, sem crash", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr135-w3-"));
+  const home = mkdtempSync(join(tmpdir(), "cmr135-h3-"));
+  try {
+    const root = join(home, ".claude", "projects");
+    seedTranscript(root, "-x-cases-alpha", "sess-1", ['{"type":"user","cwd":"/x/cases/alpha"}']);
+    const { deps } = fakeUploader(() => ({ ok: false, status: 413, json: null, text: "length limit exceeded" }));
+    await syncTranscripts("http://t/api", base, { ...deps, roots: [root] });
+    assert.ok(!existsSync(join(base, ".transcripts-state.json")));
+    assert.match(readFileSync(join(base, ".sync.log"), "utf-8"), /transcripts: HTTP 413/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("syncTranscripts: kill no meio do ciclo preserva o que ja foi postado", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr135-w4-"));
+  const home = mkdtempSync(join(tmpdir(), "cmr135-h4-"));
+  try {
+    const root = join(home, ".claude", "projects");
+    const a = seedTranscript(root, "-x-cases-alpha", "sess-a", ['{"type":"user","cwd":"/x/cases/alpha"}']);
+    const b = seedTranscript(root, "-x-cases-beta", "sess-b", ['{"type":"user","cwd":"/x/cases/beta"}']);
+
+    // 1o POST ok; 2o simula o kill do scheduler (5 min de ExecutionTimeLimit)
+    const { deps } = fakeUploader((n) => {
+      if (n === 1) return { ok: true, status: 200, json: { status: "ok", captured: 1, total_turns: 1 } };
+      throw new Error("processo morto no meio do ciclo");
+    });
+    await syncTranscripts("http://t/api", base, { ...deps, roots: [root] });
+
+    const st = JSON.parse(readFileSync(join(base, ".transcripts-state.json"), "utf-8"));
+    const [primeiro, segundo] = [a, b].sort();
+    assert.equal(st[primeiro], statSync(primeiro).size, "o arquivo ja postado tem offset persistido");
+    assert.ok(!(segundo in st), "o arquivo interrompido nao avanca");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("syncTranscripts: sem credencial -> 1 log e skip (nenhum POST)", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr135-w5-"));
+  const home = mkdtempSync(join(tmpdir(), "cmr135-h5-"));
+  try {
+    const root = join(home, ".claude", "projects");
+    seedTranscript(root, "-x-cases-alpha", "sess-1", ['{"type":"user","cwd":"/x/cases/alpha"}']);
+    const posts = [];
+    await syncTranscripts("http://t/api", base, {
+      roots: [root],
+      readCredential: () => null,
+      postTranscript: async (url, body) => { posts.push({ url, body }); return { ok: true, status: 200, json: {} }; },
+    });
+    assert.equal(posts.length, 0);
+    const log = readFileSync(join(base, ".sync.log"), "utf-8");
+    assert.match(log, /transcripts: sem credencial/);
+    assert.equal(log.trim().split("\n").length, 1, "exatamente 1 linha de log");
+    assert.ok(!existsSync(join(base, ".transcripts-state.json")));
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("syncTranscripts: session_id invalido e pulado com log (nunca vira POST)", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr135-w6-"));
+  const home = mkdtempSync(join(tmpdir(), "cmr135-h6-"));
+  try {
+    const root = join(home, ".claude", "projects");
+    seedTranscript(root, "-x-cases-alpha", "sess com espaco", ['{"type":"user","cwd":"/x/cases/alpha"}']);
+    seedTranscript(root, "-x-cases-alpha", "sess-ok", ['{"type":"user","cwd":"/x/cases/alpha"}']);
+    const { deps, posts } = fakeUploader();
+    await syncTranscripts("http://t/api", base, { ...deps, roots: [root] });
+    assert.deepEqual(posts.map((p) => p.body.session_id), ["sess-ok"]);
+    assert.match(readFileSync(join(base, ".sync.log"), "utf-8"), /session_id invalido/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("syncTranscripts: 200 skipped (sessao fora de caso) avanca o offset sem re-enviar", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr135-w7-"));
+  const home = mkdtempSync(join(tmpdir(), "cmr135-h7-"));
+  try {
+    const root = join(home, ".claude", "projects");
+    const p = seedTranscript(root, "-x-cases-alpha", "sess-1", ['{"type":"assistant","message":{}}']);
+    const { deps, posts } = fakeUploader(() => ({
+      ok: true, status: 200, json: { status: "ok", captured: 0, total_turns: 0, skipped: true },
+    }));
+    await syncTranscripts("http://t/api", base, { ...deps, roots: [root] });
+    assert.equal(posts.length, 1);
+    const st = JSON.parse(readFileSync(join(base, ".transcripts-state.json"), "utf-8"));
+    assert.equal(st[p], statSync(p).size);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("syncTranscripts: nada novo -> nenhum POST e nenhuma escrita de estado", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr135-w8-"));
+  const home = mkdtempSync(join(tmpdir(), "cmr135-h8-"));
+  try {
+    const root = join(home, ".claude", "projects");
+    const p = seedTranscript(root, "-x-cases-alpha", "sess-1", ['{"type":"user","cwd":"/x/cases/alpha"}']);
+    writeFileSync(join(base, ".transcripts-state.json"), JSON.stringify({ [p]: statSync(p).size }));
+    const { deps, posts } = fakeUploader();
+    await syncTranscripts("http://t/api", base, { ...deps, roots: [root] });
+    assert.equal(posts.length, 0);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
 });

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import os from "node:os";
-import { memoriaSearch, formatMemoriaResults } from "./memoria.mjs";
+import { memoriaSearch, formatMemoriaResults, defaultMemApiBase } from "./memoria.mjs";
 
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
 const makeJwt = (exp) =>
@@ -108,4 +108,16 @@ test("memoriaSearch: sem credencial -> sem Authorization e sem crash", async (t)
   assert.equal(captured.headers.Authorization, undefined);
   assert.equal(captured.headers["Content-Type"], "application/json");
   assert.ok(out.includes("c"));
+});
+
+// --- CMR-135 Task 6b: default por plataforma ---
+
+test("defaultMemApiBase: win32 -> URL publica; unix -> tailnet", () => {
+  assert.equal(defaultMemApiBase("win32"), "https://cogmem.aidvlabs.com/api");
+  assert.equal(defaultMemApiBase("linux"), "http://100.123.73.128:3940/api");
+  assert.equal(defaultMemApiBase("darwin"), "http://100.123.73.128:3940/api");
+});
+
+test("defaultMemApiBase: sem argumento usa a plataforma do processo", () => {
+  assert.equal(defaultMemApiBase(), defaultMemApiBase(process.platform));
 });
