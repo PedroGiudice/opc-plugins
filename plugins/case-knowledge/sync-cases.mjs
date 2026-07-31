@@ -1616,8 +1616,10 @@ export function alignToLineStart(path, offset, lookback = TRANSCRIPT_ALIGN_LOOKB
  *
  * DIRETORIO com recusa deterministica registrada (`__blocked`) fica inteiro de
  * fora ate o TTL expirar — sem rede, sem leitura de disco. Expirado o TTL,
- * exatamente UM arquivo do dir entra como SONDA (se o servidor mudou de ideia,
- * o proximo ciclo destrava o dir todo).
+ * exatamente UMA JANELA do dir entra como SONDA (se o servidor mudou de ideia,
+ * o proximo ciclo destrava o dir todo). A sonda so e consumida quando ha janela
+ * REAL: arquivo sem delta (ou sem span) nao a queima — senao um dir cujo
+ * primeiro `.jsonl` esta em dia ficaria bloqueado para sempre, em silencio.
  *
  * Retorna `[{ path, sessionId, from, to }]`.
  */
@@ -1636,7 +1638,6 @@ export function planTranscriptUploads(files, state = {}, caps = {}, now = Date.n
     if (b) {
       if (now - b.ts <= TRANSCRIPT_BLOCK_TTL_MS) continue; // dentro do TTL: nem tenta
       if (sondados.has(dir)) continue; // ja mandou a sonda deste dir neste ciclo
-      sondados.add(dir);
     }
     const size = Number(f.size) || 0;
     const saved = Number(state?.[f.path]);
@@ -1646,6 +1647,7 @@ export function planTranscriptUploads(files, state = {}, caps = {}, now = Date.n
     if (from > 0) from = alignToLineStart(f.path, from, lookback);
     const span = Math.min(maxReq, budget, size - from);
     if (span <= 0) continue;
+    if (b) sondados.add(dir); // sonda consumida so aqui: ha janela real para provar o dir
     out.push({ path: f.path, sessionId: f.sessionId, from, to: from + span });
     budget -= span;
   }

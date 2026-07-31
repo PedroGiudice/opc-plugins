@@ -2068,6 +2068,30 @@ test("planTranscriptUploads: TTL expirado libera UMA sonda por dir", () => {
   }
 });
 
+test("planTranscriptUploads: arquivo sem delta NAO queima a sonda do dir bloqueado", () => {
+  const root = mkdtempSync(join(tmpdir(), "cmr135-blk3-"));
+  try {
+    // `a` vem primeiro na ordem de path e esta em dia (offset == size): se ele
+    // gastasse a sonda, o dir nunca mais seria provado — bloqueio permanente.
+    const a = seedTranscript(root, "-x-cases-ruim", "s1", ['{"n":1}']);
+    const b = seedTranscript(root, "-x-cases-ruim", "s2", ['{"n":2}']);
+    const files = [
+      { path: a, sessionId: "s1", size: statSync(a).size },
+      { path: b, sessionId: "s2", size: statSync(b).size },
+    ];
+    const agora = 1_000_000_000;
+    const seisHorasEUm = 6 * 60 * 60 * 1000 + 1;
+    const state = {
+      [a]: statSync(a).size, // sem delta
+      __blocked: { "-x-cases-ruim": { ts: agora - seisHorasEUm, status: 400 } },
+    };
+    const plan = planTranscriptUploads(files, state, {}, agora);
+    assert.deepEqual(plan.map((w) => w.sessionId), ["s2"], "a sonda vai para o 2o arquivo, que tem delta");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("syncTranscripts: 400 bloqueia o DIR (1 request para 2 arquivos) e o ciclo seguinte nao tenta", async () => {
   const base = mkdtempSync(join(tmpdir(), "cmr135-w9-"));
   const home = mkdtempSync(join(tmpdir(), "cmr135-h9-"));
