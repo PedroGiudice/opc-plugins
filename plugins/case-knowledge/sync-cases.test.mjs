@@ -1590,3 +1590,38 @@ test("syncMemoria: manifest indisponivel -> nenhuma migracao (sem aliases nao ha
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+test("migrateAuthorDirs: duplicata byte-identica no destino e removida da origem (janela do rename do server)", () => {
+  withCasesBase((base) => {
+    // Estado real pos-rename no server: o client baixou o dir novo como "peer"
+    // e o dir antigo ficou com copia IDENTICA do mesmo arquivo.
+    seedMem(base, "caso-a", "1", { "nota.md": "mesmo conteudo", "divergente.md": "versao A" });
+    seedMem(base, "caso-a", "pedro-giudice", { "nota.md": "mesmo conteudo", "divergente.md": "versao B" });
+
+    const out = migrateAuthorDirs(base, { 1: "pedro-giudice" }, {});
+
+    const novo = join(base, "caso-a", ".memoria", "pedro-giudice");
+    const velho = join(base, "caso-a", ".memoria", "1");
+    // destino intocado nos dois casos
+    assert.equal(readFileSync(join(novo, "nota.md"), "utf-8"), "mesmo conteudo");
+    assert.equal(readFileSync(join(novo, "divergente.md"), "utf-8"), "versao B");
+    // identico sumiu da origem; divergente permanece (conflito real)
+    assert.deepEqual(readdirSync(velho), ["divergente.md"]);
+    assert.deepEqual(out.conflicts, [
+      { case: "caso-a", from: "1", to: "pedro-giudice", file: "divergente.md" },
+    ]);
+  });
+});
+
+test("migrateAuthorDirs: dir antigo 100% duplicado some por completo (2a rodada no-op)", () => {
+  withCasesBase((base) => {
+    seedMem(base, "caso-a", "1", { "nota.md": "igual", "outra.md": "igual2" });
+    seedMem(base, "caso-a", "pedro-giudice", { "nota.md": "igual", "outra.md": "igual2" });
+    const first = migrateAuthorDirs(base, { 1: "pedro-giudice" }, {});
+    assert.equal(existsSync(join(base, "caso-a", ".memoria", "1")), false);
+    assert.deepEqual(first.conflicts, []);
+    const second = migrateAuthorDirs(base, { 1: "pedro-giudice" }, first.baseline);
+    assert.deepEqual(second.renames, []);
+    assert.equal(second.changed, false);
+  });
+});

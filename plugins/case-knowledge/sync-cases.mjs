@@ -15,7 +15,7 @@
 import { createHash } from "node:crypto";
 import {
   existsSync, mkdirSync, readdirSync, readFileSync,
-  writeFileSync, renameSync, appendFileSync, copyFileSync, rmdirSync,
+  writeFileSync, renameSync, appendFileSync, copyFileSync, rmdirSync, unlinkSync,
 } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -1050,10 +1050,12 @@ export function updateAutoMemoryDirIfAliased(settingsPath, oldDir, newDir) {
  *
  *  (a) DISCO: para cada (oldDir -> newDir) com `<caso>/.memoria/<oldDir>` (ou
  *      `.feedback/<oldDir>`) presente: rename quando o destino nao existe; senao
- *      MERGE CONSERVADOR — move so os arquivos ausentes no destino, conflito
- *      PRESERVA o destino e mantem o arquivo no dir velho (reportado em
- *      `conflicts`). Nunca sobrescreve, nunca deleta conteudo; o dir velho so e
- *      removido quando fica vazio.
+ *      MERGE CONSERVADOR — move os arquivos ausentes no destino; duplicata
+ *      byte-identica (md5 igual, estado tipico da janela do rename no server) e
+ *      removida da origem porque o conteudo ja esta intacto no destino; e
+ *      divergencia real PRESERVA o destino e mantem o arquivo no dir velho
+ *      (reportada em `conflicts`). Nunca sobrescreve, nunca perde conteudo; o
+ *      dir velho so e removido quando fica vazio.
  *  (b) BASELINE: devolve `baseline` com as chaves de autor reescritas (casos reais
  *      e pseudo-caso `.feedback`); o destino ja existente vence na fusao. O input
  *      NAO e mutado — o caller grava.
@@ -1135,11 +1137,22 @@ export function migrateAuthorDirs(casesBase, aliases, state) {
           } else {
             for (const f of readdirSync(from, { withFileTypes: true })) {
               if (!f.isFile()) continue;
-              if (existsSync(join(to, f.name))) {
+              const src = join(from, f.name);
+              const dst = join(to, f.name);
+              if (existsSync(dst)) {
+                // Duplicata byte-identica (estado tipico da janela do rename no
+                // server: o dir novo foi baixado como peer enquanto o antigo
+                // seguia no disco) -> remove a copia da origem. Nada se perde:
+                // o conteudo continua intacto no destino. Divergencia real ->
+                // conflito: destino preservado E arquivo mantido no dir antigo.
+                if (md5hex(readFileSync(src)) === md5hex(readFileSync(dst))) {
+                  unlinkSync(src);
+                  continue;
+                }
                 out.conflicts.push({ case: caso, from: oldDir, to: newDir, file: f.name });
                 continue;
               }
-              renameSync(join(from, f.name), join(to, f.name));
+              renameSync(src, dst);
             }
             // so remove o dir velho se ficou vazio (nada e destruido)
             if (readdirSync(from).length === 0) rmdirSync(from);
