@@ -64,22 +64,42 @@ Task Scheduler (a cada 5 min + logon, via sync-cases-hidden.vbs sem janela); exi
 
 O mesmo script sobe, no fim do ciclo, os **transcripts de sessao** desta
 maquina para o legal-cogmem (`POST /api/ingest-transcript`) — o watcher do
-daemon so enxerga os JSONLs da VM. So sobem sessoes de projeto SOB `cases/`
-(dir `<home>/.claude/projects/*-cases-*`); sessao pessoal ou de dev NUNCA sai
-da maquina. Estado proprio em `.transcripts-state.json` (offset em bytes por
-arquivo), gravado apos CADA request e so em 2xx: 500/401/413/rede fora mantem
-o offset e o proximo ciclo reenvia (o reenvio e idempotente pelo dedupe do
-daemon). Caps: 3 MiB por request e 12 MiB por ciclo — arquivo maior continua
-no ciclo seguinte. Sem credencial, o uploader loga uma linha e pula.
+daemon so enxerga os JSONLs da VM.
 
-Recusa DETERMINISTICA do daemon (400 slug de caso invalido / jsonl vazio, 403
-caso nao pertence ao tenant) registra o arquivo em `__blocked` dentro do
-`.transcripts-state.json` e para de tentar ate o arquivo MUDAR DE TAMANHO —
-sem isso, um diretorio de trabalho local sob `cases/` (nome com espaco ou
-acento, ou caso que nao existe na VM) reenviaria a mesma janela a cada 5 min e
-comeria o orcamento do ciclo para sempre. O offset nao avanca (nada e dado
-como capturado); crescer o arquivo destrava. 401, 413 e 5xx sao transitorios e
-NAO bloqueiam. Para forcar um retry, apague a entrada de `__blocked`.
+**O que sobe:** so os dirs de `<home>/.claude/projects/` cujo nome comeca pelo
+encode do `CASE_KNOWLEDGE_CASES_BASE` — o Claude Code encoda o path absoluto do
+projeto trocando tudo que nao e alfanumerico por `-`, entao a base
+`C:\Users\pedro\cases` vira o prefixo `C--Users-pedro-cases-`. A comparacao e
+por PREFIXO (case-insensitive no Windows), nao por substring: um projeto em
+`/home/opc/foo/cases-lib/` ou qualquer pasta com `cases` no meio do caminho
+fica de fora. Na pratica: **sessao que nao roda dentro da sua pasta de casos
+nao sai da maquina**. Sem base configurada, nada e elegivel (fail-closed).
+
+Estado proprio em `.transcripts-state.json` (offset em bytes por arquivo),
+gravado apos CADA request e so em 2xx: 500/401/413/rede fora mantem o offset e
+o proximo ciclo reenvia (o reenvio e idempotente pelo dedupe do daemon). Caps:
+3 MiB por request e 12 MiB por ciclo — arquivo maior continua no ciclo
+seguinte. Entradas de arquivos que sumiram do disco sao podadas. Sem
+credencial, o uploader loga uma linha e pula.
+
+**Bloqueio por diretorio (`__blocked`).** Duas recusas do daemon sao
+DETERMINISTICAS e valem para o DIRETORIO inteiro (todos os `.jsonl` dele tem o
+mesmo `cwd`):
+
+| Status | Natureza | Exemplo real |
+|---|---|---|
+| 400 | conteudo: o `cwd` do dir nao resolve para um slug de caso valido | pasta de trabalho local `~/cases/analise de relatorios` (espaco e acento) |
+| 403 | estado do servidor: o caso nao pertence ao tenant | dir local `_spike-memoria`, ou caso que ainda nao existe na VM |
+
+A recusa grava `__blocked: { "<dir>": { ts, status } }` e o dir sai inteiro do
+plano — sem rede e sem leitura de disco. Sem isso, cada ciclo de 5 min
+reenviaria as mesmas janelas e comeria o orcamento do ciclo para sempre
+(medido na cmr-002: 6 dos 12 MiB). O offset NAO avanca (nada e dado como
+capturado). Como o 403 depende do estado do servidor, o bloqueio tem **TTL de
+6h**: vencido, exatamente UM arquivo do dir vai como sonda; se o caso passou a
+existir/pertencer, o 2xx desbloqueia o dir todo. 401, 413 e 5xx sao
+transitorios e NUNCA bloqueiam. Para forcar um retry antes das 6h, apague a
+entrada de `__blocked`.
 
 ## Variaveis de ambiente
 

@@ -19,7 +19,7 @@ import {
   statSync, openSync, readSync, closeSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { requestWithAuth, readCredential, decodeJwtAuthorDir } from "./auth.mjs";
 import { defaultMemApiBase } from "./memoria.mjs";
@@ -1420,8 +1420,11 @@ export async function syncMemoria(apiBase, casesBase, selfAuthor, deps = {}) {
 // daemon por HTTP (`POST /api/ingest-transcript`, Bearer obrigatorio).
 //
 // Invariantes:
-//  - MINIMIZACAO: so sobem sessoes de projeto SOB `cases/` (dir com `-cases-`
-//    no nome encodado). Sessao pessoal/dev NUNCA sai da maquina.
+//  - MINIMIZACAO: so sobem dirs cujo nome comeca pelo encode do `casesBase`
+//    (`expectedTranscriptDirPrefix`) — comparacao por PREFIXO, nao substring.
+//    Sessao fora da pasta de casos NUNCA sai da maquina; sem base, nada sobe.
+//  - Recusa deterministica (400/403) bloqueia o DIRETORIO por 6h, com sonda
+//    depois — 400/403 sao propriedades do dir (mesmo `cwd`), nao do arquivo.
 //  - Estado PROPRIO em `.transcripts-state.json` (offset em bytes por arquivo);
 //    `.sync-state.json` e `.memoria-state.json` sao INTOCAVEIS.
 //  - So avanca o offset em 2xx. 500 (captura parcial), 401, 413 ou rede fora
@@ -1448,16 +1451,21 @@ const TRANSCRIPT_TIMEOUT_MS = 30_000;
 // `..` espelha o servidor: um id que o server recusaria viraria 400 em loop.
 const VALID_SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
 
-// Chave RESERVADA dentro do estado: `{ "<path>": <size no momento da recusa> }`.
-// Nunca colide com uma chave real (as demais sao paths absolutos).
+// Chave RESERVADA dentro do estado: `{ "<nome-do-dir>": { ts, status } }` —
+// bloqueio por DIRETORIO de projeto. Nunca colide com uma chave real (as demais
+// sao paths absolutos de arquivo).
 const TRANSCRIPT_BLOCKED_KEY = "__blocked";
 
+// Re-sonda um dir bloqueado a cada 6h: 400/403 sao verdades sobre o estado do
+// SERVIDOR (posse) ou sobre o cwd do dir, e podem mudar (caso criado depois na
+// VM). Um request de sonda por dir a cada 6h e barato.
+const TRANSCRIPT_BLOCK_TTL_MS = 6 * 60 * 60 * 1000;
+
 /**
- * Recusa DETERMINISTICA do daemon sobre o conteudo: 400 (slug de caso invalido,
- * jsonl vazio) e 403 (caso nao pertence ao tenant). Reenviar os MESMOS bytes
- * falha de novo por definicao — sem isso a janela consome o orcamento do ciclo
- * para sempre e mata o backlog legitimo (observado na cmr-002: um diretorio de
- * trabalho local sob `cases/` com nome fora do alfabeto de slug).
+ * Recusa DETERMINISTICA do daemon: 400 (o `cwd` do dir nao resolve para um slug
+ * de caso valido) e 403 (o caso nao pertence ao tenant). As duas sao
+ * propriedades do DIRETORIO de projeto, nao do arquivo — todos os `.jsonl`
+ * daquele dir carregam o mesmo `cwd` e tomariam a mesma recusa.
  *
  * 401 (credencial), 413, 5xx e rede fora NAO entram: sao transitorios.
  */
@@ -1476,13 +1484,35 @@ export function transcriptRoots(home, platform = process.platform) {
 }
 
 /**
- * Dir de projeto do Claude Code que corresponde a uma sessao SOB `cases/`.
- * O CC encoda o path do projeto trocando separadores por `-`, entao
- * `/home/opc/case-docs/cases/alpha` vira `-home-opc-case-docs-cases-alpha` e
- * `C:\Users\pedro\cases\alpha` vira `C--Users-pedro-cases-alpha`. Pura.
+ * Prefixo esperado dos dirs de projeto que ficam SOB a base de casos.
+ *
+ * O Claude Code encoda o path absoluto do projeto trocando TUDO que nao e
+ * alfanumerico por `-` (separador, `:`, `_`, espaco, acento — verificado nos
+ * dirs reais da cmr-002: `piggpay_sfdc` -> `piggpay-sfdc`, `societarios` com
+ * acento -> `societ-rios`). Logo `C:\Users\pedro\cases` vira o prefixo
+ * `C--Users-pedro-cases-` e `/home/opc/case-docs/cases` vira
+ * `-home-opc-case-docs-cases-`. Pura.
  */
-export function isCaseTranscriptDir(name) {
-  return /-cases-/.test(name || "");
+export function expectedTranscriptDirPrefix(casesBase) {
+  const limpo = String(casesBase || "").replace(/[/\\]+$/, "");
+  if (!limpo) return "";
+  return `${limpo.replace(/[^a-zA-Z0-9]/g, "-")}-`;
+}
+
+/**
+ * Dir de projeto do Claude Code cujo path esta SOB a base de casos.
+ *
+ * Compara por PREFIXO derivado da base (nao por substring `-cases-`): um repo
+ * como `/home/opc/foo/cases-lib/...` ou uma pasta pessoal com `cases` no meio
+ * do caminho nao sobe. Sem prefixo (base vazia) nada e elegivel — fail-closed.
+ * NTFS e case-insensitive, entao no Windows a comparacao ignora caixa. Pura.
+ */
+export function isCaseTranscriptDir(name, prefix, platform = process.platform) {
+  if (!name || !prefix) return false;
+  if (platform === "win32") {
+    return String(name).toLowerCase().startsWith(String(prefix).toLowerCase());
+  }
+  return String(name).startsWith(prefix);
 }
 
 /** `session_id` aceitavel pelo daemon. Pura. */
@@ -1490,13 +1520,19 @@ export function isValidSessionId(id) {
   return typeof id === "string" && VALID_SESSION_ID.test(id) && !id.includes("..");
 }
 
+/** Nome do dir de projeto a que um transcript pertence (chave do bloqueio). */
+function transcriptDirName(path) {
+  return basename(dirname(path));
+}
+
 /**
  * Enumera os `.jsonl` de sessoes de caso nas raizes dadas, em ordem estavel de
- * path (o orcamento do ciclo depende de ordem deterministica). Raiz ausente ou
- * ilegivel e ignorada — o uploader nunca derruba o sync.
+ * path (o orcamento do ciclo depende de ordem deterministica). So entram dirs
+ * cujo nome comeca por `prefix` (ver `expectedTranscriptDirPrefix`). Raiz
+ * ausente ou ilegivel e ignorada — o uploader nunca derruba o sync.
  * Retorna `[{ path, sessionId, size }]`.
  */
-export function listTranscriptFiles(roots) {
+export function listTranscriptFiles(roots, prefix) {
   const out = [];
   for (const root of roots || []) {
     let dirs;
@@ -1506,7 +1542,7 @@ export function listTranscriptFiles(roots) {
       continue; // raiz inexistente (maquina sem CC nesse home) nao e erro
     }
     for (const d of dirs) {
-      if (!d.isDirectory() || !isCaseTranscriptDir(d.name)) continue;
+      if (!d.isDirectory() || !isCaseTranscriptDir(d.name, prefix)) continue;
       const dirPath = join(root, d.name);
       let entries;
       try {
@@ -1578,24 +1614,31 @@ export function alignToLineStart(path, offset, lookback = TRANSCRIPT_ALIGN_LOOKB
  * `size < offset` (arquivo truncado/rotacionado) reseta para 0 — o dedupe
  * impede duplicata do que ja foi capturado.
  *
- * Arquivo com recusa deterministica registrada (`__blocked`) fica de fora
- * ENQUANTO o tamanho nao mudar: o mesmo conteudo tomaria a mesma recusa e so
- * queimaria o orcamento do ciclo. O offset NAO avanca (nada e dado como
- * enviado); crescer o arquivo destrava sozinho.
+ * DIRETORIO com recusa deterministica registrada (`__blocked`) fica inteiro de
+ * fora ate o TTL expirar — sem rede, sem leitura de disco. Expirado o TTL,
+ * exatamente UM arquivo do dir entra como SONDA (se o servidor mudou de ideia,
+ * o proximo ciclo destrava o dir todo).
  *
  * Retorna `[{ path, sessionId, from, to }]`.
  */
-export function planTranscriptUploads(files, state = {}, caps = {}) {
+export function planTranscriptUploads(files, state = {}, caps = {}, now = Date.now()) {
   const maxReq = caps.maxRequestBytes ?? TRANSCRIPT_MAX_REQUEST_BYTES;
   const maxCycle = caps.maxCycleBytes ?? TRANSCRIPT_MAX_CYCLE_BYTES;
   const lookback = Math.max(1, Math.min(TRANSCRIPT_ALIGN_LOOKBACK, Math.floor(maxReq / 2)));
-  const blocked = (state && state[TRANSCRIPT_BLOCKED_KEY]) || {};
+  const blocked = readBlockedDirs(state);
+  const sondados = new Set(); // dirs que ja gastaram a sonda deste ciclo
   const out = [];
   let budget = maxCycle;
   for (const f of files || []) {
     if (budget <= 0) break;
+    const dir = transcriptDirName(f.path);
+    const b = blocked[dir];
+    if (b) {
+      if (now - b.ts <= TRANSCRIPT_BLOCK_TTL_MS) continue; // dentro do TTL: nem tenta
+      if (sondados.has(dir)) continue; // ja mandou a sonda deste dir neste ciclo
+      sondados.add(dir);
+    }
     const size = Number(f.size) || 0;
-    if (Number(blocked[f.path]) === size) continue; // recusado e inalterado
     const saved = Number(state?.[f.path]);
     let from = Number.isFinite(saved) && saved > 0 ? saved : 0;
     if (from > size) from = 0; // truncado/rotacionado
@@ -1605,6 +1648,24 @@ export function planTranscriptUploads(files, state = {}, caps = {}) {
     if (span <= 0) continue;
     out.push({ path: f.path, sessionId: f.sessionId, from, to: from + span });
     budget -= span;
+  }
+  return out;
+}
+
+/**
+ * Bloqueios por diretorio, normalizados: `{ "<dir>": { ts, status } }`.
+ *
+ * Entradas do formato ANTIGO (v0.15.1, por ARQUIVO: `path -> size`) sao
+ * DESCARTADAS na leitura — migrar nao vale o codigo: o pior caso e uma sonda
+ * extra por dir, que re-bloqueia no formato novo.
+ */
+export function readBlockedDirs(state) {
+  const raw = state?.[TRANSCRIPT_BLOCKED_KEY];
+  const out = {};
+  if (!raw || typeof raw !== "object") return out;
+  for (const [dir, v] of Object.entries(raw)) {
+    if (!v || typeof v !== "object" || typeof v.ts !== "number") continue;
+    out[dir] = v;
   }
   return out;
 }
@@ -1697,12 +1758,31 @@ export async function syncTranscripts(memApiBase, casesBase, deps = {}) {
   }
 
   let state = readTranscriptState(casesBase);
+  const prefix = deps.dirPrefix ?? expectedTranscriptDirPrefix(casesBase);
   let files = [];
   try {
-    files = listTranscriptFiles(roots);
+    files = listTranscriptFiles(roots, prefix);
   } catch (err) {
     appendLog(casesBase, `transcripts: erro listando transcripts: ${err.message}`);
     return;
+  }
+
+  // Poda de offsets de arquivos que sumiram do disco (sessao apagada, projeto
+  // removido): a chave so cresceria para sempre.
+  const podadas = [];
+  for (const k of Object.keys(state)) {
+    if (k === TRANSCRIPT_BLOCKED_KEY) continue;
+    if (!existsSync(k)) podadas.push(k);
+  }
+  if (podadas.length > 0) {
+    const limpo = { ...state };
+    for (const k of podadas) delete limpo[k];
+    state = limpo;
+    try {
+      writeTranscriptState(casesBase, state);
+    } catch (err) {
+      appendLog(casesBase, `transcripts: erro gravando estado: ${err.message}`);
+    }
   }
 
   const elegiveis = [];
@@ -1727,8 +1807,13 @@ export async function syncTranscripts(memApiBase, casesBase, deps = {}) {
   let janelas = 0;
   let capturados = 0;
   let falhas = 0;
+  // Dirs recusados DENTRO deste ciclo: o plano ja estava fechado quando a
+  // recusa chegou, entao os irmaos do mesmo dir precisam sair aqui (sem esse
+  // corte, um dir com N sessoes gastaria N requests antes de bloquear).
+  const recusadosNoCiclo = new Set();
 
   for (const w of plan) {
+    if (recusadosNoCiclo.has(transcriptDirName(w.path))) continue;
     let slice;
     try {
       slice = readTranscriptSlice(w.path, w.from, w.to);
@@ -1761,28 +1846,26 @@ export async function syncTranscripts(memApiBase, casesBase, deps = {}) {
       const detalhe = String(res?.json?.error ?? res?.json?.message ?? res?.text ?? "sem resposta").slice(0, 200);
       appendLog(casesBase, `transcripts: HTTP ${res?.status ?? "?"} em ${w.sessionId}: ${detalhe}`);
       falhas++;
-      // Recusa deterministica: registra o tamanho atual e para de tentar ate o
-      // arquivo mudar. O offset NAO avanca (nada foi dado como capturado) —
-      // se o caso passar a existir/pertencer e a sessao continuar, destrava.
+      // Recusa deterministica: bloqueia o DIRETORIO (todos os .jsonl dele tem o
+      // mesmo `cwd` e tomariam a mesma recusa) com carimbo de tempo. O offset
+      // NAO avanca — nada foi dado como capturado. O TTL de 6h manda a proxima
+      // sonda; se o caso passar a existir/pertencer, ela destrava o dir.
       if (res && isRecusaDeterministica(res.status)) {
-        let sizeAtual = 0;
+        const dir = transcriptDirName(w.path);
+        recusadosNoCiclo.add(dir);
+        state = {
+          ...state,
+          [TRANSCRIPT_BLOCKED_KEY]: {
+            ...readBlockedDirs(state),
+            [dir]: { ts: Date.now(), status: res.status },
+          },
+        };
         try {
-          sizeAtual = statSync(w.path).size;
-        } catch {
-          /* sumiu: nao ha o que bloquear */
+          writeTranscriptState(casesBase, state);
+        } catch (err) {
+          appendLog(casesBase, `transcripts: erro gravando estado: ${err.message}`);
         }
-        if (sizeAtual > 0) {
-          state = {
-            ...state,
-            [TRANSCRIPT_BLOCKED_KEY]: { ...(state[TRANSCRIPT_BLOCKED_KEY] || {}), [w.path]: sizeAtual },
-          };
-          try {
-            writeTranscriptState(casesBase, state);
-          } catch (err) {
-            appendLog(casesBase, `transcripts: erro gravando estado: ${err.message}`);
-          }
-          appendLog(casesBase, `transcripts: ${w.sessionId} bloqueado ate o arquivo mudar (recusa ${res.status})`);
-        }
+        appendLog(casesBase, `transcripts: dir ${dir} bloqueado por 6h (recusa ${res.status})`);
       }
       continue; // NAO avanca o offset: o proximo ciclo reenvia (dedupe absorve)
     }
@@ -1790,10 +1873,12 @@ export async function syncTranscripts(memApiBase, casesBase, deps = {}) {
     // 2xx (inclusive `skipped:true`, sessao fora de caso): o delta esta
     // resolvido do lado do servidor -> avanca e PERSISTE imediatamente.
     state = { ...state, [w.path]: w.from + slice.bytes };
-    if (state[TRANSCRIPT_BLOCKED_KEY]?.[w.path] !== undefined) {
-      const restante = { ...state[TRANSCRIPT_BLOCKED_KEY] };
-      delete restante[w.path]; // destravou de vez: nao deixa entrada morta
+    const dirOk = transcriptDirName(w.path);
+    if (readBlockedDirs(state)[dirOk]) {
+      const restante = readBlockedDirs(state);
+      delete restante[dirOk]; // o dir voltou a ser aceito: some o bloqueio
       state = { ...state, [TRANSCRIPT_BLOCKED_KEY]: restante };
+      appendLog(casesBase, `transcripts: dir ${dirOk} desbloqueado (sonda aceita)`);
     }
     try {
       writeTranscriptState(casesBase, state);
@@ -1804,9 +1889,15 @@ export async function syncTranscripts(memApiBase, casesBase, deps = {}) {
     capturados += Number(res.json?.captured) || 0;
   }
 
+  // "ok" so quando o ciclo produziu alguma coisa: falhas sem captura nenhuma
+  // nao podem sair como sucesso no log.
+  const rotulo = falhas > 0 && capturados === 0 ? "erros" : "ok";
+  const bloqueados = Object.keys(readBlockedDirs(state)).length;
   appendLog(
     casesBase,
-    `transcripts: ok janelas=${janelas} capturados=${capturados}` + (falhas ? ` falhas=${falhas}` : ""),
+    `transcripts: ${rotulo} janelas=${janelas} capturados=${capturados}` +
+      (falhas ? ` falhas=${falhas}` : "") +
+      (bloqueados ? ` bloqueados=${bloqueados}` : ""),
   );
 }
 

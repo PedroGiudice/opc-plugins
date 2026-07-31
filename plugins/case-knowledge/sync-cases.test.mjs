@@ -26,6 +26,8 @@ import {
   updateAutoMemoryDirIfAliased,
   transcriptRoots,
   isCaseTranscriptDir,
+  expectedTranscriptDirPrefix,
+  readBlockedDirs,
   isValidSessionId,
   listTranscriptFiles,
   alignToLineStart,
@@ -1646,17 +1648,35 @@ test("transcriptRoots: <home>/.claude/projects nas duas plataformas", () => {
   ]);
 });
 
-test("isCaseTranscriptDir: so dir de projeto SOB cases sobe (minimizacao)", () => {
-  // encoding do Claude Code: separadores viram `-`
-  assert.equal(isCaseTranscriptDir("-home-opc-case-docs-cases-bianka-salesforce"), true);
-  assert.equal(isCaseTranscriptDir("C--Users-pedro-cases-novartis"), true);
+test("expectedTranscriptDirPrefix: encode do path absoluto no formato do CC", () => {
+  assert.equal(expectedTranscriptDirPrefix("C:\\Users\\pedro\\cases"), "C--Users-pedro-cases-");
+  assert.equal(expectedTranscriptDirPrefix("C:\\Users\\pedro\\cases\\"), "C--Users-pedro-cases-");
+  assert.equal(expectedTranscriptDirPrefix("/home/opc/case-docs/cases"), "-home-opc-case-docs-cases-");
+  // tudo que nao e alfanumerico vira `-` (o CC faz isso com `_`, espaco e acento)
+  assert.equal(expectedTranscriptDirPrefix("/home/op c/meus_casos"), "-home-op-c-meus-casos-");
+  assert.equal(expectedTranscriptDirPrefix(""), "");
+});
+
+test("isCaseTranscriptDir: prefixo derivado do casesBase, nao substring", () => {
+  const win = expectedTranscriptDirPrefix("C:\\Users\\pedro\\cases");
+  const nix = expectedTranscriptDirPrefix("/home/opc/case-docs/cases");
+
+  assert.equal(isCaseTranscriptDir("-home-opc-case-docs-cases-bianka-salesforce", nix, "linux"), true);
+  assert.equal(isCaseTranscriptDir("C--Users-pedro-cases-novartis", win, "win32"), true);
+  // NTFS e case-insensitive: caixa divergente nao pode desabilitar o filtro
+  assert.equal(isCaseTranscriptDir("c--users-PEDRO-cases-novartis", win, "win32"), true);
+  assert.equal(isCaseTranscriptDir("c--users-pedro-cases-novartis", nix, "linux"), false);
+
   // sessoes pessoais/dev NUNCA sobem
-  assert.equal(isCaseTranscriptDir("-home-opc-legal-cogmem"), false);
-  assert.equal(isCaseTranscriptDir("-home-opc-case-docs"), false);
-  assert.equal(isCaseTranscriptDir("C--Users-pedro-dev-app"), false);
-  // `cases` como sufixo/prefixo sem delimitador nao conta
-  assert.equal(isCaseTranscriptDir("-home-opc-meus-cases"), false);
-  assert.equal(isCaseTranscriptDir(""), false);
+  assert.equal(isCaseTranscriptDir("-home-opc-legal-cogmem", nix, "linux"), false);
+  // a raiz da base (sessao aberta em cases/) nao e um caso
+  assert.equal(isCaseTranscriptDir("-home-opc-case-docs-cases", nix, "linux"), false);
+  // classe de bug do substring: outro dir com `cases` no caminho nao sobe
+  assert.equal(isCaseTranscriptDir("-home-opc-foo-cases-lib-src", nix, "linux"), false);
+  assert.equal(isCaseTranscriptDir("-tmp-cases-qualquer", nix, "linux"), false);
+  // fail-closed: sem prefixo, nada e elegivel
+  assert.equal(isCaseTranscriptDir("-home-opc-case-docs-cases-alpha", "", "linux"), false);
+  assert.equal(isCaseTranscriptDir("", nix, "linux"), false);
 });
 
 test("isValidSessionId: alfabeto fechado do servidor", () => {
@@ -1685,7 +1705,7 @@ test("listTranscriptFiles: so .jsonl de dirs -cases-; sessionId = basename; root
     seedTranscript(root, "-home-opc-legal-cogmem", "sess-dev", ['{"a":1}']);
     writeFileSync(join(root, "-home-opc-case-docs-cases-alpha", "nota.txt"), "x");
 
-    const files = listTranscriptFiles([root, join(root, "nao-existe")]);
+    const files = listTranscriptFiles([root, join(root, "nao-existe")], "-home-opc-case-docs-cases-");
     assert.equal(files.length, 1);
     assert.equal(files[0].sessionId, "sess-1");
     assert.ok(files[0].path.endsWith("sess-1.jsonl"));
@@ -1819,6 +1839,7 @@ function fakeUploader(postImpl) {
   return {
     posts,
     deps: {
+      dirPrefix: "-x-cases-",
       readCredential: () => ({ access_jwt: "jwt-fake" }),
       postTranscript: async (url, body) => {
         posts.push({ url, body });
@@ -1930,6 +1951,7 @@ test("syncTranscripts: sem credencial -> 1 log e skip (nenhum POST)", async () =
     const posts = [];
     await syncTranscripts("http://t/api", base, {
       roots: [root],
+      dirPrefix: "-x-cases-",
       readCredential: () => null,
       postTranscript: async (url, body) => { posts.push({ url, body }); return { ok: true, status: 200, json: {} }; },
     });
@@ -1996,78 +2018,173 @@ test("syncTranscripts: nada novo -> nenhum POST e nenhuma escrita de estado", as
   }
 });
 
-test("planTranscriptUploads: arquivo com recusa deterministica registrada fica fora ate mudar de tamanho", () => {
-  const root = mkdtempSync(join(tmpdir(), "cmr135-plan6-"));
+// --- bloqueio POR DIRETORIO com TTL ---
+
+test("readBlockedDirs: normaliza o formato novo e DESCARTA o antigo (por arquivo)", () => {
+  assert.deepEqual(readBlockedDirs({}), {});
+  assert.deepEqual(readBlockedDirs({ __blocked: "lixo" }), {});
+  // formato v0.15.1: path -> size numerico. Migracao = descarte.
+  assert.deepEqual(readBlockedDirs({ __blocked: { "C:\\x\\y.jsonl": 1234 } }), {});
+  const novo = { "-x-cases-a": { ts: 10, status: 403 } };
+  assert.deepEqual(readBlockedDirs({ __blocked: novo }), novo);
+});
+
+test("planTranscriptUploads: dir bloqueado sai INTEIRO do plano dentro do TTL", () => {
+  const root = mkdtempSync(join(tmpdir(), "cmr135-blk1-"));
   try {
-    const p = seedTranscript(root, "-x-cases-a", "s1", ['{"n":1}']);
-    const size = statSync(p).size;
-    const file = { path: p, sessionId: "s1", size };
-    // bloqueado com o MESMO tamanho -> nao entra no plano
-    assert.deepEqual(planTranscriptUploads([file], { __blocked: { [p]: size } }), []);
-    // tamanho mudou (sessao continuou) -> volta ao plano, do offset zero
-    assert.deepEqual(planTranscriptUploads([file], { __blocked: { [p]: size - 1 } }), [
-      { path: p, sessionId: "s1", from: 0, to: size },
-    ]);
+    const a = seedTranscript(root, "-x-cases-ruim", "s1", ['{"n":1}']);
+    const b = seedTranscript(root, "-x-cases-ruim", "s2", ['{"n":2}']);
+    const c = seedTranscript(root, "-x-cases-bom", "s3", ['{"n":3}']);
+    const files = [
+      { path: a, sessionId: "s1", size: statSync(a).size },
+      { path: b, sessionId: "s2", size: statSync(b).size },
+      { path: c, sessionId: "s3", size: statSync(c).size },
+    ];
+    const agora = 1_000_000_000;
+    const state = { __blocked: { "-x-cases-ruim": { ts: agora - 60_000, status: 403 } } };
+    const plan = planTranscriptUploads(files, state, {}, agora);
+    assert.deepEqual(plan.map((w) => w.sessionId), ["s3"], "os DOIS arquivos do dir bloqueado ficam fora");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("syncTranscripts: 400/403 bloqueia o arquivo (sem avancar offset) e o ciclo seguinte nao reenvia", async () => {
+test("planTranscriptUploads: TTL expirado libera UMA sonda por dir", () => {
+  const root = mkdtempSync(join(tmpdir(), "cmr135-blk2-"));
+  try {
+    const a = seedTranscript(root, "-x-cases-ruim", "s1", ['{"n":1}']);
+    const b = seedTranscript(root, "-x-cases-ruim", "s2", ['{"n":2}']);
+    const files = [
+      { path: a, sessionId: "s1", size: statSync(a).size },
+      { path: b, sessionId: "s2", size: statSync(b).size },
+    ];
+    const agora = 1_000_000_000;
+    const seisHorasEUm = 6 * 60 * 60 * 1000 + 1;
+    const state = { __blocked: { "-x-cases-ruim": { ts: agora - seisHorasEUm, status: 400 } } };
+    const plan = planTranscriptUploads(files, state, {}, agora);
+    assert.deepEqual(plan.map((w) => w.sessionId), ["s1"], "exatamente 1 sonda por dir");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("syncTranscripts: 400 bloqueia o DIR (1 request para 2 arquivos) e o ciclo seguinte nao tenta", async () => {
   const base = mkdtempSync(join(tmpdir(), "cmr135-w9-"));
   const home = mkdtempSync(join(tmpdir(), "cmr135-h9-"));
   try {
     const root = join(home, ".claude", "projects");
-    const p = seedTranscript(root, "-x-cases-analise de relatorios", "sess-1", ['{"type":"user","cwd":"/x/cases/x y"}']);
+    seedTranscript(root, "-x-cases-analise de relatorios", "sess-1", ['{"type":"user","cwd":"/x/cases/x y"}']);
+    seedTranscript(root, "-x-cases-analise de relatorios", "sess-2", ['{"type":"user","cwd":"/x/cases/x y"}']);
     const { deps, posts } = fakeUploader(() => ({
       ok: false, status: 400, json: { status: "error", message: "slug de caso invalido" }, text: "{}",
     }));
     await syncTranscripts("http://t/api", base, { ...deps, roots: [root] });
-    assert.equal(posts.length, 1);
 
+    assert.equal(posts.length, 1, "o 2o arquivo do MESMO dir nao gasta request");
     const st = JSON.parse(readFileSync(join(base, ".transcripts-state.json"), "utf-8"));
-    assert.equal(st[p], undefined, "offset nao avanca em recusa");
-    assert.equal(st.__blocked[p], statSync(p).size);
-    assert.match(readFileSync(join(base, ".sync.log"), "utf-8"), /bloqueado ate o arquivo mudar \(recusa 400\)/);
+    assert.equal(Object.keys(st).filter((k) => k !== "__blocked").length, 0, "nenhum offset avanca");
+    const blk = st.__blocked["-x-cases-analise de relatorios"];
+    assert.equal(blk.status, 400);
+    assert.ok(typeof blk.ts === "number" && blk.ts > 0);
+    const log = readFileSync(join(base, ".sync.log"), "utf-8");
+    assert.match(log, /dir -x-cases-analise de relatorios bloqueado por 6h \(recusa 400\)/);
+    assert.match(log, /transcripts: erros janelas=0 capturados=0 falhas=1 bloqueados=1/);
 
-    // ciclo seguinte: nao gasta request nem orcamento com o mesmo conteudo
     await syncTranscripts("http://t/api", base, { ...deps, roots: [root] });
-    assert.equal(posts.length, 1, "arquivo bloqueado nao volta a ser enviado");
+    assert.equal(posts.length, 1, "dentro do TTL nem sonda sai");
   } finally {
     rmSync(base, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   }
 });
 
-test("syncTranscripts: 401 NAO bloqueia (falha transitoria de credencial)", async () => {
+test("syncTranscripts: 403 tambem bloqueia o dir (posse e propriedade do diretorio)", async () => {
   const base = mkdtempSync(join(tmpdir(), "cmr135-w10-"));
   const home = mkdtempSync(join(tmpdir(), "cmr135-h10-"));
   try {
     const root = join(home, ".claude", "projects");
-    seedTranscript(root, "-x-cases-alpha", "sess-1", ['{"type":"user","cwd":"/x/cases/alpha"}']);
-    const { deps, posts } = fakeUploader(() => ({ ok: false, status: 401, json: { error: "bearer ausente ou invalido" }, text: "{}" }));
+    seedTranscript(root, "-x-cases-spike", "sess-1", ['{"type":"user","cwd":"/x/cases/spike"}']);
+    const { deps } = fakeUploader(() => ({
+      ok: false, status: 403, json: { error: "caso nao pertence ao tenant" }, text: "{}",
+    }));
     await syncTranscripts("http://t/api", base, { ...deps, roots: [root] });
-    await syncTranscripts("http://t/api", base, { ...deps, roots: [root] });
-    assert.equal(posts.length, 2, "401 deve continuar tentando no proximo ciclo");
+    const st = JSON.parse(readFileSync(join(base, ".transcripts-state.json"), "utf-8"));
+    assert.equal(st.__blocked["-x-cases-spike"].status, 403);
   } finally {
     rmSync(base, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   }
 });
 
-test("syncTranscripts: 2xx apos bloqueio limpa a entrada de __blocked", async () => {
+test("syncTranscripts: sonda aceita (2xx) desbloqueia o dir", async () => {
   const base = mkdtempSync(join(tmpdir(), "cmr135-w11-"));
   const home = mkdtempSync(join(tmpdir(), "cmr135-h11-"));
   try {
     const root = join(home, ".claude", "projects");
     const p = seedTranscript(root, "-x-cases-alpha", "sess-1", ['{"type":"user","cwd":"/x/cases/alpha"}']);
-    writeFileSync(join(base, ".transcripts-state.json"), JSON.stringify({ __blocked: { [p]: 1 } })); // tamanho velho
+    // bloqueio VENCIDO -> a sonda sai
+    writeFileSync(
+      join(base, ".transcripts-state.json"),
+      JSON.stringify({ __blocked: { "-x-cases-alpha": { ts: Date.now() - 7 * 60 * 60 * 1000, status: 403 } } }),
+    );
     const { deps, posts } = fakeUploader();
     await syncTranscripts("http://t/api", base, { ...deps, roots: [root] });
     assert.equal(posts.length, 1);
     const st = JSON.parse(readFileSync(join(base, ".transcripts-state.json"), "utf-8"));
     assert.equal(st[p], statSync(p).size);
     assert.deepEqual(st.__blocked, {});
+    assert.match(readFileSync(join(base, ".sync.log"), "utf-8"), /desbloqueado \(sonda aceita\)/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("syncTranscripts: 401 LANCA (contrato real do requestWithAuth) -> falha sem bloqueio", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr135-w12-"));
+  const home = mkdtempSync(join(tmpdir(), "cmr135-h12-"));
+  try {
+    const root = join(home, ".claude", "projects");
+    seedTranscript(root, "-x-cases-alpha", "sess-1", ['{"type":"user","cwd":"/x/cases/alpha"}']);
+    // requestWithAuth LANCA nesse caminho; nao devolve {ok:false,status:401}
+    const { deps, posts } = fakeUploader(() => {
+      throw new Error("Nao autorizado (401) apos refresh. Rode: node <plugin>/server.mjs login");
+    });
+    await syncTranscripts("http://t/api", base, { ...deps, roots: [root] });
+    const st1 = existsSync(join(base, ".transcripts-state.json"))
+      ? JSON.parse(readFileSync(join(base, ".transcripts-state.json"), "utf-8"))
+      : {};
+    assert.deepEqual(readBlockedDirs(st1), {}, "401 nunca bloqueia");
+    const log = readFileSync(join(base, ".sync.log"), "utf-8");
+    assert.match(log, /erro no POST sess-1: Nao autorizado \(401\) apos refresh/);
+    assert.match(log, /transcripts: erros janelas=0 capturados=0 falhas=1/);
+
+    // proximo ciclo continua tentando (transitorio)
+    await syncTranscripts("http://t/api", base, { ...deps, roots: [root] });
+    assert.equal(posts.length, 2);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("syncTranscripts: poda offsets de arquivos que sumiram do disco", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr135-w13-"));
+  const home = mkdtempSync(join(tmpdir(), "cmr135-h13-"));
+  try {
+    const root = join(home, ".claude", "projects");
+    const p = seedTranscript(root, "-x-cases-alpha", "sess-1", ['{"type":"user","cwd":"/x/cases/alpha"}']);
+    const fantasma = join(root, "-x-cases-alpha", "sumiu.jsonl");
+    writeFileSync(
+      join(base, ".transcripts-state.json"),
+      JSON.stringify({ [p]: statSync(p).size, [fantasma]: 999 }),
+    );
+    const { deps, posts } = fakeUploader();
+    await syncTranscripts("http://t/api", base, { ...deps, roots: [root] });
+    assert.equal(posts.length, 0, "nada novo a enviar");
+    const st = JSON.parse(readFileSync(join(base, ".transcripts-state.json"), "utf-8"));
+    assert.equal(st[fantasma], undefined, "entrada morta podada");
+    assert.equal(st[p], statSync(p).size, "entrada viva preservada");
   } finally {
     rmSync(base, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
