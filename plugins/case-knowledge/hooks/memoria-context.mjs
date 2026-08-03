@@ -89,14 +89,39 @@ export function shouldSkipPrompt(prompt) {
   return false;
 }
 
+/**
+ * Rotulo de origem a partir do repo_path do chunk (CMR-154). Espelho de
+ * originLabel em memoria.mjs — o hook e standalone de proposito (mudou
+ * aqui, mudar la).
+ */
+export function originLabel(repoPath) {
+  if (typeof repoPath !== "string" || !repoPath) return null;
+  const win = repoPath.match(/^[A-Za-z]:[\\/]Users[\\/]([^\\/]+)[\\/]/);
+  if (win) return win[1];
+  if (repoPath.startsWith("/home/")) return "vm";
+  return null;
+}
+
 /** Bloco de contexto; null se nao ha chunks. */
 export function formatContext(slug, chunks) {
   if (!chunks || chunks.length === 0) return null;
-  const lines = [`MEMORIA DO CASO [${slug}]`, "=".repeat(16), ""];
+  const lines = [
+    `MEMORIA DO CASO [${slug}]`,
+    "=".repeat(16),
+    "Trechos de sessoes anteriores neste caso, de qualquer maquina do " +
+      "escritorio. Ao usar um trecho, cite autor e data.",
+    "",
+  ];
   for (const c of chunks) {
     const score = typeof c.score === "number" ? c.score.toFixed(2) : "?";
+    const origem = originLabel(c.repo_path);
+    const data =
+      typeof c.timestamp === "string" && c.timestamp.length >= 10
+        ? c.timestamp.slice(0, 10)
+        : null;
+    const header = [score, origem, data].filter(Boolean).join(" | ");
     const content = String(c.content ?? "").slice(0, DISPLAY_MAX_CHARS);
-    lines.push(`[${score}]`, content, "");
+    lines.push(`[${header}]`, content, "");
   }
   return lines.join("\n");
 }

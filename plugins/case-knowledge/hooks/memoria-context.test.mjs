@@ -187,3 +187,30 @@ test("defaultMemApiBase (hook): win32 -> URL publica; unix -> tailnet", () => {
 test("defaultMemApiBase (hook): sem argumento usa a plataforma do processo", () => {
   assert.equal(defaultMemApiBase(), defaultMemApiBase(process.platform));
 });
+
+// ---------------------------------------------------------------------------
+// formatContext com atribuicao (CMR-154)
+
+test("formatContext: linha de cabecalho traz origem e data do chunk", () => {
+  const out = formatContext("angatu-priscila", [
+    {
+      score: 0.91,
+      timestamp: "2026-07-31T15:45:12.483Z",
+      repo_path: "C:\\Users\\anabeatriz\\cases\\angatu-priscila",
+      content: "definimos que o eixo da defesa e o contrato a termo",
+    },
+  ]);
+  assert.match(out, /\[0\.91 \| anabeatriz \| 2026-07-31\]/);
+  assert.match(out, /eixo da defesa/);
+});
+
+test("formatContext: chunk sem repo_path/timestamp degrada para so score", () => {
+  const out = formatContext("caso-x", [{ score: 0.5, content: "conteudo antigo" }]);
+  assert.match(out, /\[0\.50\]/);
+  assert.match(out, /conteudo antigo/);
+});
+
+test("formatContext: instrui citacao de autor/data no cabecalho do bloco", () => {
+  const out = formatContext("caso-x", [{ score: 0.5, content: "c" }]);
+  assert.match(out, /cite autor e data/i);
+});

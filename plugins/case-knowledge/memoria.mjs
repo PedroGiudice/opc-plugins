@@ -27,6 +27,20 @@ export function defaultMemApiBase(platform = process.platform) {
 export const MEM_API_BASE =
   process.env.LEGAL_COGMEM_API_BASE || defaultMemApiBase();
 
+/**
+ * Rotulo de origem de um chunk a partir do repo_path da maquina que gravou
+ * (CMR-154). A memoria do caso e compartilhada pelo tenant; sem isto os
+ * trechos chegam anonimos e o modelo nao consegue citar quem disse o que.
+ * `C:\Users\<user>\...` -> user; `/home/...` -> "vm"; resto -> null.
+ */
+export function originLabel(repoPath) {
+  if (typeof repoPath !== "string" || !repoPath) return null;
+  const win = repoPath.match(/^[A-Za-z]:[\\/]Users[\\/]([^\\/]+)[\\/]/);
+  if (win) return win[1];
+  if (repoPath.startsWith("/home/")) return "vm";
+  return null;
+}
+
 export function formatMemoriaResults(chunks) {
   if (!chunks || chunks.length === 0) {
     return "nenhuma memoria registrada neste caso ainda.";
@@ -36,7 +50,9 @@ export function formatMemoriaResults(chunks) {
       const score = typeof c.score === "number" ? c.score.toFixed(2) : "?";
       const ts = c.timestamp ?? "?";
       const sess = c.session_id ?? "?";
-      return `[${score}] (${ts}, sessao ${sess})\n${c.content ?? ""}`;
+      const origem = originLabel(c.repo_path);
+      const quem = origem ? `${origem}, ` : "";
+      return `[${score}] (${quem}${ts}, sessao ${sess})\n${c.content ?? ""}`;
     })
     .join("\n\n---\n\n");
 }

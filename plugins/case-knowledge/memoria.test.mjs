@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import os from "node:os";
-import { memoriaSearch, formatMemoriaResults, defaultMemApiBase } from "./memoria.mjs";
+import { memoriaSearch, formatMemoriaResults, defaultMemApiBase, originLabel } from "./memoria.mjs";
 
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
 const makeJwt = (exp) =>
@@ -120,4 +120,51 @@ test("defaultMemApiBase: win32 -> URL publica; unix -> tailnet", () => {
 
 test("defaultMemApiBase: sem argumento usa a plataforma do processo", () => {
   assert.equal(defaultMemApiBase(), defaultMemApiBase(process.platform));
+});
+
+// ---------------------------------------------------------------------------
+// originLabel (atribuicao de origem por repo_path, CMR-154)
+
+test("originLabel: path Windows -> username", () => {
+  assert.equal(originLabel("C:\\Users\\anabeatriz\\cases\\angatu-priscila"), "anabeatriz");
+  assert.equal(originLabel("C:\\Users\\pedro\\cases\\x"), "pedro");
+});
+
+test("originLabel: path Windows com barras normais -> username", () => {
+  assert.equal(originLabel("C:/Users/pedro/cases/x"), "pedro");
+});
+
+test("originLabel: VM (/home/...) -> vm", () => {
+  assert.equal(originLabel("/home/opc/case-docs/cases/angatu-priscila"), "vm");
+});
+
+test("originLabel: ausente/estranho -> null", () => {
+  assert.equal(originLabel(null), null);
+  assert.equal(originLabel(""), null);
+  assert.equal(originLabel("D:\\outra\\coisa"), null);
+  assert.equal(originLabel(42), null);
+});
+
+test("formatMemoriaResults: inclui origem e data quando presentes", () => {
+  const out = formatMemoriaResults([
+    {
+      score: 0.82,
+      timestamp: "2026-07-31T15:45:12.483Z",
+      session_id: "abc-123",
+      repo_path: "C:\\Users\\pedro\\cases\\angatu-priscila",
+      content: "decidimos a tese X",
+    },
+  ]);
+  assert.match(out, /\[0\.82\]/);
+  assert.match(out, /pedro/);
+  assert.match(out, /2026-07-31/);
+  assert.match(out, /decidimos a tese X/);
+});
+
+test("formatMemoriaResults: sem repo_path segue funcionando (chunk antigo)", () => {
+  const out = formatMemoriaResults([
+    { score: 0.5, timestamp: "2026-07-01T00:00:00Z", session_id: "s", content: "c" },
+  ]);
+  assert.match(out, /\[0\.50\]/);
+  assert.match(out, /c/);
 });
