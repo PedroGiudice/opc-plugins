@@ -18,6 +18,7 @@ import {
   readMemoriaState,
   readFeedbackState,
   buildPeersIndex,
+  selfUpdateMarketplace,
   buildFeedbackIndex,
   syncMemoria,
   postJson,
@@ -2213,4 +2214,95 @@ test("syncTranscripts: poda offsets de arquivos que sumiram do disco", async () 
     rmSync(base, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// selfUpdateMarketplace (self-update do clone do marketplace pela task)
+
+function fakeSpawnFactory(results) {
+  const calls = [];
+  const spawn = (cmd, args, opts) => {
+    calls.push({ cmd, args, opts });
+    const key = args.includes("pull") ? "pull" : calls.filter((c) => c.args.includes("rev-parse")).length === 1 ? "before" : "after";
+    return results[key] || { status: 0, stdout: "", stderr: "" };
+  };
+  return { spawn, calls };
+}
+
+test("selfUpdate: sem .git no cloneRoot -> pulado, git nunca chamado", () => {
+  const { spawn, calls } = fakeSpawnFactory({});
+  const line = selfUpdateMarketplace("/fake/clone/plugins/case-knowledge", {
+    exists: () => false,
+    spawn,
+  });
+  assert.match(line, /pulado/);
+  assert.equal(calls.length, 0);
+});
+
+test("selfUpdate: pull ok sem mudanca de HEAD -> ja atualizado", () => {
+  const { spawn } = fakeSpawnFactory({
+    before: { status: 0, stdout: "abc1234\n", stderr: "" },
+    pull: { status: 0, stdout: "Already up to date.\n", stderr: "" },
+    after: { status: 0, stdout: "abc1234\n", stderr: "" },
+  });
+  const line = selfUpdateMarketplace("/fake/clone/plugins/case-knowledge", {
+    exists: () => true,
+    spawn,
+  });
+  assert.match(line, /ja atualizado/);
+});
+
+test("selfUpdate: pull com mudanca de HEAD -> reporta old -> new", () => {
+  const { spawn } = fakeSpawnFactory({
+    before: { status: 0, stdout: "abc1234\n", stderr: "" },
+    pull: { status: 0, stdout: "Updating abc1234..def5678\nFast-forward\n", stderr: "" },
+    after: { status: 0, stdout: "def5678\n", stderr: "" },
+  });
+  const line = selfUpdateMarketplace("/fake/clone/plugins/case-knowledge", {
+    exists: () => true,
+    spawn,
+  });
+  assert.match(line, /atualizado abc1234 -> def5678/);
+});
+
+test("selfUpdate: pull falha (nao-ff/dirty) -> falhou com stderr, nao lanca", () => {
+  const { spawn } = fakeSpawnFactory({
+    before: { status: 0, stdout: "abc1234\n", stderr: "" },
+    pull: { status: 128, stdout: "", stderr: "fatal: Not possible to fast-forward, aborting.\n" },
+  });
+  const line = selfUpdateMarketplace("/fake/clone/plugins/case-knowledge", {
+    exists: () => true,
+    spawn,
+  });
+  assert.match(line, /falhou/);
+  assert.match(line, /fast-forward/);
+});
+
+test("selfUpdate: git ausente (spawn error) -> falhou, nao lanca", () => {
+  const spawn = () => ({ error: new Error("spawnSync git ENOENT"), status: null, stdout: "", stderr: "" });
+  const line = selfUpdateMarketplace("/fake/clone/plugins/case-knowledge", {
+    exists: () => true,
+    spawn,
+  });
+  assert.match(line, /falhou/);
+  assert.match(line, /ENOENT/);
+});
+
+test("selfUpdate: usa --ff-only, cloneRoot 2 niveis acima, prompt desligado e timeout", () => {
+  const { spawn, calls } = fakeSpawnFactory({
+    before: { status: 0, stdout: "abc1234\n", stderr: "" },
+    pull: { status: 0, stdout: "", stderr: "" },
+    after: { status: 0, stdout: "abc1234\n", stderr: "" },
+  });
+  selfUpdateMarketplace(join("/fake", "clone", "plugins", "case-knowledge"), {
+    exists: () => true,
+    spawn,
+  });
+  const pullCall = calls.find((c) => c.args.includes("pull"));
+  assert.ok(pullCall, "pull foi chamado");
+  assert.equal(pullCall.cmd, "git");
+  assert.deepEqual(pullCall.args.slice(0, 2), ["-C", join("/fake", "clone")]);
+  assert.ok(pullCall.args.includes("--ff-only"));
+  assert.equal(pullCall.opts.env.GIT_TERMINAL_PROMPT, "0");
+  assert.ok(pullCall.opts.timeout >= 10_000);
 });

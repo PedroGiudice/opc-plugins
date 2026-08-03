@@ -20,7 +20,8 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import { requestWithAuth, readCredential, decodeJwtAuthorDir } from "./auth.mjs";
 import { defaultMemApiBase } from "./memoria.mjs";
 
@@ -1903,10 +1904,61 @@ export async function syncTranscripts(memApiBase, casesBase, deps = {}) {
   );
 }
 
+/**
+ * Self-update do clone do marketplace de onde esta task roda. O autoUpdate
+ * do CC (known_marketplaces.json) nao faz fetch do marketplace no startup
+ * (constatado empiricamente em 03/08: FETCH_HEAD parado por 3+ dias com a
+ * flag ligada e multiplos startups) — sem isto, cada release exigiria acao
+ * manual em cada maquina cliente. `--ff-only` nunca cria merge: clone dirty
+ * ou divergente falha limpo e vira linha de log. O processo corrente ja
+ * carregou os modulos antigos; o codigo novo vale a partir do proximo ciclo.
+ * Retorna sempre uma linha de log; nunca lanca.
+ */
+export function selfUpdateMarketplace(scriptDir, deps = {}) {
+  const exists = deps.exists || existsSync;
+  const spawn = deps.spawn || spawnSync;
+  // scriptDir = <cloneRoot>/plugins/case-knowledge
+  const cloneRoot = dirname(dirname(scriptDir));
+  if (!exists(join(cloneRoot, ".git"))) {
+    return "self-update: pulado (sem .git — cache install ou copia avulsa)";
+  }
+  const run = (args) =>
+    spawn("git", ["-C", cloneRoot, ...args], {
+      encoding: "utf-8",
+      timeout: 30_000,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    });
+  const before = run(["rev-parse", "--short", "HEAD"]);
+  const pull = run(["pull", "--ff-only"]);
+  if (pull.error) return `self-update: falhou (${pull.error.message})`;
+  if (pull.status !== 0) {
+    const motivo =
+      String(pull.stderr || pull.stdout || "").trim().split("\n")[0] || `exit ${pull.status}`;
+    return `self-update: falhou (${motivo})`;
+  }
+  const oldHead = String(before.stdout || "").trim();
+  const newHead = String(run(["rev-parse", "--short", "HEAD"]).stdout || "").trim();
+  if (oldHead && newHead && oldHead !== newHead) {
+    return `self-update: clone atualizado ${oldHead} -> ${newHead} (vale a partir do proximo ciclo)`;
+  }
+  return "self-update: clone ja atualizado";
+}
+
 async function main() {
   const apiBase = process.env.CASE_KNOWLEDGE_API_BASE || defaultApiBase();
   const casesBase = process.env.CASE_KNOWLEDGE_CASES_BASE || defaultCasesBase();
   mkdirSync(casesBase, { recursive: true });
+
+  // Self-update ANTES de tudo: mesmo um ciclo que falhe adiante ja deixou o
+  // canal de release em dia. "ja atualizado" nao e logado (1 linha a cada
+  // 5 min so de ruido); atualizacao, pulo e falha sao — falha silenciosa no
+  // canal de release e exatamente o defeito do autoUpdate do CC.
+  try {
+    const line = selfUpdateMarketplace(dirname(fileURLToPath(import.meta.url)));
+    if (!line.includes("ja atualizado")) appendLog(casesBase, line);
+  } catch (err) {
+    appendLog(casesBase, `self-update: erro inesperado: ${err.message}`);
+  }
 
   // CMR-138: autor da memoria (namespace-por-autor) derivado UMA vez do access_jwt,
   // no INICIO (a injecao de autoMemoryDirectory por-caso da Task 11 precisa do
