@@ -24,6 +24,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { requestWithAuth, readCredential, decodeJwtAuthorDir } from "./auth.mjs";
 import { defaultMemApiBase } from "./memoria.mjs";
+import { isSafeScaffoldingPath } from "./setup.mjs";
 
 // Espelha defaultApiBase/defaultCasesBase do server.mjs. Duplicado de
 // proposito: importar server.mjs executaria o server MCP (connect no
@@ -1905,6 +1906,104 @@ export async function syncTranscripts(memApiBase, casesBase, deps = {}) {
 }
 
 /**
+ * Espelho do scaffolding (styles/rules/templates/scripts/CLAUDE.md do root)
+ * — CMR-156. Politica DIFERENTE dos briefings de caso: a VM e a FONTE
+ * AUTOMATICA (regra documentada: "alterar output style ou rules: VM, depois
+ * synca"). O espelho SEMPRE aplica a versao da VM; possivel edicao local
+ * (local != baseline registrado, ou sem baseline — maquinas provisionadas
+ * antes desta feature) e preservada ao lado em `<arquivo>.bak` + log, nunca
+ * bloqueia o update (senao o bootstrap das maquinas antigas travaria pra
+ * sempre). Pura: caller le/escreve o disco.
+ */
+export function planScaffoldingSync(files, localState, baseline) {
+  const plan = { write: [], backup: [], baseline: {} };
+  for (const f of files || []) {
+    if (
+      !f ||
+      !isSafeScaffoldingPath(f.path) ||
+      typeof f.content !== "string" ||
+      typeof f.md5 !== "string"
+    ) {
+      continue;
+    }
+    const local = localState[f.path] ?? null;
+    plan.baseline[f.path] = f.md5;
+    if (local === f.md5) continue; // em dia
+    plan.write.push(f);
+    const base = baseline[f.path] ?? null;
+    if (local !== null && local !== base) plan.backup.push(f.path);
+  }
+  return plan;
+}
+
+function scaffoldingStatePath(casesBase) {
+  return join(casesBase, ".scaffolding-state.json");
+}
+
+function readScaffoldingState(casesBase) {
+  try {
+    const obj = JSON.parse(readFileSync(scaffoldingStatePath(casesBase), "utf-8"));
+    return obj && typeof obj === "object" ? obj : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Executa o espelho do scaffolding. Nunca lanca; erro vira linha de log. */
+export async function syncScaffolding(apiBase, casesBase) {
+  let manifest;
+  try {
+    manifest = await fetchJson(`${apiBase}/scaffolding`);
+  } catch (err) {
+    appendLog(casesBase, `scaffolding: erro manifest: ${err.message}`);
+    return;
+  }
+  const files = manifest.files || [];
+  if (files.length === 0) return; // manifest vazio = erro no servidor; nao mexe
+
+  const baseline = readScaffoldingState(casesBase).files || {};
+  const localState = {};
+  for (const f of files) {
+    if (!f || !isSafeScaffoldingPath(f.path)) continue;
+    try {
+      localState[f.path] = md5hex(readFileSync(join(casesBase, ...f.path.split("/"))));
+    } catch {
+      localState[f.path] = null;
+    }
+  }
+
+  const plan = planScaffoldingSync(files, localState, baseline);
+  let updated = 0;
+  let backups = 0;
+  for (const f of plan.write) {
+    const dest = join(casesBase, ...f.path.split("/"));
+    try {
+      if (plan.backup.includes(f.path)) {
+        copyFileSync(dest, `${dest}.bak`);
+        backups++;
+        appendLog(casesBase, `scaffolding: versao local de ${f.path} preservada em ${f.path}.bak`);
+      }
+      mkdirSync(dirname(dest), { recursive: true });
+      writeAtomic(dest, f.content);
+      updated++;
+    } catch (err) {
+      appendLog(casesBase, `scaffolding: erro em ${f.path}: ${err.message}`);
+    }
+  }
+  try {
+    writeAtomic(
+      scaffoldingStatePath(casesBase),
+      `${JSON.stringify({ files: plan.baseline }, null, 2)}\n`,
+    );
+  } catch (err) {
+    appendLog(casesBase, `scaffolding: erro baseline: ${err.message}`);
+  }
+  if (updated || backups) {
+    appendLog(casesBase, `scaffolding: atualizados=${updated}${backups ? ` backups=${backups}` : ""}`);
+  }
+}
+
+/**
  * Self-update do clone do marketplace de onde esta task roda. O autoUpdate
  * do CC (known_marketplaces.json) nao faz fetch do marketplace no startup
  * (constatado empiricamente em 03/08: FETCH_HEAD parado por 3+ dias com a
@@ -2059,6 +2158,15 @@ async function main() {
     (provisioned ? ` settings_provisionados=${provisioned}` : "") +
     (errors.length ? ` ERROS: ${errors.join(" | ")}` : "");
   appendLog(casesBase, summary);
+
+  // CMR-156: espelha o scaffolding (styles/rules/templates) da VM. Estado
+  // proprio (.scaffolding-state.json); nunca lanca; sessoes do CC abertas so
+  // veem o style novo ao reabrir.
+  try {
+    await syncScaffolding(apiBase, casesBase);
+  } catch (err) {
+    appendLog(casesBase, `scaffolding: erro inesperado: ${err.message}`);
+  }
 
   // CMR-138: sincroniza a memoria de caso por-autor (peers + upload do self).
   // Roda DEPOIS do briefing/settings, com estado e log PROPRIOS

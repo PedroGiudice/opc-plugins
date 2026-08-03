@@ -19,6 +19,7 @@ import {
   readFeedbackState,
   buildPeersIndex,
   selfUpdateMarketplace,
+  planScaffoldingSync,
   buildFeedbackIndex,
   syncMemoria,
   postJson,
@@ -2305,4 +2306,54 @@ test("selfUpdate: usa --ff-only, cloneRoot 2 niveis acima, prompt desligado e ti
   assert.ok(pullCall.args.includes("--ff-only"));
   assert.equal(pullCall.opts.env.GIT_TERMINAL_PROMPT, "0");
   assert.ok(pullCall.opts.timeout >= 10_000);
+});
+
+// ---------------------------------------------------------------------------
+// planScaffoldingSync (espelho de styles/rules/templates, CMR-156)
+
+const SCAF = (path, md5, content = "conteudo") => ({ path, md5, content });
+
+test("scaffolding: arquivo ausente e escrito, em-dia e no-op, baseline sempre avanca", () => {
+  const files = [SCAF(".claude/rules/a.md", "aaa"), SCAF("CLAUDE.md", "bbb")];
+  const plan = planScaffoldingSync(files, { "CLAUDE.md": "bbb" }, {});
+  assert.deepEqual(plan.write.map((f) => f.path), [".claude/rules/a.md"]);
+  assert.deepEqual(plan.backup, []);
+  assert.deepEqual(plan.baseline, { ".claude/rules/a.md": "aaa", "CLAUDE.md": "bbb" });
+});
+
+test("scaffolding: divergente intocado (local == baseline) atualiza SEM backup", () => {
+  const files = [SCAF("CLAUDE.md", "novo")];
+  const plan = planScaffoldingSync(files, { "CLAUDE.md": "velho" }, { "CLAUDE.md": "velho" });
+  assert.deepEqual(plan.write.map((f) => f.path), ["CLAUDE.md"]);
+  assert.deepEqual(plan.backup, []);
+});
+
+test("scaffolding: divergente editado (local != baseline) atualiza COM backup", () => {
+  const files = [SCAF("CLAUDE.md", "novo")];
+  const plan = planScaffoldingSync(files, { "CLAUDE.md": "editado" }, { "CLAUDE.md": "velho" });
+  assert.deepEqual(plan.write.map((f) => f.path), ["CLAUDE.md"]);
+  assert.deepEqual(plan.backup, ["CLAUDE.md"]);
+});
+
+test("scaffolding: sem baseline + divergente (bootstrap pre-feature) atualiza COM backup", () => {
+  const files = [SCAF(".claude/output-styles/legal-societario.md", "novo")];
+  const plan = planScaffoldingSync(
+    files,
+    { ".claude/output-styles/legal-societario.md": "versao-antiga-do-setup" },
+    {},
+  );
+  assert.deepEqual(plan.write.map((f) => f.path), [".claude/output-styles/legal-societario.md"]);
+  assert.deepEqual(plan.backup, [".claude/output-styles/legal-societario.md"]);
+});
+
+test("scaffolding: path inseguro e entrada invalida sao ignorados", () => {
+  const files = [
+    SCAF("../fora.md", "x"),
+    SCAF("C:/abs.md", "x"),
+    { path: ".claude/rules/ok.md", md5: 7, content: "sem-md5-string" },
+    SCAF(".claude/rules/ok.md", "aaa"),
+  ];
+  const plan = planScaffoldingSync(files, {}, {});
+  assert.deepEqual(plan.write.map((f) => f.path), [".claude/rules/ok.md"]);
+  assert.deepEqual(Object.keys(plan.baseline), [".claude/rules/ok.md"]);
 });
