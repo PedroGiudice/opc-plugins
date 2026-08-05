@@ -1621,10 +1621,36 @@ export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
   // de briefing já trouxe (bootstrap: caso sem nenhum workdoc na VM ainda). Dir
   // local que o espelho NUNCA trouxe é trabalho pessoal do usuário (CMR-104) —
   // o canal não o varre nem sobe nada de lá.
-  const casos = [...new Set([...Object.keys(remoteCases), ...Object.keys(briefingBaseline)])]
+  const candidatos = [...new Set([...Object.keys(remoteCases), ...Object.keys(briefingBaseline)])]
     .filter((c) => VALID_CASE_NAME.test(c) && !isExcluded(c))
     .filter((c) => existsSync(join(casesBase, c)))
     .sort();
+
+  // COLISÃO DE CAIXA no nome do caso: a VM tem casos que só diferem na caixa
+  // (produção: `LaVioletera-Salesforce` e `lavioletera-Salesforce`), e no NTFS
+  // do cliente eles são a MESMA pasta. Processar os dois faria o conteúdo de um
+  // subir por cima do outro no servidor. O grupo inteiro é PULADO — desempatar
+  // sozinho seria escolher qual trabalho apagar. O servidor tem o mesmo guard,
+  // mas esta lista também vem do baseline de briefing, não só do manifest.
+  // `VALID_CASE_NAME` garante nome ASCII, então `toLowerCase` basta.
+  const porCaixa = new Map();
+  for (const c of candidatos) {
+    const chave = c.toLowerCase();
+    if (!porCaixa.has(chave)) porCaixa.set(chave, []);
+    porCaixa.get(chave).push(c);
+  }
+  const casos = [];
+  for (const membros of porCaixa.values()) {
+    if (membros.length > 1) {
+      appendLog(
+        casesBase,
+        `workdocs: colisão de caixa entre casos [${membros.join(", ")}] -> grupo inteiro pulado ` +
+          "(no NTFS são a mesma pasta; renomeie na VM para desempatar)",
+      );
+      continue;
+    }
+    casos.push(membros[0]);
+  }
 
   const registros = [];
   const uploadCandidatos = [];
@@ -1820,7 +1846,16 @@ export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
 
   // ----- Baseline: só o que teve êxito de fato entra. -----
   try {
+    // Carrega adiante o baseline dos casos que NÃO foram processados neste tick
+    // (pasta indisponível por rename/lock de antivírus/drive de rede fora, ou
+    // grupo pulado por colisão de caixa). Reconstruir só com os processados
+    // apagaria o estado deles e o tick seguinte viraria bootstrap falso — com a
+    // política de conflito, bootstrap falso é conflito falso.
     const next = {};
+    const processados = new Set(registros.map((r) => r.caso));
+    for (const [caso, entry] of Object.entries(baseline)) {
+      if (!processados.has(caso) && entry && typeof entry === "object") next[caso] = entry;
+    }
     for (const r of registros) {
       const entry = computeWorkdocsBaseline({
         manifest: r.remoto,

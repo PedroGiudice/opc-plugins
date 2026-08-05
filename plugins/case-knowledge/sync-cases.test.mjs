@@ -3030,3 +3030,77 @@ test("syncWorkdocs: hub evolui durante o congelamento -> rematerializa a cópia 
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+test("syncWorkdocs: casos que colidem em caixa são PULADOS inteiros (NTFS os funde)", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr161-colisao-"));
+  try {
+    // Produção tem os dois na VM; no NTFS do cliente viram a MESMA pasta.
+    mkdirSync(join(base, "LaVioletera-Salesforce"), { recursive: true });
+    mkdirSync(join(base, "lavioletera-Salesforce"), { recursive: true });
+    mkdirSync(join(base, "caso-ok"), { recursive: true });
+    writeFileSync(join(base, "LaVioletera-Salesforce", "a.md"), "conteúdo do primeiro");
+    writeFileSync(join(base, "lavioletera-Salesforce", "a.md"), "conteúdo do segundo");
+    writeFileSync(join(base, "caso-ok", "b.md"), "caso saudável");
+    writeFileSync(
+      join(base, ".sync-state.json"),
+      JSON.stringify({ "LaVioletera-Salesforce": {}, "lavioletera-Salesforce": {}, "caso-ok": {} }),
+    );
+
+    const { deps, posts } = makeWorkdocsApi({
+      get: { "/workdocs-manifest": { cases: {} } },
+      post: {
+        "/cases/caso-ok/workdocs": (body) => ({ ok: true, written: body.files.length, failed: [] }),
+      },
+    });
+
+    await syncWorkdocs("http://t/api", base, "pedro-giudice", deps);
+
+    // nenhum POST para os colidentes (o fake 404-aria, mas a asserção é explícita)
+    const urls = posts.map((p) => p.url);
+    assert.equal(urls.filter((u) => /violetera/i.test(u)).length, 0);
+    assert.deepEqual(urls, ["http://t/api/cases/caso-ok/workdocs"], "o caso saudável segue normal");
+
+    const log = readFileSync(join(base, ".sync.log"), "utf-8");
+    assert.match(log, /LaVioletera-Salesforce/);
+    assert.match(log, /lavioletera-Salesforce/);
+    assert.match(log, /colis/i);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("syncWorkdocs: baseline de caso não processado no tick é carregado adiante", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr161-carrega-adiante-"));
+  try {
+    mkdirSync(join(base, "caso-presente"), { recursive: true });
+    writeFileSync(join(base, "caso-presente", "a.md"), "presente");
+    // caso-sumido tem baseline mas a pasta não existe neste tick (rename, lock
+    // de antivírus, drive de rede fora do ar)
+    writeFileSync(join(base, ".sync-state.json"), '{"caso-presente":{},"caso-sumido":{}}');
+    writeFileSync(
+      join(base, ".workdocs-state.json"),
+      JSON.stringify({
+        "caso-presente": { "a.md": "vAntigo" },
+        "caso-sumido": { "importante.md": "vSumido" },
+      }),
+    );
+
+    const { deps } = makeWorkdocsApi({
+      get: { "/workdocs-manifest": { cases: {} } },
+      post: {
+        "/cases/caso-presente/workdocs": (body) => ({ ok: true, written: body.files.length, failed: [] }),
+      },
+    });
+
+    await syncWorkdocs("http://t/api", base, "pedro-giudice", deps);
+
+    const st = JSON.parse(readFileSync(join(base, ".workdocs-state.json"), "utf-8"));
+    assert.deepEqual(
+      st["caso-sumido"],
+      { "importante.md": "vSumido" },
+      "apagar aqui viraria bootstrap falso no tick seguinte",
+    );
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});

@@ -79,8 +79,9 @@ export const WORKDOC_MAX_BATCH_BYTES = 3 * 1024 * 1024;
 /** Teto por CICLO: o tick roda a cada 5 min (e a tarefa do Windows tem
  * ExecutionTimeLimit de 5 min) — um backfill grande é fatiado entre ticks. */
 export const WORKDOC_MAX_TICK_BYTES = 12 * 1024 * 1024;
-/** Máximo de arquivos por requisição (espelha o batch da memória). */
-export const WORKDOC_MAX_BATCH_FILES = 50;
+// Máximo de arquivos por requisição (espelha o batch da memória). Interno: só
+// `planWorkdocUploadBatches` o consome, como default do cap `maxBatchFiles`.
+const WORKDOC_MAX_BATCH_FILES = 50;
 
 // Folga por arquivo para o envelope JSON ({"files":[{"path","content"}]}).
 const UPLOAD_ENVELOPE_RESERVE = 64;
