@@ -27,11 +27,13 @@ import { defaultMemApiBase } from "./memoria.mjs";
 import { isSafeScaffoldingPath } from "./setup.mjs";
 import {
   isWorkdocPath,
+  isSafeRelPath,
   conflictPath,
   planWorkdocsSync,
   computeWorkdocsBaseline,
   planWorkdocUploadBatches,
-  EXCLUDED_ROOT_DIRS as WORKDOC_EXCLUDED_ROOT_DIRS,
+  WORKDOC_EXCLUDED_DIRS,
+  WORKDOC_MAX_DEPTH,
   WORKDOC_MAX_FILE_BYTES,
 } from "./workdocs.mjs";
 
@@ -920,9 +922,9 @@ export async function postJson(url, body) {
 
 /**
  * GET autenticado que devolve os BYTES CRUS (Buffer). O download de workdoc
- * serve o arquivo em si, nao JSON — e o md5 do baseline e dos bytes crus, entao
- * o conteudo nunca pode passar por decode/encode de texto. Mesmo Bearer e
- * degrade do fetchJson; timeout maior (arquivo de ate 2 MiB).
+ * serve o arquivo em si, não JSON — e o md5 do baseline é dos bytes crus, então
+ * o conteúdo nunca pode passar por decode/encode de texto. Mesmo Bearer e
+ * degrade do fetchJson; timeout maior (arquivo de até 2 MiB).
  */
 export async function fetchBytes(url) {
   const res = await requestWithAuth((authHeaders) =>
@@ -1440,27 +1442,27 @@ export async function syncMemoria(apiBase, casesBase, selfAuthor, deps = {}) {
 // ---------- CMR-161: sync de workdocs do caso (pool comum de .md/.py) ----------
 //
 // Espelha os documentos de trabalho da pasta do caso (pesquisas .md, scripts de
-// geracao .py) entre as maquinas do escritorio. Pool COMUM: mesmo path em todas,
-// qualquer um evolui o arquivo do outro. A decisao e pura (workdocs.mjs); aqui
+// geração .py) entre as máquinas do escritório. Pool COMUM: mesmo path em todas,
+// qualquer um evolui o arquivo do outro. A decisão é pura (workdocs.mjs); aqui
 // mora o I/O.
 //
 // Invariantes:
-//  - Estado PROPRIO em `.workdocs-state.json`. Nao usa um namespace dentro de
-//    `.sync-state.json` porque `computeBaseline` RECONSTROI aquele objeto do zero
-//    a cada tick (so com os casos do manifest de briefing) -- uma chave irma seria
-//    apagada no ciclo seguinte. Mesmo padrao de `.memoria-state.json`.
-//  - O espelho NUNCA destroi: conflito preserva o local intacto e materializa o
-//    remoto ao lado; delecao (local ou remota) nao propaga na v1.
+//  - Estado PRÓPRIO em `.workdocs-state.json`. Não usa um namespace dentro de
+//    `.sync-state.json` porque `computeBaseline` RECONSTRÓI aquele objeto do zero
+//    a cada tick (só com os casos do manifest de briefing) -- uma chave irmã seria
+//    apagada no ciclo seguinte. Mesmo padrão de `.memoria-state.json`.
+//  - O espelho NUNCA destrói: conflito preserva o local intacto e materializa o
+//    remoto ao lado; deleção (local ou remota) não propaga na v1.
 //  - Nada aqui pode derrubar o sync de briefing: toda falha vira linha de log.
 
 const STATE_FILE_WORKDOCS = ".workdocs-state.json";
 
 // Teto de downloads por ciclo: a tarefa do Windows tem ExecutionTimeLimit de
-// 5 min e um seed grande nao pode monopolizar o tick. O resto vai no proximo.
+// 5 min e um seed grande não pode monopolizar o tick. O resto vai no próximo.
 const WORKDOC_MAX_TICK_DOWNLOADS = 200;
 
-// Tentativas de sufixo numerico quando o arquivo de conflito ja existe com
-// OUTRO conteudo (segundo conflito no mesmo arquivo antes da resolucao manual).
+// Tentativas de sufixo numérico quando o arquivo de conflito já existe com
+// OUTRO conteúdo (segundo conflito no mesmo arquivo antes da reconciliação).
 const CONFLICT_MAX_PROBES = 20;
 
 function readWorkdocsBaselineFrom(casesBase) {
@@ -1470,7 +1472,7 @@ function readWorkdocsBaselineFrom(casesBase) {
     const obj = JSON.parse(readFileSync(p, "utf-8"));
     return obj && typeof obj === "object" ? obj : {};
   } catch {
-    return {}; // estado corrompido: trata como bootstrap, nao derruba o sync
+    return {}; // estado corrompido: trata como bootstrap, não derruba o sync
   }
 }
 
@@ -1483,19 +1485,27 @@ function writeWorkdocsBaseline(casesBase, baseline) {
 
 /**
  * Varre a pasta de um caso e devolve os workdocs locais:
- * `{ <path relativo com />: { md5, size } }`.
+ * `{ <path relativo com />: { md5, size } }` para o que o canal transporta e
+ * `{ oversize: true, size }` para o que EXISTE no disco mas está acima do teto
+ * por arquivo.
  *
- * Poda dot-dirs em qualquer nivel e `base/`, `base_classifier/`, `_archive/` na
- * raiz (sao os autos e derivados do pipeline — arvores grandes que nao sao
- * workdocs). `isWorkdocPath` e a autoridade final por arquivo. Symlink nao e
- * `isFile()` nem `isDirectory()` no dirent -> ignorado (sem loop, sem escape).
- * Arquivo acima do teto por arquivo fica de fora (o servidor recusaria).
- * Tolerante: dir ausente/ilegivel -> objeto vazio.
+ * O marcador `oversize` é essencial: descartar a entrada faria o planejador ler
+ * "não existe local" e emitir download — SOBRESCREVENDO trabalho local que só
+ * ficou grande demais para o canal.
+ *
+ * Poda dot-dirs e os diretórios de `WORKDOC_EXCLUDED_DIRS` (autos do pipeline e
+ * árvores de dependência) em QUALQUER nível, e para na profundidade máxima —
+ * tudo espelhando o walk do servidor. `isWorkdocPath` é a autoridade final por
+ * arquivo. Symlink não é `isFile()` nem `isDirectory()` no dirent -> ignorado
+ * (sem loop, sem escape). O tamanho vem do `stat`: só o que é elegível é LIDO
+ * (ler antes de medir poria centenas de MB na RAM a cada tick).
+ * Tolerante: dir ausente/ilegível -> objeto vazio.
  */
 export function readCaseWorkdocs(caseDir, maxFileBytes = WORKDOC_MAX_FILE_BYTES) {
   const out = {};
   if (!existsSync(caseDir)) return out;
-  const walk = (dir, prefix) => {
+  const walk = (dir, prefix, depth) => {
+    if (depth > WORKDOC_MAX_DEPTH) return;
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
@@ -1507,21 +1517,24 @@ export function readCaseWorkdocs(caseDir, maxFileBytes = WORKDOC_MAX_FILE_BYTES)
       const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
       const abs = join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (!prefix && WORKDOC_EXCLUDED_ROOT_DIRS.has(entry.name)) continue;
-        walk(abs, rel);
+        if (WORKDOC_EXCLUDED_DIRS.has(entry.name)) continue;
+        walk(abs, rel, depth + 1);
       } else if (entry.isFile()) {
         if (!isWorkdocPath(rel)) continue;
         try {
-          const buf = readFileSync(abs);
-          if (buf.length > maxFileBytes) continue;
-          out[rel] = { md5: md5hex(buf), size: buf.length };
+          const size = statSync(abs).size;
+          if (size > maxFileBytes) {
+            out[rel] = { oversize: true, size }; // presente, porém inelegível
+            continue;
+          }
+          out[rel] = { md5: md5hex(readFileSync(abs)), size };
         } catch {
-          // arquivo sumiu ou ilegivel entre o readdir e o read: ignora
+          // arquivo sumiu ou ilegível entre o readdir e o stat/read: ignora
         }
       }
     }
   };
-  walk(caseDir, "");
+  walk(caseDir, "", 0);
   return out;
 }
 
@@ -1534,15 +1547,15 @@ export function readCaseWorkdocs(caseDir, maxFileBytes = WORKDOC_MAX_FILE_BYTES)
  *   POST /cases/{c}/workdocs -> body { files: [{ path, content(base64) }] };
  *        resp { ok, written, failed: [{ path, reason }] }
  *
- * Nunca lanca: toda falha (rede, disco, plano) vira linha em `.sync.log`.
+ * Nunca lança: toda falha (rede, disco, plano) vira linha em `.sync.log`.
  */
 export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
   const doGet = deps.getJson || fetchJson;
   const doGetBytes = deps.getBytes || fetchBytes;
   const doPost = deps.postJson || postJson;
 
-  // Sem autor nao ha como nomear o arquivo de conflito nem autenticar o
-  // write-path (Bearer obrigatorio) — o canal inteiro fica de fora do ciclo.
+  // Sem autor não há como nomear o arquivo de conflito nem autenticar o
+  // write-path (Bearer obrigatório) — o canal inteiro fica de fora do ciclo.
   if (selfAuthor === null || selfAuthor === undefined) {
     appendLog(casesBase, "workdocs: sem autor (credencial ausente/sem claim) -> skip");
     return;
@@ -1567,10 +1580,10 @@ export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
     return;
   }
 
-  // Casos elegiveis: os que o servidor conhece (manifest) mais os que o espelho
-  // de briefing ja trouxe (bootstrap: caso sem nenhum workdoc na VM ainda). Dir
-  // local que o espelho NUNCA trouxe e trabalho pessoal do usuario (CMR-104) —
-  // o canal nao o varre nem sobe nada de la.
+  // Casos elegíveis: os que o servidor conhece (manifest) mais os que o espelho
+  // de briefing já trouxe (bootstrap: caso sem nenhum workdoc na VM ainda). Dir
+  // local que o espelho NUNCA trouxe é trabalho pessoal do usuário (CMR-104) —
+  // o canal não o varre nem sobe nada de lá.
   const casos = [...new Set([...Object.keys(remoteCases), ...Object.keys(briefingBaseline)])]
     .filter((c) => VALID_CASE_NAME.test(c) && !isExcluded(c))
     .filter((c) => existsSync(join(casesBase, c)))
@@ -1583,11 +1596,13 @@ export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
   let conflitos = 0;
   let erros = 0;
 
-  // Baixa `relOrigem` do caso e grava em `relDestino` (iguais no download;
-  // distintos no conflito). Revalida os paths imediatamente antes da escrita
-  // (camada 2, defense-in-depth: dado remoto nunca vira caminho arbitrario).
+  // Baixa `relOrigem` do caso e grava em `relDestino` (iguais no download; no
+  // conflito o destino é a cópia `.conflito-`, que NÃO é workdoc elegível e por
+  // isso só passa pelos guards de path, não pela allowlist). Revalida os
+  // segmentos imediatamente antes da escrita (camada 2, defense-in-depth: dado
+  // remoto nunca vira caminho arbitrário). Devolve o md5 do que foi GRAVADO.
   const baixarPara = async (caso, relOrigem, relDestino) => {
-    if (!isWorkdocPath(relOrigem) || !isWorkdocPath(relDestino)) {
+    if (!isWorkdocPath(relOrigem) || !isSafeRelPath(relDestino)) {
       appendLog(casesBase, `workdocs ${caso}: path inseguro no plano (${relOrigem}) -> skip`);
       return null;
     }
@@ -1599,7 +1614,7 @@ export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
       const dest = join(casesBase, caso, ...relDestino.split("/"));
       mkdirSync(dirname(dest), { recursive: true });
       writeAtomic(dest, buf);
-      return buf;
+      return md5hex(buf);
     } catch (err) {
       erros++;
       appendLog(casesBase, `workdocs ${caso}: erro baixando ${relOrigem}: ${err.message}`);
@@ -1617,40 +1632,56 @@ export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
       appendLog(casesBase, `workdocs ${caso}: erro lendo pasta: ${err.message}`);
       continue;
     }
+    // Preserva a distinção "sem md5" (presente e inelegível) da chave ausente:
+    // é o que impede o planejador de emitir download por cima de trabalho local.
     const localMd5 = {};
-    for (const [p, info] of Object.entries(local)) localMd5[p] = info.md5;
+    for (const [p, info] of Object.entries(local)) {
+      localMd5[p] = info.oversize ? { oversize: true } : info.md5;
+    }
 
     const plan = planWorkdocsSync({ manifest: remoto, localFiles: localMd5, baseline: baseline[caso] || {} });
     for (const w of plan.warnings) appendLog(casesBase, `workdocs ${caso}: ${w}`);
 
-    const baixadosCaso = new Set();
+    const baixadosCaso = new Map(); // path -> md5 dos bytes gravados
     for (const rel of plan.downloads) {
-      if ((await baixarPara(caso, rel, rel)) !== null) {
-        baixadosCaso.add(rel);
+      const md5Gravado = await baixarPara(caso, rel, rel);
+      if (md5Gravado !== null) {
+        baixadosCaso.set(rel, md5Gravado);
         baixados++;
       }
     }
 
-    // Conflito: o local fica INTACTO; a versao remota materializa ao lado como
-    // `<nome>.conflito-<slug><ext>`. Se ja existe um arquivo de conflito com
-    // OUTRO conteudo (segundo conflito antes da resolucao manual), sufixa em vez
-    // de sobrescrever — nunca se perde texto.
-    const conflitadosCaso = new Set();
+    // Conflito: o local fica INTACTO; a versão remota materializa ao lado como
+    // `<nome>.conflito-<slug><ext>`. Se já existe um arquivo de conflito com
+    // OUTRO conteúdo (segundo conflito antes da reconciliação manual), sufixa em
+    // vez de sobrescrever — nunca se perde texto. Sem slot livre, NADA é escrito
+    // e o conflito NÃO entra no baseline: adotar o md5 remoto sem ter gravado
+    // faria o local subir por cima e destruir a versão da VM.
+    const conflitadosCaso = new Map(); // path -> md5 da cópia gravada
     for (const rel of plan.conflicts) {
       const remoteMd5 = typeof remoto[rel] === "string" ? remoto[rel] : remoto[rel]?.md5;
       const alvo = conflitPathDisponivel(join(casesBase, caso), rel, selfAuthor, remoteMd5);
       if (alvo === null) {
-        appendLog(casesBase, `workdocs ${caso}: nao foi possivel nomear o conflito de ${rel} -> local preservado, nada escrito`);
+        appendLog(casesBase, `workdocs ${caso}: não foi possível nomear o conflito de ${rel} -> local preservado, nada escrito`);
+        continue;
+      }
+      if (alvo.esgotado) {
+        appendLog(
+          casesBase,
+          `workdocs ${caso}: ${CONFLICT_MAX_PROBES} slots de conflito de ${rel} ocupados -> nada escrito; ` +
+            "reconcilie as cópias existentes para o canal voltar a andar",
+        );
         continue;
       }
       if (alvo.jaMaterializado) {
-        conflitadosCaso.add(rel); // copia identica ja no disco: idempotente
+        conflitadosCaso.set(rel, remoteMd5); // cópia idêntica já no disco: idempotente
         continue;
       }
-      if ((await baixarPara(caso, rel, alvo.rel)) !== null) {
-        conflitadosCaso.add(rel);
+      const md5Copia = await baixarPara(caso, rel, alvo.rel);
+      if (md5Copia !== null) {
+        conflitadosCaso.set(rel, md5Copia);
         conflitos++;
-        appendLog(casesBase, `workdocs ${caso}: conflito em ${rel} -> local preservado, versao da VM em ${alvo.rel}`);
+        appendLog(casesBase, `workdocs ${caso}: conflito em ${rel} -> local preservado, versão da VM em ${alvo.rel}`);
       }
     }
 
@@ -1664,17 +1695,17 @@ export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
   }
 
   if (orcamentoDownload <= 0) {
-    appendLog(casesBase, `workdocs: teto de ${WORKDOC_MAX_TICK_DOWNLOADS} downloads por ciclo atingido -> resto no proximo tick`);
+    appendLog(casesBase, `workdocs: teto de ${WORKDOC_MAX_TICK_DOWNLOADS} downloads por ciclo atingido -> resto no próximo tick`);
   }
 
-  // ----- Uploads: batches sob os tetos do canal, agrupados por caso (a rota e
-  // por caso; dividir um batch por caso so REDUZ o corpo, nunca estoura). -----
+  // ----- Uploads: batches sob os tetos do canal, agrupados por caso (a rota é
+  // por caso; dividir um batch por caso só REDUZ o corpo, nunca estoura). -----
   const { batches, skipped, deferred } = planWorkdocUploadBatches(uploadCandidatos);
   for (const s of skipped) {
     appendLog(casesBase, `workdocs ${s.case}: upload pulado ${s.path}: ${s.reason}`);
   }
   if (deferred.length > 0) {
-    appendLog(casesBase, `workdocs: ${deferred.length} arquivo(s) adiados para o proximo ciclo (teto por ciclo)`);
+    appendLog(casesBase, `workdocs: ${deferred.length} arquivo(s) adiados para o próximo ciclo (teto por ciclo)`);
   }
 
   const enviadosPorCaso = new Map();
@@ -1690,8 +1721,8 @@ export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
       for (const f of arquivos) {
         try {
           const buf = readFileSync(join(casesBase, caso, ...f.path.split("/")));
-          // Mudou entre o scan e o envio: nao sobe agora (o md5 do baseline
-          // seria o do scan). O proximo ciclo pega a versao nova.
+          // Mudou entre o scan e o envio: não sobe agora (o md5 do baseline
+          // seria o do scan). O próximo ciclo pega a versão nova.
           if (md5hex(buf) !== f.md5) {
             appendLog(casesBase, `workdocs ${caso}: ${f.path} mudou durante o ciclo -> upload adiado`);
             continue;
@@ -1727,7 +1758,7 @@ export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
     }
   }
 
-  // ----- Baseline: so o que teve exito de fato entra. -----
+  // ----- Baseline: só o que teve êxito de fato entra. -----
   try {
     const next = {};
     for (const r of registros) {
@@ -1756,35 +1787,41 @@ export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
 }
 
 /**
- * Resolve onde materializar a versao remota de um conflito dentro de `caseDir`.
- * Retorna { rel, jaMaterializado } ou null quando o nome nao pode ser formado.
+ * Resolve onde materializar a versão remota de um conflito dentro de `caseDir`.
+ * Retorna `null` quando o nome não pode ser formado; senão
+ * `{ rel, jaMaterializado, esgotado }`:
  *
- *  - slot livre                            -> escreve ali;
- *  - slot ocupado com o MESMO conteudo do
- *    remoto (`remoteMd5`)                  -> ja materializado, nao rebaixa;
- *  - slot ocupado com conteudo DIFERENTE   -> tenta `-2`, `-3`, ... (segundo
- *    conflito antes da resolucao manual: sobrescrever apagaria texto que o
- *    usuario ainda nao reconciliou);
- *  - todos os slots ocupados               -> desiste preservando tudo.
+ *  - slot livre                            -> `{rel, jaMaterializado:false}`;
+ *  - slot ocupado com o MESMO conteúdo do
+ *    remoto (`remoteMd5`)                  -> `{jaMaterializado:true}`, o
+ *    ciclo anterior já preservou aquela versão (não rebaixa);
+ *  - slot ocupado com conteúdo DIFERENTE   -> tenta `-2`, `-3`, ... (segundo
+ *    conflito antes da reconciliação manual: sobrescrever apagaria texto que o
+ *    usuário ainda não reconciliou);
+ *  - todos os slots ocupados               -> `{esgotado:true}`: NADA foi
+ *    escrito, então o caller NÃO pode tratar como materializado (adotar o md5
+ *    remoto no baseline mandaria o local por cima e destruiria a versão da VM
+ *    no ciclo seguinte). O conflito é reemitido no próximo tick.
  */
 function conflitPathDisponivel(caseDir, rel, selfAuthor, remoteMd5) {
   const base = conflictPath(rel, selfAuthor);
   if (base === null) return null;
-  const ext = base.endsWith(".md") ? ".md" : ".py";
-  const semExt = base.slice(0, -ext.length);
+  const dot = base.lastIndexOf(".");
+  const ext = base.slice(dot);
+  const semExt = base.slice(0, dot);
   for (let n = 1; n <= CONFLICT_MAX_PROBES; n++) {
     const cand = n === 1 ? base : `${semExt}-${n}${ext}`;
     const abs = join(caseDir, ...cand.split("/"));
-    if (!existsSync(abs)) return { rel: cand, jaMaterializado: false };
+    if (!existsSync(abs)) return { rel: cand, jaMaterializado: false, esgotado: false };
     try {
       if (remoteMd5 !== undefined && md5hex(readFileSync(abs)) === remoteMd5) {
-        return { rel: cand, jaMaterializado: true };
+        return { rel: cand, jaMaterializado: true, esgotado: false };
       }
     } catch {
-      // ilegivel: trata como ocupado e tenta o proximo slot
+      // ilegível: trata como ocupado e tenta o próximo slot
     }
   }
-  return { rel: base, jaMaterializado: true };
+  return { rel: null, jaMaterializado: false, esgotado: true };
 }
 
 // ---------- CMR-135: uploader de transcripts de sessao (Task 9) ----------
@@ -2563,10 +2600,10 @@ async function main() {
   }
 
   // CMR-161: espelha os workdocs (.md/.py) da pasta do caso — pool comum do
-  // escritorio. Roda POR ULTIMO de proposito: e a fase nova e nao pode roubar
-  // o orcamento de tempo do ciclo (a tarefa do Windows tem ExecutionTimeLimit
-  // de 5 min) das fases ja estabelecidas. Estado e log PROPRIOS
-  // (.workdocs-state.json); syncWorkdocs nunca lanca, o try/catch e ultima
+  // escritório. Roda POR ÚLTIMO de propósito: é a fase nova e não pode roubar
+  // o orçamento de tempo do ciclo (a tarefa do Windows tem ExecutionTimeLimit
+  // de 5 min) das fases já estabelecidas. Estado e log PRÓPRIOS
+  // (.workdocs-state.json); syncWorkdocs nunca lança, o try/catch é última
   // linha de defesa.
   try {
     await syncWorkdocs(apiBase, casesBase, selfAuthor);
