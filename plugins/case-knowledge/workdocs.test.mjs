@@ -466,10 +466,15 @@ test("plano: motivo da inelegibilidade aparece no aviso", () => {
 });
 
 test("isWorkdocPath: rejeita a faixa de controle C1 (paridade com is_control do servidor)", () => {
-  assert.equal(isWorkdocPath("nota\u0085.md"), false); // NEL, aceito em nome NTFS
-  assert.equal(isWorkdocPath("nota\u0080.md"), false);
-  assert.equal(isWorkdocPath("nota\u009F.md"), false);
-  assert.equal(isWorkdocPath("notas\u0085/x.md"), false);
-  assert.equal(isWorkdocPath("nota\u007F.md"), false); // DEL segue barrado
-  assert.equal(isWorkdocPath("nota\u00A0.md"), true); // NBSP nao e controle
+  // Os 3 paths que divergiam na bateria cruzada com o servidor, verbatim:
+  // "a" + UM caractere de controle C1 + ".md". Construídos por escape unicode —
+  // caractere de controle colado no fonte não sobrevive ao transporte.
+  assert.equal(isWorkdocPath("a\u0085.md"), false); // NEL
+  assert.equal(isWorkdocPath("a\u0080.md"), false); // início da faixa C1
+  assert.equal(isWorkdocPath("a\u009F.md"), false); // fim da faixa C1
+  // e as bordas que já concordavam, para a classe não encolher nem crescer:
+  assert.equal(isWorkdocPath("a\u007F.md"), false); // DEL, início do range C1
+  assert.equal(isWorkdocPath("a\u001F.md"), false); // fim do range C0
+  assert.equal(isWorkdocPath("notas\u0085/x.md"), false); // também em segmento de diretório
+  assert.equal(isWorkdocPath("a\u00A0.md"), true); // NBSP não é controle (Zs, não Cc)
 });
