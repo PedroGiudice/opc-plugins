@@ -2881,3 +2881,48 @@ test("syncWorkdocs: arquivo atrás de diretório symlink não é lido, escrito n
     rmSync(fora, { recursive: true, force: true });
   }
 });
+
+test("syncWorkdocs: slot de conflito que é symlink não é lido nem contornado (guard da sonda)", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr161-slot-symlink-"));
+  const fora = mkdtempSync(join(tmpdir(), "cmr161-FORA-slot-"));
+  try {
+    const caso = join(base, "caso-a");
+    mkdirSync(join(caso, "notas"), { recursive: true }); // diretório REAL
+    writeFileSync(join(caso, "notas", "tese.md"), "minha versão local"); // arquivo REAL, visível ao walk
+    writeFileSync(join(fora, "segredo.md"), "arquivo de fora do caso");
+    // SLOT 1 da cópia de conflito pré-existente como symlink para fora
+    symlinkSync(join(fora, "segredo.md"), join(caso, "notas", "tese.conflito-pedro-giudice.md"));
+    writeFileSync(join(base, ".sync-state.json"), '{"caso-a":{}}');
+    writeFileSync(
+      join(base, ".workdocs-state.json"),
+      JSON.stringify({ "caso-a": { "notas/tese.md": "v0" } }),
+    );
+
+    const { deps, bytes } = makeWorkdocsApi({
+      get: { "/workdocs-manifest": { cases: { "caso-a": { "notas/tese.md": { md5: "vmX" } } } } },
+      bytes: { "path=notas%2Ftese.md": "versão da VM" },
+    });
+
+    await syncWorkdocs("http://t/api", base, "pedro-giudice", deps);
+
+    // o local segue intacto e nada foi materializado contornando o link
+    assert.equal(readFileSync(join(caso, "notas", "tese.md"), "utf-8"), "minha versão local");
+    assert.equal(
+      existsSync(join(caso, "notas", "tese.conflito-pedro-giudice-2.md")),
+      false,
+      "sondar o slot 1 por trás do link não pode levar a materializar no slot 2",
+    );
+    assert.equal(bytes.length, 0, "sem slot seguro não há o que baixar");
+    // o alvo do link, fora do caso, não foi tocado
+    assert.equal(lstatSync(join(caso, "notas", "tese.conflito-pedro-giudice.md")).isSymbolicLink(), true);
+    assert.deepEqual(readdirSync(fora), ["segredo.md"]);
+    assert.equal(readFileSync(join(fora, "segredo.md"), "utf-8"), "arquivo de fora do caso");
+    // e o baseline NÃO adota o md5 remoto: nada foi preservado no disco
+    const st = JSON.parse(readFileSync(join(base, ".workdocs-state.json"), "utf-8"));
+    assert.equal(st["caso-a"]["notas/tese.md"], "v0");
+    assert.match(readFileSync(join(base, ".sync.log"), "utf-8"), /symlink/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+    rmSync(fora, { recursive: true, force: true });
+  }
+});

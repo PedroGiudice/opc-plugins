@@ -1706,8 +1706,9 @@ export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
     for (const rel of plan.conflicts) {
       const remoteMd5 = typeof remoto[rel] === "string" ? remoto[rel] : remoto[rel]?.md5;
       const alvo = conflitPathDisponivel(join(casesBase, caso), rel, selfAuthor, remoteMd5);
-      if (alvo === null) {
-        appendLog(casesBase, `workdocs ${caso}: não foi possível nomear o conflito de ${rel} -> local preservado, nada escrito`);
+      if (alvo === null || alvo.erro) {
+        const motivo = alvo?.erro ?? "não foi possível nomear a cópia";
+        appendLog(casesBase, `workdocs ${caso}: conflito de ${rel} recusado (${motivo}) -> local preservado, nada escrito`);
         continue;
       }
       if (alvo.esgotado) {
@@ -1834,7 +1835,7 @@ export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
 /**
  * Resolve onde materializar a versão remota de um conflito dentro de `caseDir`.
  * Retorna `null` quando o nome não pode ser formado; senão
- * `{ rel, jaMaterializado, esgotado }`:
+ * `{ rel, jaMaterializado, esgotado, erro }`:
  *
  *  - slot livre                            -> `{rel, jaMaterializado:false}`;
  *  - slot ocupado com o MESMO conteúdo do
@@ -1843,6 +1844,15 @@ export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
  *  - slot ocupado com conteúdo DIFERENTE   -> tenta `-2`, `-3`, ... (segundo
  *    conflito antes da reconciliação manual: sobrescrever apagaria texto que o
  *    usuário ainda não reconciliou);
+ *  - QUALQUER slot sondado é symlink (ou
+ *    está atrás de diretório linkado)      -> `{erro}`: a sonda abaixo usa
+ *    `existsSync`/`readFileSync`, que SEGUEM link — sem este guard o cliente
+ *    leria arquivo de fora da pasta do caso e ainda poderia contorná-lo
+ *    materializando no slot seguinte, ou adotar no baseline o md5 de um
+ *    arquivo que não é dele. Cenário real: o slot já existir como link. Recusa
+ *    o conflito inteiro (não pula o slot): link na área de conflito é anomalia
+ *    que pede olho humano, e desviar dele seria decidir sync por leitura de
+ *    fora do caso.
  *  - todos os slots ocupados               -> `{esgotado:true}`: NADA foi
  *    escrito, então o caller NÃO pode tratar como materializado (adotar o md5
  *    remoto no baseline mandaria o local por cima e destruiria a versão da VM
@@ -1851,18 +1861,18 @@ export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
 function conflitPathDisponivel(caseDir, rel, selfAuthor, remoteMd5) {
   const base = conflictPath(rel, selfAuthor);
   if (base === null) return null;
-  // Mesmo guard de escrita do download: com um componente de diretório
-  // linkado, a SONDA abaixo (`existsSync`/md5) já leria fora da pasta do caso.
-  if (resolveWorkdocDestino(caseDir, base).erro) return null;
   const dot = base.lastIndexOf(".");
   const ext = base.slice(dot);
   const semExt = base.slice(0, dot);
   for (let n = 1; n <= CONFLICT_MAX_PROBES; n++) {
     const cand = n === 1 ? base : `${semExt}-${n}${ext}`;
-    const abs = join(caseDir, ...cand.split("/"));
-    if (!existsSync(abs)) return { rel: cand, jaMaterializado: false, esgotado: false };
+    // Guard ANTES de qualquer existsSync/read: vale por CANDIDATO, não só pelo
+    // primeiro — o link pode estar em qualquer slot da sequência.
+    const destino = resolveWorkdocDestino(caseDir, cand);
+    if (destino.erro) return { rel: null, jaMaterializado: false, esgotado: false, erro: destino.erro };
+    if (!existsSync(destino.path)) return { rel: cand, jaMaterializado: false, esgotado: false };
     try {
-      if (remoteMd5 !== undefined && md5hex(readFileSync(abs)) === remoteMd5) {
+      if (remoteMd5 !== undefined && md5hex(readFileSync(destino.path)) === remoteMd5) {
         return { rel: cand, jaMaterializado: true, esgotado: false };
       }
     } catch {

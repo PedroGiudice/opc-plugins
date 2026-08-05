@@ -35,10 +35,11 @@ const BRIEFING_FILES_LOWER = new Set(BRIEFING_FILES.map(asciiLower));
  * Diretórios barrados em QUALQUER segmento. Exportado para o scan local podar
  * essas árvores antes de descer nelas.
  *
- * As três primeiras espelham `WORKDOC_EXCLUDED_DIRS` do servidor (autos e
- * derivados do pipeline). As demais são árvores de DEPENDÊNCIA: um `venv/` ao
- * lado de um script tem milhares de `.py` que não são trabalho de ninguém —
- * sem esta poda o canal viraria um upload em massa perpétuo.
+ * Os SETE nomes espelham `WORKDOC_EXCLUDED_DIRS` do servidor (`api.rs`) — as
+ * duas pontas barram o mesmo conjunto, sem divergência. Os três primeiros são
+ * autos e derivados do pipeline; os quatro últimos são árvores de DEPENDÊNCIA:
+ * um `venv/` ao lado de um script tem milhares de `.py` que não são trabalho de
+ * ninguém — sem esta poda o canal viraria um upload em massa perpétuo.
  */
 export const WORKDOC_EXCLUDED_DIRS = new Set([
   "_archive",
