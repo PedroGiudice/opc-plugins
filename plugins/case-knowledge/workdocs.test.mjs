@@ -19,16 +19,46 @@ test("isWorkdocPath: aceita .md e .py na raiz e em subpasta", () => {
   assert.equal(isWorkdocPath("notas/2026/apelacao.md"), true);
 });
 
-test("isWorkdocPath: rejeita os 3 arquivos de briefing (trilho proprio)", () => {
+test("isWorkdocPath: rejeita os 3 arquivos de briefing (trilho próprio)", () => {
   assert.equal(isWorkdocPath("CLAUDE.md"), false);
   assert.equal(isWorkdocPath("case.yaml"), false);
   assert.equal(isWorkdocPath("documentos.yaml"), false);
 });
 
-test("isWorkdocPath: rejeita autos e derivados do pipeline", () => {
+test("isWorkdocPath: rejeita autos e derivados do pipeline em QUALQUER segmento", () => {
   assert.equal(isWorkdocPath("base/x.md"), false);
   assert.equal(isWorkdocPath("base_classifier/x.md"), false);
   assert.equal(isWorkdocPath("_archive/x.md"), false);
+  // fronteira com o servidor: a exclusão vale em qualquer segmento de diretório
+  assert.equal(isWorkdocPath("notas/base/x.md"), false);
+  assert.equal(isWorkdocPath("a/b/_archive/c/x.py"), false);
+  // ...mas o nome do ARQUIVO não é diretório
+  assert.equal(isWorkdocPath("notas/base.md"), true);
+});
+
+test("isWorkdocPath: rejeita árvore de dependência em qualquer segmento", () => {
+  assert.equal(isWorkdocPath("venv/lib/x.py"), false);
+  assert.equal(isWorkdocPath("scripts/venv/lib/x.py"), false);
+  assert.equal(isWorkdocPath("node_modules/pacote/x.md"), false);
+  assert.equal(isWorkdocPath("scripts/__pycache__/x.py"), false);
+  assert.equal(isWorkdocPath("a/site-packages/b/x.py"), false);
+});
+
+test("isWorkdocPath: rejeita CLAUDE.md por BASENAME em qualquer profundidade", () => {
+  assert.equal(isWorkdocPath("notas/CLAUDE.md"), false);
+  assert.equal(isWorkdocPath("a/b/CLAUDE.md"), false);
+});
+
+test("isWorkdocPath: extensão é case-insensitive (comparada em minúsculas)", () => {
+  assert.equal(isWorkdocPath("NOTA.MD"), true);
+  assert.equal(isWorkdocPath("notas/Script.Py"), true);
+  assert.equal(isWorkdocPath("RASCUNHO.LOCAL.MD"), false); // opt-out também
+});
+
+test("isWorkdocPath: cópia de conflito não é workdoc elegível (I4)", () => {
+  assert.equal(isWorkdocPath("tese.conflito-pedro-giudice.md"), false);
+  assert.equal(isWorkdocPath("notas/tese.conflito-bia-2.md"), false);
+  assert.equal(isWorkdocPath("scripts/gerar.conflito-bia.py"), false);
 });
 
 test("isWorkdocPath: rejeita dotfile/dot-dir em qualquer segmento", () => {
@@ -43,20 +73,23 @@ test("isWorkdocPath: rejeita opt-out *.local.md / *.local.py", () => {
   assert.equal(isWorkdocPath("notas/util.local.py"), false);
 });
 
-test("isWorkdocPath: rejeita extensao fora da allowlist", () => {
+test("isWorkdocPath: rejeita extensão fora da allowlist", () => {
   assert.equal(isWorkdocPath("peca.docx"), false);
   assert.equal(isWorkdocPath("planilha.xlsx"), false);
   assert.equal(isWorkdocPath("notas/relatorio.pdf"), false);
   assert.equal(isWorkdocPath("sem-extensao"), false);
 });
 
-test("isWorkdocPath: rejeita traversal, absoluto e separador nao-canonico", () => {
+test("isWorkdocPath: rejeita traversal, absoluto e separador não-canônico", () => {
   assert.equal(isWorkdocPath("../x.md"), false);
   assert.equal(isWorkdocPath("a/../../x.md"), false);
   assert.equal(isWorkdocPath("/etc/x.md"), false);
   assert.equal(isWorkdocPath("C:/temp/x.md"), false);
   assert.equal(isWorkdocPath("notas\\x.md"), false);
   assert.equal(isWorkdocPath("a//x.md"), false);
+  assert.equal(isWorkdocPath("nota.md/"), false);
+  assert.equal(isWorkdocPath("a:b.md"), false); // qualquer `:`, como o servidor
+  assert.equal(isWorkdocPath("nota\u0007.md"), false); // caractere de controle
   assert.equal(isWorkdocPath(""), false);
   assert.equal(isWorkdocPath(null), false);
   assert.equal(isWorkdocPath(42), false);
@@ -64,7 +97,7 @@ test("isWorkdocPath: rejeita traversal, absoluto e separador nao-canonico", () =
 
 // ---------- nome do arquivo de conflito ----------
 
-test("conflictPath: insere .conflito-<slug> antes da extensao, preservando a pasta", () => {
+test("conflictPath: insere .conflito-<slug> antes da extensão, preservando a pasta", () => {
   assert.equal(conflictPath("pesquisa.md", "pedro-giudice"), "pesquisa.conflito-pedro-giudice.md");
   assert.equal(
     conflictPath("notas/2026/apelacao.md", "bia"),
@@ -73,11 +106,15 @@ test("conflictPath: insere .conflito-<slug> antes da extensao, preservando a pas
   assert.equal(conflictPath("scripts/gerar.py", "bia"), "scripts/gerar.conflito-bia.py");
 });
 
-test("conflictPath: resultado continua sendo um workdoc valido", () => {
-  assert.equal(isWorkdocPath(conflictPath("notas/a.md", "pedro-giudice")), true);
+test("conflictPath: a cópia NÃO é workdoc (material de reconciliação local, I4)", () => {
+  assert.equal(isWorkdocPath(conflictPath("notas/a.md", "pedro-giudice")), false);
 });
 
-test("conflictPath: slug ou path invalido -> null (nunca vira escrita)", () => {
+test("conflictPath: preserva a caixa da extensão original", () => {
+  assert.equal(conflictPath("NOTA.MD", "bia"), "NOTA.conflito-bia.MD");
+});
+
+test("conflictPath: slug ou path inválido -> null (nunca vira escrita)", () => {
   assert.equal(conflictPath("pesquisa.md", "../etc"), null);
   assert.equal(conflictPath("pesquisa.md", ".."), null);
   assert.equal(conflictPath("pesquisa.md", "a/b"), null);
@@ -110,7 +147,7 @@ test("plano: local mudou + server intocado -> upload", () => {
   assert.deepEqual(plan.conflicts, []);
 });
 
-test("plano: ambos mudaram -> conflito", () => {
+test("plano: os dois lados mudaram -> conflito", () => {
   const plan = planWorkdocsSync({
     manifest: { "a.md": { md5: "vRemoto" } },
     localFiles: { "a.md": "vLocal" },
@@ -121,7 +158,7 @@ test("plano: ambos mudaram -> conflito", () => {
   assert.deepEqual(plan.uploads, []);
 });
 
-test("plano: divergencia sem baseline (bootstrap) -> conflito, nunca sobrescreve", () => {
+test("plano: divergência sem baseline (bootstrap) -> conflito, nunca sobrescreve", () => {
   const plan = planWorkdocsSync({
     manifest: { "a.md": { md5: "vRemoto" } },
     localFiles: { "a.md": "vLocal" },
@@ -130,7 +167,7 @@ test("plano: divergencia sem baseline (bootstrap) -> conflito, nunca sobrescreve
   assert.deepEqual(plan.conflicts, ["a.md"]);
 });
 
-test("plano: iguais nos dois lados -> nenhuma acao", () => {
+test("plano: iguais nos dois lados -> nenhuma ação", () => {
   const plan = planWorkdocsSync({
     manifest: { "a.md": { md5: "v1" } },
     localFiles: { "a.md": "v1" },
@@ -139,7 +176,7 @@ test("plano: iguais nos dois lados -> nenhuma acao", () => {
   assert.deepEqual(plan, { downloads: [], uploads: [], conflicts: [], warnings: [] });
 });
 
-test("plano: ausente local com baseline -> download (delecao local NAO propaga)", () => {
+test("plano: ausente local com baseline -> download (deleção local NÃO propaga)", () => {
   const plan = planWorkdocsSync({
     manifest: { "a.md": { md5: "v1" } },
     localFiles: {},
@@ -168,7 +205,7 @@ test("plano: ausente no server + sem baseline -> upload (arquivo novo local)", (
   assert.deepEqual(plan.downloads, []);
 });
 
-test("plano: ausente no server + com baseline -> nenhuma acao (delecao no server nao destroi local)", () => {
+test("plano: ausente no server + com baseline -> nenhuma ação (deleção no server não destrói local)", () => {
   const plan = planWorkdocsSync({
     manifest: {},
     localFiles: { "a.md": "v1" },
@@ -177,7 +214,30 @@ test("plano: ausente no server + com baseline -> nenhuma acao (delecao no server
   assert.deepEqual(plan, { downloads: [], uploads: [], conflicts: [], warnings: [] });
 });
 
-test("plano: path remoto fora da allowlist e descartado com aviso", () => {
+test("plano: local presente mas inelegível (acima de 2 MiB) nunca vira download (C1)", () => {
+  const plan = planWorkdocsSync({
+    manifest: { "a.md": { md5: "vRemoto" } },
+    localFiles: { "a.md": { oversize: true } },
+    baseline: { "a.md": "v0" },
+  });
+  assert.deepEqual(plan.downloads, [], "sobrescreveria trabalho local");
+  assert.deepEqual(plan.uploads, []);
+  assert.deepEqual(plan.conflicts, []);
+  assert.equal(plan.warnings.length, 1);
+  assert.match(plan.warnings[0], /a\.md/);
+});
+
+test("plano: local inelegível sem remoto também é inerte", () => {
+  const plan = planWorkdocsSync({
+    manifest: {},
+    localFiles: { "a.md": { oversize: true } },
+    baseline: {},
+  });
+  assert.deepEqual(plan.uploads, []);
+  assert.deepEqual(plan.downloads, []);
+});
+
+test("plano: path remoto fora da allowlist é descartado com aviso", () => {
   const plan = planWorkdocsSync({
     manifest: { "../fora.md": { md5: "x" }, "CLAUDE.md": { md5: "y" }, "ok.md": { md5: "z" } },
     localFiles: {},
@@ -205,7 +265,7 @@ test("plano: aceita md5 plano ou objeto {md5} no manifest", () => {
   assert.deepEqual(plan.downloads, []);
 });
 
-test("plano: entradas ordenadas (deterministico)", () => {
+test("plano: entradas ordenadas (determinístico)", () => {
   const plan = planWorkdocsSync({
     manifest: { "z.md": { md5: "1" }, "a.md": { md5: "1" }, "m.md": { md5: "1" } },
     localFiles: {},
@@ -231,7 +291,18 @@ test("plano: tolera entradas ausentes/nulas", () => {
 
 // ---------- baseline ----------
 
-test("baseline: download bem-sucedido adota o md5 do server", () => {
+test("baseline: download adota o md5 dos BYTES GRAVADOS, não o do manifest (I3)", () => {
+  const next = computeWorkdocsBaseline({
+    manifest: { "a.md": { md5: "vManifest" } },
+    localFiles: { "a.md": "v1" },
+    baseline: { "a.md": "v1" },
+    // servidor mudou entre o manifest e o fetch: o que está no disco é vEscrito
+    downloaded: new Map([["a.md", "vEscrito"]]),
+  });
+  assert.deepEqual(next, { "a.md": "vEscrito" });
+});
+
+test("baseline: download sem md5 real (Set) cai no md5 do manifest", () => {
   const next = computeWorkdocsBaseline({
     manifest: { "a.md": { md5: "v2" } },
     localFiles: { "a.md": "v1" },
@@ -251,17 +322,27 @@ test("baseline: upload bem-sucedido adota o md5 local", () => {
   assert.deepEqual(next, { "a.md": "vLocal" });
 });
 
-test("baseline: conflito materializado adota o md5 do server (local vence no proximo ciclo)", () => {
+test("baseline: conflito materializado adota o md5 do server (local vence no próximo ciclo)", () => {
   const next = computeWorkdocsBaseline({
     manifest: { "a.md": { md5: "vRemoto" } },
     localFiles: { "a.md": "vLocal" },
     baseline: { "a.md": "v0" },
-    conflicted: new Set(["a.md"]),
+    conflicted: new Map([["a.md", "vRemoto"]]),
   });
   assert.deepEqual(next, { "a.md": "vRemoto" });
 });
 
-test("baseline: falha (nem baixado, nem subido, nem materializado) mantem o anterior", () => {
+test("baseline: conflito NÃO materializado mantém o baseline anterior (I5)", () => {
+  const next = computeWorkdocsBaseline({
+    manifest: { "a.md": { md5: "vRemoto" } },
+    localFiles: { "a.md": "vLocal" },
+    baseline: { "a.md": "v0" },
+    conflicted: new Map(), // nenhum slot livre: nada foi escrito no disco
+  });
+  assert.deepEqual(next, { "a.md": "v0" }, "adotar vRemoto destruiria a versão da VM");
+});
+
+test("baseline: falha (nem baixado, nem subido, nem materializado) mantém o anterior", () => {
   const next = computeWorkdocsBaseline({
     manifest: { "a.md": { md5: "v2" } },
     localFiles: { "a.md": "v1" },
@@ -270,7 +351,7 @@ test("baseline: falha (nem baixado, nem subido, nem materializado) mantem o ante
   assert.deepEqual(next, { "a.md": "v1" });
 });
 
-test("baseline: ja sincronizado adota o md5 comum mesmo sem baseline previo", () => {
+test("baseline: já sincronizado adota o md5 comum mesmo sem baseline prévio", () => {
   const next = computeWorkdocsBaseline({
     manifest: { "a.md": { md5: "v1" } },
     localFiles: { "a.md": "v1" },
@@ -279,7 +360,7 @@ test("baseline: ja sincronizado adota o md5 comum mesmo sem baseline previo", ()
   assert.deepEqual(next, { "a.md": "v1" });
 });
 
-test("baseline: arquivo local ausente do server mantem entrada (nao re-sobe como novo)", () => {
+test("baseline: arquivo local ausente do server mantém entrada (não re-sobe como novo)", () => {
   const next = computeWorkdocsBaseline({
     manifest: {},
     localFiles: { "a.md": "v1" },
@@ -308,7 +389,7 @@ test("baseline: path fora da allowlist nunca entra", () => {
 
 // ---------- batches de upload ----------
 
-test("batches: agrupa respeitando o teto por requisicao", () => {
+test("batches: agrupa respeitando o teto por requisição", () => {
   const meio = Math.floor(WORKDOC_MAX_BATCH_BYTES / 2); // custo base64 ~4/3 -> 2 nao cabem
   const { batches, skipped, deferred } = planWorkdocUploadBatches([
     { case: "c", path: "a.md", size: meio },
@@ -330,7 +411,7 @@ test("batches: arquivos pequenos cabem no mesmo batch", () => {
   assert.equal(batches[0].length, 3);
 });
 
-test("batches: arquivo acima do teto por arquivo e pulado, nunca derruba o resto", () => {
+test("batches: arquivo acima do teto por arquivo é pulado, nunca derruba o resto", () => {
   const { batches, skipped } = planWorkdocUploadBatches([
     { case: "c", path: "grande.md", size: WORKDOC_MAX_FILE_BYTES + 1 },
     { case: "c", path: "ok.md", size: 10 },
@@ -340,7 +421,7 @@ test("batches: arquivo acima do teto por arquivo e pulado, nunca derruba o resto
   assert.deepEqual(batches[0].map((f) => f.path), ["ok.md"]);
 });
 
-test("batches: teto por ciclo adia o excedente para o proximo tick", () => {
+test("batches: teto por ciclo adia o excedente para o próximo tick", () => {
   const files = [];
   for (let i = 0; i < 12; i++) {
     files.push({ case: "c", path: `f${i}.md`, size: WORKDOC_MAX_FILE_BYTES });

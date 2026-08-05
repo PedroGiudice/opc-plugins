@@ -1,44 +1,71 @@
 /**
- * Sync de documentos de trabalho do caso (workdocs) — logica PURA.
+ * Sync de documentos de trabalho do caso (workdocs) — lógica PURA.
  *
- * Canal que espelha os `.md`/`.py` da pasta do caso entre as maquinas do
- * escritorio (pool comum: mesmo path em todas, qualquer um evolui o arquivo do
- * outro). Extensao do trilho CMR-138 (memoria sincronizavel) — nenhum servico
- * novo; o storage e a propria pasta do caso na VM.
+ * Canal que espelha os `.md`/`.py` da pasta do caso entre as máquinas do
+ * escritório (pool comum: mesmo path em todas, qualquer um evolui o arquivo do
+ * outro). Extensão do trilho CMR-138 (memória sincronizável) — nenhum serviço
+ * novo; o storage é a própria pasta do caso na VM.
  *
- * Este modulo NAO faz I/O nem rede: so decide. O wiring (fs + HTTP) vive em
+ * Este módulo NÃO faz I/O nem rede: só decide. O wiring (fs + HTTP) vive em
  * sync-cases.mjs (`syncWorkdocs`), como o par planMemoriaActions/syncMemoria.
  *
  * Spec: case-docs/docs/superpowers/specs/2026-08-05-sync-workdocs-caso-design.md
  */
 
-// Allowlist de extensao. O SERVIDOR e a autoridade; o cliente filtra por
-// economia (nao pedir/subir o que sera recusado) e por seguranca de path.
-const WORKDOC_EXTENSIONS = [".md", ".py"];
+// Allowlist de extensão (sem ponto, comparada em MINÚSCULAS — espelha
+// `WORKDOC_EXTENSIONS` do servidor). O SERVIDOR é a autoridade; o cliente
+// filtra por economia (não pedir/subir o que seria recusado) e por segurança
+// de path.
+const WORKDOC_EXTENSIONS = ["md", "py"];
 
-// Opt-out por sufixo: rascunho pessoal que nunca sai da maquina.
-const LOCAL_SUFFIXES = [".local.md", ".local.py"];
+// Opt-out pessoal: stem terminado em `.local` (`rascunho.local.md`). Espelha
+// `WORKDOC_OPT_OUT_SUFFIX` do servidor.
+const WORKDOC_OPT_OUT_SUFFIX = ".local";
 
-// Trilho de briefing proprio (policy `briefing_origin`): o canal workdocs NUNCA
-// os toca. Sao os arquivos da RAIZ do caso — um `notas/CLAUDE.md` de subpasta
-// nao e briefing e segue sincronizavel. Duplicado de BRIEFING_FILES do
-// sync-cases.mjs de proposito: este modulo e puro e nao importa o wiring
-// (sync-cases.mjs importa daqui). Mudou la, mudar aqui.
-const BRIEFING_ROOT_FILES = ["CLAUDE.md", "case.yaml", "documentos.yaml"];
+// Trilho de briefing próprio (policy `briefing_origin`): o canal workdocs NUNCA
+// os toca. Barrados por BASENAME em QUALQUER profundidade — `CLAUDE.md` é
+// instrução do agente, nunca documento de trabalho (fronteira casada com o
+// servidor). Duplicado de BRIEFING_FILES do sync-cases.mjs de propósito: este
+// módulo é puro e não importa o wiring (sync-cases.mjs importa daqui).
+const BRIEFING_FILES = ["CLAUDE.md", "case.yaml", "documentos.yaml"];
 
-// Autos e derivados do pipeline, na RAIZ do caso — nao sao workdocs. Exportado
-// para o scan local podar essas arvores (base/ tem os autos inteiros).
-export const EXCLUDED_ROOT_DIRS = new Set(["_archive", "base", "base_classifier"]);
+/**
+ * Diretórios barrados em QUALQUER segmento. Exportado para o scan local podar
+ * essas árvores antes de descer nelas.
+ *
+ * As três primeiras espelham `WORKDOC_EXCLUDED_DIRS` do servidor (autos e
+ * derivados do pipeline). As demais são árvores de DEPENDÊNCIA: um `venv/` ao
+ * lado de um script tem milhares de `.py` que não são trabalho de ninguém —
+ * sem esta poda o canal viraria um upload em massa perpétuo.
+ */
+export const WORKDOC_EXCLUDED_DIRS = new Set([
+  "_archive",
+  "base",
+  "base_classifier",
+  "venv",
+  "node_modules",
+  "__pycache__",
+  "site-packages",
+]);
+
+/** Profundidade máxima da varredura (espelha `WORKDOCS_MAX_DEPTH` do servidor). */
+export const WORKDOC_MAX_DEPTH = 12;
+
+// Marca da cópia de conflito. Cópia de conflito NÃO é workdoc elegível: é
+// material de reconciliação LOCAL da máquina onde nasceu. Não sobe, não entra
+// no baseline como workdoc — assim não difunde lixo pelo escritório e apagá-la
+// localmente não a traz de volta (ela nunca esteve no servidor).
+const CONFLICT_MARKER = ".conflito-";
 
 /** Teto por arquivo (servidor recusa acima disso). */
 export const WORKDOC_MAX_FILE_BYTES = 2 * 1024 * 1024;
-/** Teto por requisicao de upload (o servidor responde 413 acima de 12 MiB;
- * 3 MiB por batch deixa folga e mantem a requisicao curta). */
+/** Teto por requisição de upload (o servidor responde 413 acima de 12 MiB;
+ * 3 MiB por batch deixa folga e mantém a requisição curta). */
 export const WORKDOC_MAX_BATCH_BYTES = 3 * 1024 * 1024;
 /** Teto por CICLO: o tick roda a cada 5 min (e a tarefa do Windows tem
- * ExecutionTimeLimit de 5 min) — um backfill grande e fatiado entre ticks. */
+ * ExecutionTimeLimit de 5 min) — um backfill grande é fatiado entre ticks. */
 export const WORKDOC_MAX_TICK_BYTES = 12 * 1024 * 1024;
-/** Maximo de arquivos por requisicao (espelha o batch da memoria). */
+/** Máximo de arquivos por requisição (espelha o batch da memória). */
 export const WORKDOC_MAX_BATCH_FILES = 50;
 
 // Folga por arquivo para o envelope JSON ({"files":[{"path","content"}]}).
@@ -47,7 +74,8 @@ const UPLOAD_ENVELOPE_RESERVE = 64;
 /**
  * Normaliza o valor de um arquivo (manifest/baseline/estado local) para a
  * string md5. O manifest do servidor usa `{ md5 }`; baseline e estado local
- * usam md5 plano. Aceita ambos; qualquer outra coisa -> undefined.
+ * usam md5 plano. Aceita ambos; qualquer outra coisa -> undefined (é assim que
+ * o marcador `{oversize:true}` vira "presente e inelegível").
  */
 function fileMd5(v) {
   if (typeof v === "string") return v;
@@ -56,84 +84,118 @@ function fileMd5(v) {
 }
 
 /**
- * Espelho client-side do `is_workdoc_path` do servidor: decide pelo PATH
- * RELATIVO canonico (separador `/`, sem prefixo do caso).
+ * Guards de PATH, sem julgar o conteúdo: path relativo canônico (separador
+ * `/`), sem `\`, sem `:` (absoluto Windows e ADS de NTFS), sem caractere de
+ * controle, sem segmento vazio (cobre absoluto POSIX, `a//b` e `nota.md/`) e
+ * sem segmento iniciado por ponto (cobre `.`, `..` e todo dotfile/dot-dir).
  *
- * Aceita: `.md`/`.py` em qualquer profundidade.
- * Rejeita: extensao fora da allowlist; `*.local.md`/`*.local.py`; os 3 arquivos
- * de briefing na raiz; `_archive/`, `base/`, `base_classifier/` na raiz;
- * dotfile/dot-dir em QUALQUER segmento; path absoluto, `..`, segmento vazio,
- * separador `\` (nao-canonico) e NUL.
+ * Usado por `isWorkdocPath` e, sozinho, pelo destino da cópia de conflito —
+ * que não é workdoc elegível mas continua tendo que cair dentro da pasta do
+ * caso.
  */
-export function isWorkdocPath(relPath) {
+export function isSafeRelPath(relPath) {
   if (typeof relPath !== "string" || relPath.length === 0) return false;
-  if (relPath.includes("\\") || relPath.includes("\0")) return false;
-  if (relPath.startsWith("/")) return false; // absoluto POSIX
-  if (/^[A-Za-z]:/.test(relPath)) return false; // absoluto Windows
-
-  const segs = relPath.split("/");
-  for (const seg of segs) {
-    // `.` e `..` ja caem no startsWith("."); explicitos por clareza.
-    if (seg === "" || seg === "." || seg === ".." || seg.startsWith(".")) return false;
+  if (relPath.includes("\\") || relPath.includes(":")) return false;
+  if (/[\u0000-\u001F\u007F]/.test(relPath)) return false;
+  for (const seg of relPath.split("/")) {
+    if (seg === "" || seg.startsWith(".")) return false;
   }
-
-  const name = segs[segs.length - 1];
-  if (!WORKDOC_EXTENSIONS.some((ext) => name.endsWith(ext))) return false;
-  if (LOCAL_SUFFIXES.some((suf) => name.endsWith(suf))) return false;
-  if (segs.length === 1 && BRIEFING_ROOT_FILES.includes(name)) return false;
-  if (segs.length > 1 && EXCLUDED_ROOT_DIRS.has(segs[0])) return false;
   return true;
 }
 
-// Slug de autor seguro como pedaco de NOME de arquivo (nunca um segmento de
-// path proprio): sem `/`, `\`, `..`.
+/** Minúsculas ASCII, como o `to_ascii_lowercase` do servidor (o `toLowerCase`
+ * do JS é Unicode-aware e divergiria em nomes exóticos). */
+function asciiLower(s) {
+  return s.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+}
+
+/**
+ * Espelho client-side do `is_workdoc_path` do servidor: decide pelo PATH
+ * RELATIVO canônico (separador `/`, sem prefixo do caso).
+ *
+ * Aceita: `.md`/`.py` (extensão case-insensitive) em qualquer profundidade.
+ * Rejeita: extensão fora da allowlist; stem terminado em `.local`; os 3
+ * arquivos de briefing por BASENAME em qualquer profundidade; `_archive/`,
+ * `base/`, `base_classifier/` e árvores de dependência em QUALQUER segmento de
+ * diretório; dotfile/dot-dir em qualquer segmento; cópia de conflito; path
+ * absoluto, `..`, segmento vazio, `\`, `:` e caractere de controle.
+ */
+export function isWorkdocPath(relPath) {
+  if (!isSafeRelPath(relPath)) return false;
+
+  const segs = relPath.split("/");
+  const name = segs[segs.length - 1];
+  for (let i = 0; i < segs.length - 1; i++) {
+    if (WORKDOC_EXCLUDED_DIRS.has(segs[i])) return false;
+  }
+  if (BRIEFING_FILES.includes(name)) return false;
+
+  const lower = asciiLower(name);
+  const dot = lower.lastIndexOf(".");
+  if (dot <= 0) return false; // sem extensão, ou stem vazio
+  const stem = lower.slice(0, dot);
+  const ext = lower.slice(dot + 1);
+  if (!WORKDOC_EXTENSIONS.includes(ext)) return false;
+  if (stem.endsWith(WORKDOC_OPT_OUT_SUFFIX)) return false;
+  if (stem.includes(CONFLICT_MARKER)) return false;
+  return true;
+}
+
+// Slug de autor seguro como pedaço de NOME de arquivo (nunca um segmento de
+// path próprio): sem `/`, `\`, `..`.
 const VALID_AUTHOR_SLUG = /^[A-Za-z0-9._-]+$/;
 
 /**
- * Nome do arquivo onde a versao REMOTA materializa quando ha conflito:
- * `<nome>.conflito-<author_slug><ext>`, na mesma pasta do original. O local
- * fica intacto — nunca se perde texto.
+ * Nome do arquivo onde a versão REMOTA materializa quando há conflito:
+ * `<nome>.conflito-<author_slug><ext>`, na mesma pasta do original e com a
+ * caixa da extensão preservada. O local fica intacto — nunca se perde texto.
  *
- * O slug e o do PROPRIO usuario (claim `author_dir` do JWT): o pool e comum e
- * o cliente nao sabe quem escreveu a versao remota; o slug serve para nao
- * colidir quando duas maquinas materializam o conflito do mesmo arquivo (a
- * copia e ela propria um `.md`/`.py` e sincroniza depois).
+ * A cópia é material de reconciliação LOCAL: `isWorkdocPath` a rejeita, então
+ * ela não sobe nem circula pelo escritório. O slug (claim `author_dir` do JWT)
+ * fica no nome para deixar explícito de qual máquina veio a reconciliação.
  *
- * Retorna null quando path ou slug sao invalidos — o caller nao escreve nada.
+ * Retorna null quando path ou slug são inválidos — o caller não escreve nada.
  */
 export function conflictPath(relPath, authorSlug) {
   if (!isWorkdocPath(relPath)) return null;
   if (typeof authorSlug !== "string" || !VALID_AUTHOR_SLUG.test(authorSlug)) return null;
   if (authorSlug === "." || authorSlug === "..") return null;
-  const ext = WORKDOC_EXTENSIONS.find((e) => relPath.endsWith(e));
-  if (!ext) return null;
-  return `${relPath.slice(0, -ext.length)}.conflito-${authorSlug}${ext}`;
+  // `isWorkdocPath` garante extensão no último segmento -> o último ponto do
+  // path inteiro é o separador da extensão.
+  const dot = relPath.lastIndexOf(".");
+  if (dot <= 0) return null;
+  return `${relPath.slice(0, dot)}${CONFLICT_MARKER}${authorSlug}${relPath.slice(dot)}`;
 }
 
 /**
- * Decide o que baixar, subir e o que e conflito para UM caso.
+ * Decide o que baixar, subir e o que é conflito para UM caso.
  *
  *   manifest:   { <path>: md5|{md5} }  — o que o servidor tem
- *   localFiles: { <path>: md5|{md5} }  — o que ha no disco
- *   baseline:   { <path>: md5|{md5} }  — estado do ultimo sync
+ *   localFiles: { <path>: md5|{md5}|{oversize:true} } — o que há no disco
+ *   baseline:   { <path>: md5|{md5} }  — estado do último sync
+ *
+ * PRESENTE-E-INELEGÍVEL: uma entrada local com a CHAVE presente mas sem md5
+ * (ex. `{oversize:true}`, arquivo acima do teto por arquivo) significa "existe
+ * no disco, o canal não o transporta". É inerte: não baixa (baixar
+ * SOBRESCREVERIA o trabalho local), não sobe, não vira conflito — só avisa.
  *
  * Retorna { downloads: [path], uploads: [path], conflicts: [path], warnings: [] }
- * (listas ordenadas — plano deterministico).
+ * (listas ordenadas — plano determinístico).
  *
  * Regras (R=remoto, L=local, B=baseline):
  *   R sem L, sem B          -> download (arquivo novo no server)
- *   R sem L, com B          -> download (delecao local NAO propaga)
+ *   R sem L, com B          -> download (deleção local NÃO propaga)
  *   L === R                 -> nada
  *   L === B, R !== B        -> download (server mudou, local intocado)
  *   R === B, L !== B        -> upload   (local mudou, server intocado)
  *   L !== B, R !== B, L!==R -> conflito (os dois lados mudaram)
- *   L !== R sem B           -> conflito (bootstrap: nao da para saber quem
- *                              mudou; preservar os dois e a saida nao-destrutiva)
+ *   L !== R sem B           -> conflito (bootstrap: não dá para saber quem
+ *                              mudou; preservar os dois é a saída não-destrutiva)
  *   L sem R, sem B          -> upload   (arquivo novo local)
- *   L sem R, com B          -> nada     (delecao no server nao destroi local)
+ *   L sem R, com B          -> nada     (deleção no server não destrói local)
  *
- * Paths fora da allowlist sao descartados com aviso — o manifest e dado remoto
- * nao-confiavel e cada path vira caminho no disco do cliente.
+ * Paths fora da allowlist são descartados com aviso — o manifest é dado remoto
+ * não-confiável e cada path vira caminho no disco do cliente.
  */
 export function planWorkdocsSync({ manifest, localFiles, baseline } = {}) {
   const plan = { downloads: [], uploads: [], conflicts: [], warnings: [] };
@@ -155,14 +217,22 @@ export function planWorkdocsSync({ manifest, localFiles, baseline } = {}) {
     const l = fileMd5(local[p]);
     const b = fileMd5(base[p]);
 
+    // Presente no disco mas fora do que o canal transporta: intocável.
+    if (l === undefined && Object.prototype.hasOwnProperty.call(local, p)) {
+      plan.warnings.push(
+        `local presente e inelegível (acima do teto por arquivo): ${p} -> preservado, sem download nem upload`,
+      );
+      continue;
+    }
+
     if (r === undefined) {
-      // So existe local: sobe se nunca foi sincronizado; se ja esteve no
-      // baseline, sumiu no server -> nao ressuscita nem apaga (v1).
+      // Só existe local: sobe se nunca foi sincronizado; se já esteve no
+      // baseline, sumiu no server -> não ressuscita nem apaga (v1).
       if (l !== undefined && b === undefined) plan.uploads.push(p);
       continue;
     }
     if (l === undefined) {
-      plan.downloads.push(p); // seed ou delecao local (que nao propaga)
+      plan.downloads.push(p); // seed ou deleção local (que não propaga)
       continue;
     }
     if (l === r) continue; // em dia
@@ -174,18 +244,24 @@ export function planWorkdocsSync({ manifest, localFiles, baseline } = {}) {
 }
 
 /**
- * Novo baseline do caso apos aplicar o plano. Analogo a computeMemoriaBaseline.
+ * Novo baseline do caso após aplicar o plano. Análogo a computeMemoriaBaseline.
  *
- *   downloaded/uploaded/conflicted: Set de paths que TIVERAM EXITO neste ciclo.
+ *   downloaded/conflicted: Map `path -> md5 dos bytes GRAVADOS` (Set também é
+ *     aceito, caindo no md5 do manifest). O md5 real importa: o servidor pode
+ *     ter mudado entre o manifest e o fetch, e um baseline que não descreve o
+ *     byte em disco faz o ciclo seguinte inventar mudança.
+ *   uploaded: Set (ou Map) de paths que o servidor aceitou.
  *
- *   - baixado          -> md5 do server (local passou a ser igual)
- *   - conflito materializado -> md5 do server: a versao remota ja foi
- *     preservada ao lado, entao o local deixa de ser "divergente sem base" e
- *     sobe no proximo ciclo. Sem isso o par ficaria congelado em conflito para
- *     sempre e a resolucao manual nunca propagaria.
- *   - subido           -> md5 local (o server passou a te-lo)
- *   - ja sincronizado  -> md5 comum
- *   - falha            -> mantem o baseline anterior (o proximo ciclo e o retry)
+ *   - baixado          -> md5 do que foi gravado (local passou a ser igual)
+ *   - conflito materializado -> md5 do que foi gravado na cópia: a versão
+ *     remota já está preservada ao lado, então o local deixa de ser
+ *     "divergente sem base" e sobe no próximo ciclo. Sem isso o par ficaria
+ *     congelado em conflito para sempre e a resolução manual nunca propagaria.
+ *     Conflito NÃO materializado não entra aqui — adotar o md5 remoto sem ter
+ *     escrito nada destruiria a versão da VM no ciclo seguinte.
+ *   - subido           -> md5 local (o server passou a tê-lo)
+ *   - já sincronizado  -> md5 comum
+ *   - falha            -> mantém o baseline anterior (o próximo ciclo é o retry)
  *   - sumiu dos dois lados -> entrada removida
  */
 export function computeWorkdocsBaseline({
@@ -208,30 +284,39 @@ export function computeWorkdocsBaseline({
     [...Object.keys(remote), ...Object.keys(local), ...Object.keys(prev)].filter(isWorkdocPath),
   );
 
+  // md5 REAL do que foi gravado, quando a coleção o carrega (Map); Set não
+  // carrega e cai no fallback (md5 do manifest).
+  const md5Gravado = (col, p) => {
+    const v = typeof col?.get === "function" ? col.get(p) : undefined;
+    return typeof v === "string" ? v : undefined;
+  };
+
   for (const p of [...paths].sort()) {
     const r = fileMd5(remote[p]);
     const l = fileMd5(local[p]);
     const b = fileMd5(prev[p]);
-    if (r === undefined && l === undefined) continue; // orfao dos dois lados
-    if (dl.has(p) && r !== undefined) next[p] = r;
-    else if (cf.has(p) && r !== undefined) next[p] = r;
+    const localInelegivel = l === undefined && Object.prototype.hasOwnProperty.call(local, p);
+    if (r === undefined && l === undefined && !localInelegivel) continue; // órfão dos dois lados
+    if (dl.has(p)) next[p] = md5Gravado(dl, p) ?? r;
+    else if (cf.has(p)) next[p] = md5Gravado(cf, p) ?? r;
     else if (up.has(p) && l !== undefined) next[p] = l;
     else if (r !== undefined && r === l) next[p] = r;
     else if (b !== undefined) next[p] = b;
+    if (next[p] === undefined) delete next[p];
   }
   return next;
 }
 
 /**
  * Agrupa uploads em batches respeitando os tetos do canal. Pura: recebe
- * `[{ case, path, size }]` (size em BYTES CRUS do disco) e nao le arquivo —
- * so o que entra em `batches` precisa ser lido pelo caller.
+ * `[{ case, path, size }]` (size em BYTES CRUS do disco) e não lê arquivo —
+ * só o que entra em `batches` precisa ser lido pelo caller.
  *
- * O custo orcado e o do corpo REAL: o conteudo viaja em base64 (4/3 do bruto)
+ * O custo orçado é o do corpo REAL: o conteúdo viaja em base64 (4/3 do bruto)
  * mais o path e a folga do envelope JSON.
  *
  * Retorna { batches: [[file]], skipped: [{case,path,reason}], deferred: [file] }.
- * `deferred` = o que estourou o teto do CICLO — vai no proximo tick, nao se perde.
+ * `deferred` = o que estourou o teto do CICLO — vai no próximo tick, não se perde.
  */
 export function planWorkdocUploadBatches(files, caps = {}) {
   const maxFile = caps.maxFileBytes ?? WORKDOC_MAX_FILE_BYTES;
@@ -260,7 +345,7 @@ export function planWorkdocUploadBatches(files, caps = {}) {
     const cost =
       Math.ceil(size / 3) * 4 + Buffer.byteLength(String(f.path ?? ""), "utf-8") + UPLOAD_ENVELOPE_RESERVE;
     if (tickBytes + cost > maxTick) {
-      // Teto do ciclo: adia ESTE e todos os seguintes (corte deterministico).
+      // Teto do ciclo: adia ESTE e todos os seguintes (corte determinístico).
       cheio = true;
       deferred.push(f);
       continue;
