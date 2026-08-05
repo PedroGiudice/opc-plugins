@@ -26,8 +26,9 @@ const LOCAL_SUFFIXES = [".local.md", ".local.py"];
 // (sync-cases.mjs importa daqui). Mudou la, mudar aqui.
 const BRIEFING_ROOT_FILES = ["CLAUDE.md", "case.yaml", "documentos.yaml"];
 
-// Autos e derivados do pipeline, na RAIZ do caso — nao sao workdocs.
-const EXCLUDED_ROOT_DIRS = new Set(["_archive", "base", "base_classifier"]);
+// Autos e derivados do pipeline, na RAIZ do caso — nao sao workdocs. Exportado
+// para o scan local podar essas arvores (base/ tem os autos inteiros).
+export const EXCLUDED_ROOT_DIRS = new Set(["_archive", "base", "base_classifier"]);
 
 /** Teto por arquivo (servidor recusa acima disso). */
 export const WORKDOC_MAX_FILE_BYTES = 2 * 1024 * 1024;

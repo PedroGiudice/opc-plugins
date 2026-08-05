@@ -25,6 +25,15 @@ import { spawnSync } from "node:child_process";
 import { requestWithAuth, readCredential, decodeJwtAuthorDir } from "./auth.mjs";
 import { defaultMemApiBase } from "./memoria.mjs";
 import { isSafeScaffoldingPath } from "./setup.mjs";
+import {
+  isWorkdocPath,
+  conflictPath,
+  planWorkdocsSync,
+  computeWorkdocsBaseline,
+  planWorkdocUploadBatches,
+  EXCLUDED_ROOT_DIRS as WORKDOC_EXCLUDED_ROOT_DIRS,
+  WORKDOC_MAX_FILE_BYTES,
+} from "./workdocs.mjs";
 
 // Espelha defaultApiBase/defaultCasesBase do server.mjs. Duplicado de
 // proposito: importar server.mjs executaria o server MCP (connect no
@@ -909,6 +918,20 @@ export async function postJson(url, body) {
   return await res.json();
 }
 
+/**
+ * GET autenticado que devolve os BYTES CRUS (Buffer). O download de workdoc
+ * serve o arquivo em si, nao JSON — e o md5 do baseline e dos bytes crus, entao
+ * o conteudo nunca pode passar por decode/encode de texto. Mesmo Bearer e
+ * degrade do fetchJson; timeout maior (arquivo de ate 2 MiB).
+ */
+export async function fetchBytes(url) {
+  const res = await requestWithAuth((authHeaders) =>
+    fetch(url, { headers: authHeaders, signal: AbortSignal.timeout(20_000) }),
+  );
+  if (!res.ok) throw new Error(`HTTP ${res.status} em ${url}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
 function appendLog(casesBase, line) {
   try {
     appendFileSync(join(casesBase, ".sync.log"), `${new Date().toISOString()} ${line}\n`);
@@ -1412,6 +1435,356 @@ export async function syncMemoria(apiBase, casesBase, selfAuthor, deps = {}) {
   }
 
   appendLog(casesBase, `memoria: ok baixados=${downloaded} uploads=${uploadedCount}`);
+}
+
+// ---------- CMR-161: sync de workdocs do caso (pool comum de .md/.py) ----------
+//
+// Espelha os documentos de trabalho da pasta do caso (pesquisas .md, scripts de
+// geracao .py) entre as maquinas do escritorio. Pool COMUM: mesmo path em todas,
+// qualquer um evolui o arquivo do outro. A decisao e pura (workdocs.mjs); aqui
+// mora o I/O.
+//
+// Invariantes:
+//  - Estado PROPRIO em `.workdocs-state.json`. Nao usa um namespace dentro de
+//    `.sync-state.json` porque `computeBaseline` RECONSTROI aquele objeto do zero
+//    a cada tick (so com os casos do manifest de briefing) -- uma chave irma seria
+//    apagada no ciclo seguinte. Mesmo padrao de `.memoria-state.json`.
+//  - O espelho NUNCA destroi: conflito preserva o local intacto e materializa o
+//    remoto ao lado; delecao (local ou remota) nao propaga na v1.
+//  - Nada aqui pode derrubar o sync de briefing: toda falha vira linha de log.
+
+const STATE_FILE_WORKDOCS = ".workdocs-state.json";
+
+// Teto de downloads por ciclo: a tarefa do Windows tem ExecutionTimeLimit de
+// 5 min e um seed grande nao pode monopolizar o tick. O resto vai no proximo.
+const WORKDOC_MAX_TICK_DOWNLOADS = 200;
+
+// Tentativas de sufixo numerico quando o arquivo de conflito ja existe com
+// OUTRO conteudo (segundo conflito no mesmo arquivo antes da resolucao manual).
+const CONFLICT_MAX_PROBES = 20;
+
+function readWorkdocsBaselineFrom(casesBase) {
+  const p = join(casesBase, STATE_FILE_WORKDOCS);
+  if (!existsSync(p)) return {};
+  try {
+    const obj = JSON.parse(readFileSync(p, "utf-8"));
+    return obj && typeof obj === "object" ? obj : {};
+  } catch {
+    return {}; // estado corrompido: trata como bootstrap, nao derruba o sync
+  }
+}
+
+function writeWorkdocsBaseline(casesBase, baseline) {
+  const path = join(casesBase, STATE_FILE_WORKDOCS);
+  const tmp = `${path}.sync-tmp`;
+  writeFileSync(tmp, JSON.stringify(baseline), "utf-8");
+  renameSync(tmp, path);
+}
+
+/**
+ * Varre a pasta de um caso e devolve os workdocs locais:
+ * `{ <path relativo com />: { md5, size } }`.
+ *
+ * Poda dot-dirs em qualquer nivel e `base/`, `base_classifier/`, `_archive/` na
+ * raiz (sao os autos e derivados do pipeline — arvores grandes que nao sao
+ * workdocs). `isWorkdocPath` e a autoridade final por arquivo. Symlink nao e
+ * `isFile()` nem `isDirectory()` no dirent -> ignorado (sem loop, sem escape).
+ * Arquivo acima do teto por arquivo fica de fora (o servidor recusaria).
+ * Tolerante: dir ausente/ilegivel -> objeto vazio.
+ */
+export function readCaseWorkdocs(caseDir, maxFileBytes = WORKDOC_MAX_FILE_BYTES) {
+  const out = {};
+  if (!existsSync(caseDir)) return out;
+  const walk = (dir, prefix) => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue;
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const abs = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!prefix && WORKDOC_EXCLUDED_ROOT_DIRS.has(entry.name)) continue;
+        walk(abs, rel);
+      } else if (entry.isFile()) {
+        if (!isWorkdocPath(rel)) continue;
+        try {
+          const buf = readFileSync(abs);
+          if (buf.length > maxFileBytes) continue;
+          out[rel] = { md5: md5hex(buf), size: buf.length };
+        } catch {
+          // arquivo sumiu ou ilegivel entre o readdir e o read: ignora
+        }
+      }
+    }
+  };
+  walk(caseDir, "");
+  return out;
+}
+
+/**
+ * Fase de workdocs do tick. Espelha a assinatura de `syncMemoria`.
+ *
+ * Contratos do servidor:
+ *   GET  /workdocs-manifest -> { cases: { <caso>: { <path>: { md5 } } } }
+ *   GET  /cases/{c}/workdocs/file?path=<rel> -> bytes crus do arquivo
+ *   POST /cases/{c}/workdocs -> body { files: [{ path, content(base64) }] };
+ *        resp { ok, written, failed: [{ path, reason }] }
+ *
+ * Nunca lanca: toda falha (rede, disco, plano) vira linha em `.sync.log`.
+ */
+export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
+  const doGet = deps.getJson || fetchJson;
+  const doGetBytes = deps.getBytes || fetchBytes;
+  const doPost = deps.postJson || postJson;
+
+  // Sem autor nao ha como nomear o arquivo de conflito nem autenticar o
+  // write-path (Bearer obrigatorio) — o canal inteiro fica de fora do ciclo.
+  if (selfAuthor === null || selfAuthor === undefined) {
+    appendLog(casesBase, "workdocs: sem autor (credencial ausente/sem claim) -> skip");
+    return;
+  }
+
+  let manifest;
+  try {
+    manifest = await doGet(`${apiBase}/workdocs-manifest`);
+  } catch (err) {
+    appendLog(casesBase, `workdocs: erro manifest: ${err.message}`);
+    return;
+  }
+  const remoteCases = (manifest && typeof manifest.cases === "object" && manifest.cases) || {};
+
+  let baseline = {};
+  let briefingBaseline = {};
+  try {
+    baseline = readWorkdocsBaselineFrom(casesBase);
+    briefingBaseline = readBaselineFrom(casesBase);
+  } catch (err) {
+    appendLog(casesBase, `workdocs: erro lendo estado local: ${err.message}`);
+    return;
+  }
+
+  // Casos elegiveis: os que o servidor conhece (manifest) mais os que o espelho
+  // de briefing ja trouxe (bootstrap: caso sem nenhum workdoc na VM ainda). Dir
+  // local que o espelho NUNCA trouxe e trabalho pessoal do usuario (CMR-104) —
+  // o canal nao o varre nem sobe nada de la.
+  const casos = [...new Set([...Object.keys(remoteCases), ...Object.keys(briefingBaseline)])]
+    .filter((c) => VALID_CASE_NAME.test(c) && !isExcluded(c))
+    .filter((c) => existsSync(join(casesBase, c)))
+    .sort();
+
+  const registros = [];
+  const uploadCandidatos = [];
+  let orcamentoDownload = WORKDOC_MAX_TICK_DOWNLOADS;
+  let baixados = 0;
+  let conflitos = 0;
+  let erros = 0;
+
+  // Baixa `relOrigem` do caso e grava em `relDestino` (iguais no download;
+  // distintos no conflito). Revalida os paths imediatamente antes da escrita
+  // (camada 2, defense-in-depth: dado remoto nunca vira caminho arbitrario).
+  const baixarPara = async (caso, relOrigem, relDestino) => {
+    if (!isWorkdocPath(relOrigem) || !isWorkdocPath(relDestino)) {
+      appendLog(casesBase, `workdocs ${caso}: path inseguro no plano (${relOrigem}) -> skip`);
+      return null;
+    }
+    if (orcamentoDownload <= 0) return null;
+    orcamentoDownload--;
+    try {
+      const url = `${apiBase}/cases/${encodeURIComponent(caso)}/workdocs/file?path=${encodeURIComponent(relOrigem)}`;
+      const buf = await doGetBytes(url);
+      const dest = join(casesBase, caso, ...relDestino.split("/"));
+      mkdirSync(dirname(dest), { recursive: true });
+      writeAtomic(dest, buf);
+      return buf;
+    } catch (err) {
+      erros++;
+      appendLog(casesBase, `workdocs ${caso}: erro baixando ${relOrigem}: ${err.message}`);
+      return null;
+    }
+  };
+
+  for (const caso of casos) {
+    const remoto = remoteCases[caso] || {};
+    let local;
+    try {
+      local = readCaseWorkdocs(join(casesBase, caso));
+    } catch (err) {
+      erros++;
+      appendLog(casesBase, `workdocs ${caso}: erro lendo pasta: ${err.message}`);
+      continue;
+    }
+    const localMd5 = {};
+    for (const [p, info] of Object.entries(local)) localMd5[p] = info.md5;
+
+    const plan = planWorkdocsSync({ manifest: remoto, localFiles: localMd5, baseline: baseline[caso] || {} });
+    for (const w of plan.warnings) appendLog(casesBase, `workdocs ${caso}: ${w}`);
+
+    const baixadosCaso = new Set();
+    for (const rel of plan.downloads) {
+      if ((await baixarPara(caso, rel, rel)) !== null) {
+        baixadosCaso.add(rel);
+        baixados++;
+      }
+    }
+
+    // Conflito: o local fica INTACTO; a versao remota materializa ao lado como
+    // `<nome>.conflito-<slug><ext>`. Se ja existe um arquivo de conflito com
+    // OUTRO conteudo (segundo conflito antes da resolucao manual), sufixa em vez
+    // de sobrescrever — nunca se perde texto.
+    const conflitadosCaso = new Set();
+    for (const rel of plan.conflicts) {
+      const remoteMd5 = typeof remoto[rel] === "string" ? remoto[rel] : remoto[rel]?.md5;
+      const alvo = conflitPathDisponivel(join(casesBase, caso), rel, selfAuthor, remoteMd5);
+      if (alvo === null) {
+        appendLog(casesBase, `workdocs ${caso}: nao foi possivel nomear o conflito de ${rel} -> local preservado, nada escrito`);
+        continue;
+      }
+      if (alvo.jaMaterializado) {
+        conflitadosCaso.add(rel); // copia identica ja no disco: idempotente
+        continue;
+      }
+      if ((await baixarPara(caso, rel, alvo.rel)) !== null) {
+        conflitadosCaso.add(rel);
+        conflitos++;
+        appendLog(casesBase, `workdocs ${caso}: conflito em ${rel} -> local preservado, versao da VM em ${alvo.rel}`);
+      }
+    }
+
+    for (const rel of plan.uploads) {
+      const info = local[rel];
+      if (!info) continue;
+      uploadCandidatos.push({ case: caso, path: rel, size: info.size, md5: info.md5 });
+    }
+
+    registros.push({ caso, remoto, localMd5, baixadosCaso, conflitadosCaso });
+  }
+
+  if (orcamentoDownload <= 0) {
+    appendLog(casesBase, `workdocs: teto de ${WORKDOC_MAX_TICK_DOWNLOADS} downloads por ciclo atingido -> resto no proximo tick`);
+  }
+
+  // ----- Uploads: batches sob os tetos do canal, agrupados por caso (a rota e
+  // por caso; dividir um batch por caso so REDUZ o corpo, nunca estoura). -----
+  const { batches, skipped, deferred } = planWorkdocUploadBatches(uploadCandidatos);
+  for (const s of skipped) {
+    appendLog(casesBase, `workdocs ${s.case}: upload pulado ${s.path}: ${s.reason}`);
+  }
+  if (deferred.length > 0) {
+    appendLog(casesBase, `workdocs: ${deferred.length} arquivo(s) adiados para o proximo ciclo (teto por ciclo)`);
+  }
+
+  const enviadosPorCaso = new Map();
+  let enviados = 0;
+  for (const batch of batches) {
+    const porCaso = new Map();
+    for (const f of batch) {
+      if (!porCaso.has(f.case)) porCaso.set(f.case, []);
+      porCaso.get(f.case).push(f);
+    }
+    for (const [caso, arquivos] of porCaso) {
+      const payload = [];
+      for (const f of arquivos) {
+        try {
+          const buf = readFileSync(join(casesBase, caso, ...f.path.split("/")));
+          // Mudou entre o scan e o envio: nao sobe agora (o md5 do baseline
+          // seria o do scan). O proximo ciclo pega a versao nova.
+          if (md5hex(buf) !== f.md5) {
+            appendLog(casesBase, `workdocs ${caso}: ${f.path} mudou durante o ciclo -> upload adiado`);
+            continue;
+          }
+          payload.push({ path: f.path, content: buf.toString("base64") });
+        } catch (err) {
+          erros++;
+          appendLog(casesBase, `workdocs ${caso}: erro lendo ${f.path} para upload: ${err.message}`);
+        }
+      }
+      if (payload.length === 0) continue;
+      let resp;
+      try {
+        resp = await doPost(`${apiBase}/cases/${encodeURIComponent(caso)}/workdocs`, { files: payload });
+      } catch (err) {
+        erros++;
+        appendLog(casesBase, `workdocs ${caso}: erro upload: ${err.message}`);
+        continue;
+      }
+      const recusados = new Map();
+      if (Array.isArray(resp?.failed)) {
+        for (const f of resp.failed) recusados.set(f?.path, f?.reason ?? "recusado");
+      }
+      if (!enviadosPorCaso.has(caso)) enviadosPorCaso.set(caso, new Set());
+      for (const f of payload) {
+        if (recusados.has(f.path)) {
+          appendLog(casesBase, `workdocs ${caso}: upload recusado ${f.path}: ${recusados.get(f.path)}`);
+          continue;
+        }
+        enviadosPorCaso.get(caso).add(f.path);
+        enviados++;
+      }
+    }
+  }
+
+  // ----- Baseline: so o que teve exito de fato entra. -----
+  try {
+    const next = {};
+    for (const r of registros) {
+      const entry = computeWorkdocsBaseline({
+        manifest: r.remoto,
+        localFiles: r.localMd5,
+        baseline: baseline[r.caso] || {},
+        downloaded: r.baixadosCaso,
+        uploaded: enviadosPorCaso.get(r.caso) || new Set(),
+        conflicted: r.conflitadosCaso,
+      });
+      if (Object.keys(entry).length > 0) next[r.caso] = entry;
+    }
+    writeWorkdocsBaseline(casesBase, next);
+  } catch (err) {
+    appendLog(casesBase, `workdocs: erro baseline: ${err.message}`);
+  }
+
+  if (baixados || enviados || conflitos || erros) {
+    appendLog(
+      casesBase,
+      `workdocs: ${erros ? "erro" : "ok"} baixados=${baixados} uploads=${enviados} conflitos=${conflitos}` +
+        (erros ? ` erros=${erros}` : ""),
+    );
+  }
+}
+
+/**
+ * Resolve onde materializar a versao remota de um conflito dentro de `caseDir`.
+ * Retorna { rel, jaMaterializado } ou null quando o nome nao pode ser formado.
+ *
+ *  - slot livre                            -> escreve ali;
+ *  - slot ocupado com o MESMO conteudo do
+ *    remoto (`remoteMd5`)                  -> ja materializado, nao rebaixa;
+ *  - slot ocupado com conteudo DIFERENTE   -> tenta `-2`, `-3`, ... (segundo
+ *    conflito antes da resolucao manual: sobrescrever apagaria texto que o
+ *    usuario ainda nao reconciliou);
+ *  - todos os slots ocupados               -> desiste preservando tudo.
+ */
+function conflitPathDisponivel(caseDir, rel, selfAuthor, remoteMd5) {
+  const base = conflictPath(rel, selfAuthor);
+  if (base === null) return null;
+  const ext = base.endsWith(".md") ? ".md" : ".py";
+  const semExt = base.slice(0, -ext.length);
+  for (let n = 1; n <= CONFLICT_MAX_PROBES; n++) {
+    const cand = n === 1 ? base : `${semExt}-${n}${ext}`;
+    const abs = join(caseDir, ...cand.split("/"));
+    if (!existsSync(abs)) return { rel: cand, jaMaterializado: false };
+    try {
+      if (remoteMd5 !== undefined && md5hex(readFileSync(abs)) === remoteMd5) {
+        return { rel: cand, jaMaterializado: true };
+      }
+    } catch {
+      // ilegivel: trata como ocupado e tenta o proximo slot
+    }
+  }
+  return { rel: base, jaMaterializado: true };
 }
 
 // ---------- CMR-135: uploader de transcripts de sessao (Task 9) ----------
@@ -2187,6 +2560,18 @@ async function main() {
     await syncTranscripts(memApiBase, casesBase);
   } catch (err) {
     appendLog(casesBase, `transcripts: erro inesperado: ${err.message}`);
+  }
+
+  // CMR-161: espelha os workdocs (.md/.py) da pasta do caso — pool comum do
+  // escritorio. Roda POR ULTIMO de proposito: e a fase nova e nao pode roubar
+  // o orcamento de tempo do ciclo (a tarefa do Windows tem ExecutionTimeLimit
+  // de 5 min) das fases ja estabelecidas. Estado e log PROPRIOS
+  // (.workdocs-state.json); syncWorkdocs nunca lanca, o try/catch e ultima
+  // linha de defesa.
+  try {
+    await syncWorkdocs(apiBase, casesBase, selfAuthor);
+  } catch (err) {
+    appendLog(casesBase, `workdocs: erro inesperado: ${err.message}`);
   }
 }
 
