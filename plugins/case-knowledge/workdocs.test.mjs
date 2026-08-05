@@ -390,7 +390,7 @@ test("baseline: path fora da allowlist nunca entra", () => {
 // ---------- batches de upload ----------
 
 test("batches: agrupa respeitando o teto por requisição", () => {
-  const meio = Math.floor(WORKDOC_MAX_BATCH_BYTES / 2); // custo base64 ~4/3 -> 2 nao cabem
+  const meio = Math.floor(WORKDOC_MAX_BATCH_BYTES / 2); // custo base64 ~4/3 -> 2 não cabem
   const { batches, skipped, deferred } = planWorkdocUploadBatches([
     { case: "c", path: "a.md", size: meio },
     { case: "c", path: "b.md", size: meio },
@@ -437,4 +437,30 @@ test("batches: teto por ciclo adia o excedente para o próximo tick", () => {
 test("batches: lista vazia -> nada", () => {
   assert.deepEqual(planWorkdocUploadBatches([]), { batches: [], skipped: [], deferred: [] });
   assert.deepEqual(planWorkdocUploadBatches(null), { batches: [], skipped: [], deferred: [] });
+});
+
+test("isWorkdocPath: guards de nome comparam SEM caixa (como o servidor)", () => {
+  // diretório do pipeline em qualquer caixa
+  assert.equal(isWorkdocPath("notas/Base/x.md"), false);
+  assert.equal(isWorkdocPath("BASE_CLASSIFIER/x.md"), false);
+  assert.equal(isWorkdocPath("a/_Archive/x.py"), false);
+  // árvore de dependência em qualquer caixa
+  assert.equal(isWorkdocPath("Node_Modules/pacote/x.md"), false);
+  // briefing por basename em qualquer caixa e profundidade
+  assert.equal(isWorkdocPath("notas/CLAUDE.MD"), false);
+  assert.equal(isWorkdocPath("claude.md"), false);
+  assert.equal(isWorkdocPath("Case.YAML"), false);
+  // marcador de conflito em qualquer caixa
+  assert.equal(isWorkdocPath("x.CONFLITO-bia.md"), false);
+});
+
+test("plano: motivo da inelegibilidade aparece no aviso", () => {
+  const plan = planWorkdocsSync({
+    manifest: { "a.md": { md5: "vRemoto" } },
+    localFiles: { "a.md": { motivo: "ilegível: EACCES" } },
+    baseline: {},
+  });
+  assert.deepEqual(plan.downloads, []);
+  assert.match(plan.warnings[0], /ilegível: EACCES/);
+  assert.match(plan.warnings[0], /a\.md/);
 });

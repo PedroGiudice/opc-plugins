@@ -23,11 +23,13 @@ const WORKDOC_EXTENSIONS = ["md", "py"];
 const WORKDOC_OPT_OUT_SUFFIX = ".local";
 
 // Trilho de briefing próprio (policy `briefing_origin`): o canal workdocs NUNCA
-// os toca. Barrados por BASENAME em QUALQUER profundidade — `CLAUDE.md` é
-// instrução do agente, nunca documento de trabalho (fronteira casada com o
-// servidor). Duplicado de BRIEFING_FILES do sync-cases.mjs de propósito: este
-// módulo é puro e não importa o wiring (sync-cases.mjs importa daqui).
+// os toca. Barrados por BASENAME em QUALQUER profundidade e em QUALQUER CAIXA —
+// `CLAUDE.md` é instrução do agente, nunca documento de trabalho (fronteira
+// casada com o servidor). Duplicado de BRIEFING_FILES do sync-cases.mjs de
+// propósito: este módulo é puro e não importa o wiring (sync-cases.mjs importa
+// daqui).
 const BRIEFING_FILES = ["CLAUDE.md", "case.yaml", "documentos.yaml"];
+const BRIEFING_FILES_LOWER = new Set(BRIEFING_FILES.map(asciiLower));
 
 /**
  * Diretórios barrados em QUALQUER segmento. Exportado para o scan local podar
@@ -50,6 +52,17 @@ export const WORKDOC_EXCLUDED_DIRS = new Set([
 
 /** Profundidade máxima da varredura (espelha `WORKDOCS_MAX_DEPTH` do servidor). */
 export const WORKDOC_MAX_DEPTH = 12;
+
+/**
+ * `true` se `name` é um diretório barrado do canal, comparado SEM CAIXA
+ * (espelha `is_excluded_dir_name` do servidor). O cliente roda em NTFS, onde
+ * `Base/` e `base/` são a MESMA pasta: comparar com caixa deixaria os autos
+ * entrarem no canal e, no upload, o servidor recusaria item a item para sempre
+ * (o baseline nunca avança -> re-envio a cada tick).
+ */
+export function isExcludedDirName(name) {
+  return typeof name === "string" && WORKDOC_EXCLUDED_DIRS.has(asciiLower(name));
+}
 
 // Marca da cópia de conflito. Cópia de conflito NÃO é workdoc elegível: é
 // material de reconciliação LOCAL da máquina onde nasceu. Não sobe, não entra
@@ -125,19 +138,23 @@ export function isWorkdocPath(relPath) {
 
   const segs = relPath.split("/");
   const name = segs[segs.length - 1];
-  for (let i = 0; i < segs.length - 1; i++) {
-    if (WORKDOC_EXCLUDED_DIRS.has(segs[i])) return false;
-  }
-  if (BRIEFING_FILES.includes(name)) return false;
-
   const lower = asciiLower(name);
+
+  // TODA comparação de nome é SEM CAIXA, como no servidor (o cliente é
+  // Windows/NTFS: `Base/` e `base/` são a mesma pasta, `claude.md` é o mesmo
+  // arquivo que o `CLAUDE.md` curado do trilho de briefing).
+  for (let i = 0; i < segs.length - 1; i++) {
+    if (isExcludedDirName(segs[i])) return false;
+  }
+  if (BRIEFING_FILES_LOWER.has(lower)) return false;
+  if (lower.includes(CONFLICT_MARKER)) return false;
+
   const dot = lower.lastIndexOf(".");
   if (dot <= 0) return false; // sem extensão, ou stem vazio
   const stem = lower.slice(0, dot);
   const ext = lower.slice(dot + 1);
   if (!WORKDOC_EXTENSIONS.includes(ext)) return false;
   if (stem.endsWith(WORKDOC_OPT_OUT_SUFFIX)) return false;
-  if (stem.includes(CONFLICT_MARKER)) return false;
   return true;
 }
 
@@ -171,13 +188,16 @@ export function conflictPath(relPath, authorSlug) {
  * Decide o que baixar, subir e o que é conflito para UM caso.
  *
  *   manifest:   { <path>: md5|{md5} }  — o que o servidor tem
- *   localFiles: { <path>: md5|{md5}|{oversize:true} } — o que há no disco
+ *   localFiles: { <path>: md5|{md5}|{motivo} } — o que há no disco
  *   baseline:   { <path>: md5|{md5} }  — estado do último sync
  *
- * PRESENTE-E-INELEGÍVEL: uma entrada local com a CHAVE presente mas sem md5
- * (ex. `{oversize:true}`, arquivo acima do teto por arquivo) significa "existe
- * no disco, o canal não o transporta". É inerte: não baixa (baixar
- * SOBRESCREVERIA o trabalho local), não sobe, não vira conflito — só avisa.
+ * PRESENTE-E-INELEGÍVEL: uma entrada local com a CHAVE presente mas SEM md5
+ * significa "existe no disco, o canal não o transporta" — acima do teto por
+ * arquivo, ilegível (EACCES, lock de editor) ou não-regular (symlink). É
+ * inerte: não baixa (baixar SOBRESCREVERIA o trabalho local), não sobe, não
+ * vira conflito — só avisa, com o `motivo` da entrada quando houver.
+ * Ausência de CHAVE é o único "não existe local"; qualquer dúvida sobre o
+ * arquivo tem que virar chave presente, nunca sumiço.
  *
  * Retorna { downloads: [path], uploads: [path], conflicts: [path], warnings: [] }
  * (listas ordenadas — plano determinístico).
@@ -219,8 +239,10 @@ export function planWorkdocsSync({ manifest, localFiles, baseline } = {}) {
 
     // Presente no disco mas fora do que o canal transporta: intocável.
     if (l === undefined && Object.prototype.hasOwnProperty.call(local, p)) {
+      const motivo =
+        typeof local[p]?.motivo === "string" ? local[p].motivo : "não transportável pelo canal";
       plan.warnings.push(
-        `local presente e inelegível (acima do teto por arquivo): ${p} -> preservado, sem download nem upload`,
+        `local presente e inelegível (${motivo}): ${p} -> preservado, sem download nem upload`,
       );
       continue;
     }
