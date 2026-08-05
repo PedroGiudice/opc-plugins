@@ -464,3 +464,12 @@ test("plano: motivo da inelegibilidade aparece no aviso", () => {
   assert.match(plan.warnings[0], /ilegível: EACCES/);
   assert.match(plan.warnings[0], /a\.md/);
 });
+
+test("isWorkdocPath: rejeita a faixa de controle C1 (paridade com is_control do servidor)", () => {
+  assert.equal(isWorkdocPath("nota\u0085.md"), false); // NEL, aceito em nome NTFS
+  assert.equal(isWorkdocPath("nota\u0080.md"), false);
+  assert.equal(isWorkdocPath("nota\u009F.md"), false);
+  assert.equal(isWorkdocPath("notas\u0085/x.md"), false);
+  assert.equal(isWorkdocPath("nota\u007F.md"), false); // DEL segue barrado
+  assert.equal(isWorkdocPath("nota\u00A0.md"), true); // NBSP nao e controle
+});

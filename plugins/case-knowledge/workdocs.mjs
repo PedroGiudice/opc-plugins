@@ -102,6 +102,13 @@ function fileMd5(v) {
  * controle, sem segmento vazio (cobre absoluto POSIX, `a//b` e `nota.md/`) e
  * sem segmento iniciado por ponto (cobre `.`, `..` e todo dotfile/dot-dir).
  *
+ * "Caractere de controle" é a categoria Unicode Cc INTEIRA — C0
+ * (U+0000-U+001F) **e C1** (U+007F-U+009F) —, exatamente o `char::is_control()`
+ * do servidor. A faixa C1 não é teórica: o NTFS aceita 0x80-0x9F em nome de
+ * arquivo, então parar em U+007F deixaria o cliente aceitar um path que o
+ * servidor recusa — o arquivo subiria e voltaria em `failed` a cada tick, com o
+ * baseline travado para sempre.
+ *
  * Usado por `isWorkdocPath` e, sozinho, pelo destino da cópia de conflito —
  * que não é workdoc elegível mas continua tendo que cair dentro da pasta do
  * caso.
@@ -109,7 +116,7 @@ function fileMd5(v) {
 export function isSafeRelPath(relPath) {
   if (typeof relPath !== "string" || relPath.length === 0) return false;
   if (relPath.includes("\\") || relPath.includes(":")) return false;
-  if (/[\u0000-\u001F\u007F]/.test(relPath)) return false;
+  if (/[\u0000-\u001F\u007F-\u009F]/.test(relPath)) return false;
   for (const seg of relPath.split("/")) {
     if (seg === "" || seg.startsWith(".")) return false;
   }
