@@ -39,7 +39,7 @@ import {
   TRANSCRIPT_MAX_REQUEST_BYTES,
   TRANSCRIPT_MAX_CYCLE_BYTES,
 } from "./sync-cases.mjs";
-import { existsSync, readFileSync, statSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, statSync, readdirSync, chmodSync, symlinkSync, lstatSync } from "node:fs";
 
 test("caso novo: mkdir + download de todos os arquivos do manifest", () => {
   const manifest = [
@@ -2424,7 +2424,7 @@ test("syncWorkdocs: baixa o novo do server, sobe o novo local, grava .workdocs-s
     assert.deepEqual(posts[0].body.files.map((f) => f.path), ["meu_script.py"]);
     assert.equal(Buffer.from(posts[0].body.files[0].content, "base64").toString("utf-8"), "print('local')");
 
-    // baseline proprio: md5 dos BYTES GRAVADOS no baixado, md5 local no subido
+    // baseline próprio: md5 dos BYTES GRAVADOS no baixado, md5 local no subido
     const st = JSON.parse(readFileSync(join(base, ".workdocs-state.json"), "utf-8"));
     assert.equal(st["caso-a"]["pesquisa.md"], md5hex(Buffer.from("pesquisa vinda da VM")));
     assert.equal(st["caso-a"]["meu_script.py"], md5hex(Buffer.from("print('local')")));
@@ -2441,9 +2441,9 @@ test("syncWorkdocs: conflito preserva o local e materializa o remoto como .confl
   const base = mkdtempSync(join(tmpdir(), "cmr161-conflito-"));
   try {
     mkdirSync(join(base, "caso-a", "notas"), { recursive: true });
-    writeFileSync(join(base, "caso-a", "notas", "tese.md"), "minha versao local");
+    writeFileSync(join(base, "caso-a", "notas", "tese.md"), "minha versão local");
     writeFileSync(join(base, ".sync-state.json"), "{}");
-    // baseline anterior: v0 (os dois lados evoluiram desde entao)
+    // baseline anterior: v0 (os dois lados evoluíram desde então)
     writeFileSync(
       join(base, ".workdocs-state.json"),
       JSON.stringify({ "caso-a": { "notas/tese.md": "v0" } }),
@@ -2453,7 +2453,7 @@ test("syncWorkdocs: conflito preserva o local e materializa o remoto como .confl
       get: {
         "/workdocs-manifest": { cases: { "caso-a": { "notas/tese.md": { md5: "vmX" } } } },
       },
-      bytes: { "path=notas%2Ftese.md": "versao remota do colega" },
+      bytes: { "path=notas%2Ftese.md": "versão remota do colega" },
     });
 
     await syncWorkdocs("http://t/api", base, "pedro-giudice", deps);
@@ -2461,18 +2461,18 @@ test("syncWorkdocs: conflito preserva o local e materializa o remoto como .confl
     // local INTOCADO
     assert.equal(
       readFileSync(join(base, "caso-a", "notas", "tese.md"), "utf-8"),
-      "minha versao local",
+      "minha versão local",
     );
     // remoto materializado ao lado, na mesma pasta
     assert.equal(
       readFileSync(join(base, "caso-a", "notas", "tese.conflito-pedro-giudice.md"), "utf-8"),
-      "versao remota do colega",
+      "versão remota do colega",
     );
-    // conflito nao vira upload neste ciclo
+    // conflito não vira upload neste ciclo
     assert.equal(posts.length, 0);
-    // baseline adota o md5 da COPIA GRAVADA (local vence no proximo ciclo)
+    // baseline adota o md5 da CÓPIA GRAVADA (local vence no próximo ciclo)
     const st = JSON.parse(readFileSync(join(base, ".workdocs-state.json"), "utf-8"));
-    assert.equal(st["caso-a"]["notas/tese.md"], md5hex(Buffer.from("versao remota do colega")));
+    assert.equal(st["caso-a"]["notas/tese.md"], md5hex(Buffer.from("versão remota do colega")));
 
     const log = readFileSync(join(base, ".sync.log"), "utf-8");
     assert.match(log, /conflito/);
@@ -2604,7 +2604,7 @@ test("syncWorkdocs: falha de upload mantém o baseline anterior (próximo ciclo 
   const base = mkdtempSync(join(tmpdir(), "cmr161-upload-falha-"));
   try {
     mkdirSync(join(base, "caso-a"), { recursive: true });
-    writeFileSync(join(base, "caso-a", "novo.md"), "conteudo");
+    writeFileSync(join(base, "caso-a", "novo.md"), "conteúdo");
     writeFileSync(join(base, ".sync-state.json"), '{"caso-a":{}}');
 
     const { deps } = makeWorkdocsApi({
@@ -2613,7 +2613,7 @@ test("syncWorkdocs: falha de upload mantém o baseline anterior (próximo ciclo 
         "/cases/caso-a/workdocs": (body) => ({
           ok: true,
           written: 0,
-          failed: body.files.map((f) => ({ path: f.path, reason: "extensao nao permitida" })),
+          failed: body.files.map((f) => ({ path: f.path, reason: "extensão não permitida" })),
         }),
       },
     });
@@ -2641,13 +2641,13 @@ test("syncWorkdocs: local acima de 2 MiB com manifest divergente fica INTACTO (C
         // manifest anuncia OUTRO md5 para o mesmo path (arquivo pequeno na VM)
         "/workdocs-manifest": { cases: { "caso-a": { "pesquisa.md": { md5: "vmDiferente" } } } },
       },
-      bytes: { "path=pesquisa.md": "versao da VM que NAO pode sobrescrever" },
+      bytes: { "path=pesquisa.md": "versão da VM que NÃO pode sobrescrever" },
     });
 
     await syncWorkdocs("http://t/api", base, "pedro-giudice", deps);
 
     assert.equal(readFileSync(join(base, "caso-a", "pesquisa.md"), "utf-8"), gordo, "trabalho local sobrescrito");
-    assert.equal(bytes.length, 0, "nao pode nem baixar");
+    assert.equal(bytes.length, 0, "não pode nem baixar");
     assert.equal(posts.length, 0);
     const log = readFileSync(join(base, ".sync.log"), "utf-8");
     assert.match(log, /inelegível/);
@@ -2666,13 +2666,13 @@ test("syncWorkdocs: baseline grava o md5 dos BYTES BAIXADOS, não o do manifest 
     const { deps } = makeWorkdocsApi({
       get: { "/workdocs-manifest": { cases: { "caso-a": { "a.md": { md5: "md5-do-manifest" } } } } },
       // o servidor mudou entre o manifest e o fetch
-      bytes: { "path=a.md": "conteudo realmente entregue" },
+      bytes: { "path=a.md": "conteúdo realmente entregue" },
     });
 
     await syncWorkdocs("http://t/api", base, "pedro-giudice", deps);
 
     const st = JSON.parse(readFileSync(join(base, ".workdocs-state.json"), "utf-8"));
-    assert.equal(st["caso-a"]["a.md"], md5hex(Buffer.from("conteudo realmente entregue")));
+    assert.equal(st["caso-a"]["a.md"], md5hex(Buffer.from("conteúdo realmente entregue")));
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
@@ -2683,8 +2683,8 @@ test("syncWorkdocs: sem slot de conflito livre, nada é escrito e o baseline NÃ
   try {
     const caso = join(base, "caso-a");
     mkdirSync(caso, { recursive: true });
-    writeFileSync(join(caso, "tese.md"), "minha versao local");
-    // 20 slots de conflito ocupados com conteudos distintos do remoto
+    writeFileSync(join(caso, "tese.md"), "minha versão local");
+    // 20 slots de conflito ocupados com conteúdos distintos do remoto
     writeFileSync(join(caso, "tese.conflito-pedro-giudice.md"), "ocupado 1");
     for (let n = 2; n <= 20; n++) {
       writeFileSync(join(caso, `tese.conflito-pedro-giudice-${n}.md`), `ocupado ${n}`);
@@ -2694,15 +2694,15 @@ test("syncWorkdocs: sem slot de conflito livre, nada é escrito e o baseline NÃ
 
     const { deps, bytes } = makeWorkdocsApi({
       get: { "/workdocs-manifest": { cases: { "caso-a": { "tese.md": { md5: "vmX" } } } } },
-      bytes: { "path=tese.md": "versao da VM" },
+      bytes: { "path=tese.md": "versão da VM" },
     });
 
     await syncWorkdocs("http://t/api", base, "pedro-giudice", deps);
 
-    assert.equal(readFileSync(join(caso, "tese.md"), "utf-8"), "minha versao local");
-    assert.equal(bytes.length, 0, "sem slot livre nao ha o que gravar");
+    assert.equal(readFileSync(join(caso, "tese.md"), "utf-8"), "minha versão local");
+    assert.equal(bytes.length, 0, "sem slot livre não há o que gravar");
     const st = JSON.parse(readFileSync(join(base, ".workdocs-state.json"), "utf-8"));
-    assert.equal(st["caso-a"]["tese.md"], "v0", "adotar vmX destruiria a versao da VM no proximo ciclo");
+    assert.equal(st["caso-a"]["tese.md"], "v0", "adotar vmX destruiria a versão da VM no próximo ciclo");
     assert.match(readFileSync(join(base, ".sync.log"), "utf-8"), /slot/);
   } finally {
     rmSync(base, { recursive: true, force: true });
@@ -2716,10 +2716,10 @@ test("syncWorkdocs: cópia de conflito e árvore de dependência nunca sobem (I1
     mkdirSync(join(caso, "scripts", "venv", "lib"), { recursive: true });
     mkdirSync(join(caso, "node_modules", "pacote"), { recursive: true });
     mkdirSync(join(caso, "scripts", "__pycache__"), { recursive: true });
-    writeFileSync(join(caso, "scripts", "venv", "lib", "dep.py"), "dependencia");
+    writeFileSync(join(caso, "scripts", "venv", "lib", "dep.py"), "dependência");
     writeFileSync(join(caso, "node_modules", "pacote", "leia.md"), "dep");
     writeFileSync(join(caso, "scripts", "__pycache__", "cache.py"), "cache");
-    writeFileSync(join(caso, "tese.conflito-bia.md"), "copia de conflito da Bia");
+    writeFileSync(join(caso, "tese.conflito-bia.md"), "cópia de conflito da Bia");
     writeFileSync(join(caso, "scripts", "gerar.py"), "print(1)");
     writeFileSync(join(base, ".sync-state.json"), '{"caso-a":{}}');
 
@@ -2734,6 +2734,85 @@ test("syncWorkdocs: cópia de conflito e árvore de dependência nunca sobem (I1
 
     assert.equal(posts.length, 1);
     assert.deepEqual(posts[0].body.files.map((f) => f.path), ["scripts/gerar.py"]);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("syncWorkdocs: arquivo local ilegível não vira download por cima (classe do C1)", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr161-ilegivel-"));
+  try {
+    const caso = join(base, "caso-a");
+    mkdirSync(caso, { recursive: true });
+    const alvo = join(caso, "pesquisa.md");
+    writeFileSync(alvo, "conteúdo local que o editor travou");
+    chmodSync(alvo, 0o000); // leitura falha (EACCES) — lock de editor no Windows é o análogo
+    writeFileSync(join(base, ".sync-state.json"), '{"caso-a":{}}');
+
+    const { deps, bytes } = makeWorkdocsApi({
+      get: { "/workdocs-manifest": { cases: { "caso-a": { "pesquisa.md": { md5: "vmDiferente" } } } } },
+      bytes: { "path=pesquisa.md": "versão da VM que NÃO pode sobrescrever" },
+    });
+
+    await syncWorkdocs("http://t/api", base, "pedro-giudice", deps);
+
+    assert.equal(bytes.length, 0, "arquivo ilegível não pode virar download");
+    chmodSync(alvo, 0o600);
+    assert.equal(readFileSync(alvo, "utf-8"), "conteúdo local que o editor travou");
+    assert.match(readFileSync(join(base, ".sync.log"), "utf-8"), /inelegível/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("syncWorkdocs: symlink não vira download por cima (classe do C1)", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr161-symlink-"));
+  try {
+    const caso = join(base, "caso-a");
+    mkdirSync(caso, { recursive: true });
+    writeFileSync(join(base, "fora.md"), "alvo fora do caso");
+    symlinkSync(join(base, "fora.md"), join(caso, "pesquisa.md"));
+    writeFileSync(join(base, ".sync-state.json"), '{"caso-a":{}}');
+
+    const { deps, bytes, posts } = makeWorkdocsApi({
+      get: { "/workdocs-manifest": { cases: { "caso-a": { "pesquisa.md": { md5: "vmX" } } } } },
+      bytes: { "path=pesquisa.md": "versão da VM" },
+      post: { "/cases/caso-a/workdocs": () => ({ ok: true, written: 0, failed: [] }) },
+    });
+
+    await syncWorkdocs("http://t/api", base, "pedro-giudice", deps);
+
+    assert.equal(bytes.length, 0, "symlink não pode virar download");
+    assert.equal(posts.length, 0, "symlink também não sobe");
+    assert.equal(lstatSync(join(caso, "pesquisa.md")).isSymbolicLink(), true);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("syncWorkdocs: pasta de pipeline com outra caixa é podada (fronteira sem caixa)", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr161-caixa-"));
+  try {
+    const caso = join(base, "caso-a");
+    mkdirSync(join(caso, "Base"), { recursive: true });
+    mkdirSync(join(caso, "Node_Modules"), { recursive: true });
+    writeFileSync(join(caso, "Base", "autos.md"), "autos");
+    writeFileSync(join(caso, "Node_Modules", "dep.md"), "dependência");
+    writeFileSync(join(caso, "CLAUDE.MD"), "briefing em outra caixa");
+    writeFileSync(join(caso, "ok.md"), "workdoc de verdade");
+    writeFileSync(join(base, ".sync-state.json"), '{"caso-a":{}}');
+
+    const { deps, posts } = makeWorkdocsApi({
+      get: { "/workdocs-manifest": { cases: {} } },
+      post: {
+        "/cases/caso-a/workdocs": (body) => ({ ok: true, written: body.files.length, failed: [] }),
+      },
+    });
+
+    await syncWorkdocs("http://t/api", base, "pedro-giudice", deps);
+
+    assert.equal(posts.length, 1);
+    assert.deepEqual(posts[0].body.files.map((f) => f.path), ["ok.md"]);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

@@ -32,7 +32,7 @@ import {
   planWorkdocsSync,
   computeWorkdocsBaseline,
   planWorkdocUploadBatches,
-  WORKDOC_EXCLUDED_DIRS,
+  isExcludedDirName,
   WORKDOC_MAX_DEPTH,
   WORKDOC_MAX_FILE_BYTES,
 } from "./workdocs.mjs";
@@ -1486,19 +1486,20 @@ function writeWorkdocsBaseline(casesBase, baseline) {
 /**
  * Varre a pasta de um caso e devolve os workdocs locais:
  * `{ <path relativo com />: { md5, size } }` para o que o canal transporta e
- * `{ oversize: true, size }` para o que EXISTE no disco mas está acima do teto
- * por arquivo.
+ * `{ motivo, size? }` (SEM md5) para o que EXISTE no disco mas o canal não
+ * transporta — acima do teto, ilegível (EACCES, lock de editor no Windows) ou
+ * não-regular (symlink).
  *
- * O marcador `oversize` é essencial: descartar a entrada faria o planejador ler
- * "não existe local" e emitir download — SOBRESCREVENDO trabalho local que só
- * ficou grande demais para o canal.
+ * A distinção CHAVE PRESENTE vs CHAVE AUSENTE é a invariante do canal:
+ * descartar a entrada faria o planejador ler "não existe local" e emitir
+ * download — SOBRESCREVENDO trabalho local. Toda dúvida sobre o arquivo vira
+ * chave presente e inerte; só o que de fato não está no disco fica ausente.
  *
  * Poda dot-dirs e os diretórios de `WORKDOC_EXCLUDED_DIRS` (autos do pipeline e
- * árvores de dependência) em QUALQUER nível, e para na profundidade máxima —
- * tudo espelhando o walk do servidor. `isWorkdocPath` é a autoridade final por
- * arquivo. Symlink não é `isFile()` nem `isDirectory()` no dirent -> ignorado
- * (sem loop, sem escape). O tamanho vem do `stat`: só o que é elegível é LIDO
- * (ler antes de medir poria centenas de MB na RAM a cada tick).
+ * árvores de dependência) em QUALQUER nível e SEM CAIXA, e para na profundidade
+ * máxima — tudo espelhando o walk do servidor. `isWorkdocPath` é a autoridade
+ * final por arquivo. O tamanho vem do `stat`: só o que é elegível é LIDO (ler
+ * antes de medir poria centenas de MB na RAM a cada tick).
  * Tolerante: dir ausente/ilegível -> objeto vazio.
  */
 export function readCaseWorkdocs(caseDir, maxFileBytes = WORKDOC_MAX_FILE_BYTES) {
@@ -1517,20 +1518,26 @@ export function readCaseWorkdocs(caseDir, maxFileBytes = WORKDOC_MAX_FILE_BYTES)
       const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
       const abs = join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (WORKDOC_EXCLUDED_DIRS.has(entry.name)) continue;
+        if (isExcludedDirName(entry.name)) continue;
         walk(abs, rel, depth + 1);
-      } else if (entry.isFile()) {
-        if (!isWorkdocPath(rel)) continue;
-        try {
-          const size = statSync(abs).size;
-          if (size > maxFileBytes) {
-            out[rel] = { oversize: true, size }; // presente, porém inelegível
-            continue;
-          }
-          out[rel] = { md5: md5hex(readFileSync(abs)), size };
-        } catch {
-          // arquivo sumiu ou ilegível entre o readdir e o stat/read: ignora
+        continue;
+      }
+      if (!isWorkdocPath(rel)) continue;
+      if (!entry.isFile()) {
+        // Symlink (ou socket/fifo): o dirent não segue o link. Não transporta —
+        // mas EXISTE no path, então nunca pode virar destino de download.
+        out[rel] = { motivo: "não é arquivo regular (symlink ou especial)" };
+        continue;
+      }
+      try {
+        const size = statSync(abs).size;
+        if (size > maxFileBytes) {
+          out[rel] = { motivo: "acima de 2 MiB (teto por arquivo)", size };
+          continue;
         }
+        out[rel] = { md5: md5hex(readFileSync(abs)), size };
+      } catch (err) {
+        out[rel] = { motivo: `ilegível (${err.code || err.message})` };
       }
     }
   };
@@ -1634,9 +1641,10 @@ export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
     }
     // Preserva a distinção "sem md5" (presente e inelegível) da chave ausente:
     // é o que impede o planejador de emitir download por cima de trabalho local.
+    // O `motivo` viaja junto para o aviso do plano sair específico no log.
     const localMd5 = {};
     for (const [p, info] of Object.entries(local)) {
-      localMd5[p] = info.oversize ? { oversize: true } : info.md5;
+      localMd5[p] = info.md5 !== undefined ? info.md5 : { motivo: info.motivo };
     }
 
     const plan = planWorkdocsSync({ manifest: remoto, localFiles: localMd5, baseline: baseline[caso] || {} });
