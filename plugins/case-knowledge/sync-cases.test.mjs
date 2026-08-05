@@ -2470,9 +2470,14 @@ test("syncWorkdocs: conflito preserva o local e materializa o remoto como .confl
     );
     // conflito não vira upload neste ciclo
     assert.equal(posts.length, 0);
-    // baseline adota o md5 da CÓPIA GRAVADA (local vence no próximo ciclo)
+    // baseline grava o PAR do instante da materialização: congela até ação humana
     const st = JSON.parse(readFileSync(join(base, ".workdocs-state.json"), "utf-8"));
-    assert.equal(st["caso-a"]["notas/tese.md"], md5hex(Buffer.from("versão remota do colega")));
+    assert.deepEqual(st["caso-a"]["notas/tese.md"], {
+      conflito: {
+        local: md5hex(Buffer.from("minha versão local")),
+        remoto: md5hex(Buffer.from("versão remota do colega")),
+      },
+    });
 
     const log = readFileSync(join(base, ".sync.log"), "utf-8");
     assert.match(log, /conflito/);
@@ -2924,5 +2929,104 @@ test("syncWorkdocs: slot de conflito que é symlink não é lido nem contornado 
   } finally {
     rmSync(base, { recursive: true, force: true });
     rmSync(fora, { recursive: true, force: true });
+  }
+});
+
+test("syncWorkdocs: conflito congela por 3 ticks — nem sobe o local antigo nem baixa por cima (cenário real cmr-002)", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr161-congela-"));
+  try {
+    const caso = join(base, "caso-a");
+    mkdirSync(caso, { recursive: true });
+    // local ANTIGO (28/04, pré-refactor do chunker) vs hub ATUAL (16/05)
+    const localAntigo = "MAPA_PROCESSUAL truncado de 28/04";
+    writeFileSync(join(caso, "MAPA_PROCESSUAL.md"), localAntigo);
+    writeFileSync(join(base, ".sync-state.json"), '{"caso-a":{}}');
+
+    const doHub = "MAPA_PROCESSUAL completo de 16/05";
+    const rotas = {
+      get: {
+        "/workdocs-manifest": {
+          cases: { "caso-a": { "MAPA_PROCESSUAL.md": { md5: md5hex(Buffer.from(doHub)) } } },
+        },
+      },
+      bytes: { "path=MAPA_PROCESSUAL.md": doHub },
+      post: {
+        "/cases/caso-a/workdocs": (body) => ({ ok: true, written: body.files.length, failed: [] }),
+      },
+    };
+
+    // ---- tick 1: materializa a cópia, congela o par
+    const t1 = makeWorkdocsApi(rotas);
+    await syncWorkdocs("http://t/api", base, "pedro-giudice", t1.deps);
+    assert.equal(readFileSync(join(caso, "MAPA_PROCESSUAL.md"), "utf-8"), localAntigo);
+    assert.equal(
+      readFileSync(join(caso, "MAPA_PROCESSUAL.conflito-pedro-giudice.md"), "utf-8"),
+      doHub,
+      "a versão do hub tem que ficar preservada ao lado",
+    );
+    assert.equal(t1.posts.length, 0, "tick do conflito não sobe nada");
+    const st1 = JSON.parse(readFileSync(join(base, ".workdocs-state.json"), "utf-8"));
+    assert.deepEqual(st1["caso-a"]["MAPA_PROCESSUAL.md"], {
+      conflito: { local: md5hex(Buffer.from(localAntigo)), remoto: md5hex(Buffer.from(doHub)) },
+    });
+
+    // ---- ticks 2 e 3: ninguém editou -> INERTE dos dois lados
+    for (const rotulo of ["tick 2", "tick 3"]) {
+      const t = makeWorkdocsApi(rotas);
+      await syncWorkdocs("http://t/api", base, "pedro-giudice", t.deps);
+      assert.equal(t.posts.length, 0, `${rotulo}: subir o local antigo destruiria o hub`);
+      assert.equal(t.bytes.length, 0, `${rotulo}: baixar por cima destruiria o local`);
+      assert.equal(readFileSync(join(caso, "MAPA_PROCESSUAL.md"), "utf-8"), localAntigo);
+      const st = JSON.parse(readFileSync(join(base, ".workdocs-state.json"), "utf-8"));
+      assert.deepEqual(st["caso-a"]["MAPA_PROCESSUAL.md"], st1["caso-a"]["MAPA_PROCESSUAL.md"]);
+    }
+    assert.match(readFileSync(join(base, ".sync.log"), "utf-8"), /congelado/);
+
+    // ---- tick 4: o usuário reconciliou -> AGORA sobe
+    const reconciliado = "MAPA_PROCESSUAL reconciliado à mão";
+    writeFileSync(join(caso, "MAPA_PROCESSUAL.md"), reconciliado);
+    const t4 = makeWorkdocsApi(rotas);
+    await syncWorkdocs("http://t/api", base, "pedro-giudice", t4.deps);
+    assert.deepEqual(t4.posts[0].body.files.map((f) => f.path), ["MAPA_PROCESSUAL.md"]);
+    const st4 = JSON.parse(readFileSync(join(base, ".workdocs-state.json"), "utf-8"));
+    assert.equal(
+      st4["caso-a"]["MAPA_PROCESSUAL.md"],
+      md5hex(Buffer.from(reconciliado)),
+      "o par colapsa quando a ação humana resolve",
+    );
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("syncWorkdocs: hub evolui durante o congelamento -> rematerializa a cópia nova", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr161-hub-evolui-"));
+  try {
+    const caso = join(base, "caso-a");
+    mkdirSync(caso, { recursive: true });
+    writeFileSync(join(caso, "tese.md"), "meu local");
+    writeFileSync(join(base, ".sync-state.json"), '{"caso-a":{}}');
+
+    const v1 = "hub v1";
+    const t1 = makeWorkdocsApi({
+      get: { "/workdocs-manifest": { cases: { "caso-a": { "tese.md": { md5: md5hex(Buffer.from(v1)) } } } } },
+      bytes: { "path=tese.md": v1 },
+    });
+    await syncWorkdocs("http://t/api", base, "pedro-giudice", t1.deps);
+    assert.equal(readFileSync(join(caso, "tese.conflito-pedro-giudice.md"), "utf-8"), v1);
+
+    const v2 = "hub v2, mais novo";
+    const t2 = makeWorkdocsApi({
+      get: { "/workdocs-manifest": { cases: { "caso-a": { "tese.md": { md5: md5hex(Buffer.from(v2)) } } } } },
+      bytes: { "path=tese.md": v2 },
+    });
+    await syncWorkdocs("http://t/api", base, "pedro-giudice", t2.deps);
+
+    assert.equal(readFileSync(join(caso, "tese.md"), "utf-8"), "meu local", "local segue intacto");
+    assert.equal(readFileSync(join(caso, "tese.conflito-pedro-giudice.md"), "utf-8"), v1, "cópia antiga preservada");
+    assert.equal(readFileSync(join(caso, "tese.conflito-pedro-giudice-2.md"), "utf-8"), v2, "versão nova do hub ao lado");
+    assert.equal(t2.posts.length, 0);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
   }
 });

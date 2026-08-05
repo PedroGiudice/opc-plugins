@@ -1631,6 +1631,7 @@ export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
   let orcamentoDownload = WORKDOC_MAX_TICK_DOWNLOADS;
   let baixados = 0;
   let conflitos = 0;
+  let congelados = 0;
   let erros = 0;
 
   // Baixa `relOrigem` do caso e grava em `relDestino` (iguais no download; no
@@ -1696,12 +1697,25 @@ export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
       }
     }
 
+    // Conflito congelado: os dois lados parados no par registrado. Nada a fazer
+    // até haver ação humana — uma linha agregada por caso (não uma por arquivo:
+    // são 15 num primeiro tick real e o congelamento dura até alguém reconciliar).
+    congelados += plan.frozen.length;
+    if (plan.frozen.length > 0) {
+      const amostra = plan.frozen.slice(0, 5).join(", ");
+      const resto = plan.frozen.length > 5 ? ` (+${plan.frozen.length - 5})` : "";
+      appendLog(
+        casesBase,
+        `workdocs ${caso}: ${plan.frozen.length} conflito(s) congelado(s) aguardando reconciliação: ${amostra}${resto}`,
+      );
+    }
+
     // Conflito: o local fica INTACTO; a versão remota materializa ao lado como
     // `<nome>.conflito-<slug><ext>`. Se já existe um arquivo de conflito com
     // OUTRO conteúdo (segundo conflito antes da reconciliação manual), sufixa em
     // vez de sobrescrever — nunca se perde texto. Sem slot livre, NADA é escrito
-    // e o conflito NÃO entra no baseline: adotar o md5 remoto sem ter gravado
-    // faria o local subir por cima e destruir a versão da VM.
+    // e o conflito NÃO entra no baseline: registrar o par sem ter gravado a
+    // cópia congelaria o arquivo sem ninguém ter preservado a versão da VM.
     const conflitadosCaso = new Map(); // path -> md5 da cópia gravada
     for (const rel of plan.conflicts) {
       const remoteMd5 = typeof remoto[rel] === "string" ? remoto[rel] : remoto[rel]?.md5;
@@ -1823,10 +1837,11 @@ export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
     appendLog(casesBase, `workdocs: erro baseline: ${err.message}`);
   }
 
-  if (baixados || enviados || conflitos || erros) {
+  if (baixados || enviados || conflitos || congelados || erros) {
     appendLog(
       casesBase,
       `workdocs: ${erros ? "erro" : "ok"} baixados=${baixados} uploads=${enviados} conflitos=${conflitos}` +
+        (congelados ? ` congelados=${congelados}` : "") +
         (erros ? ` erros=${erros}` : ""),
     );
   }

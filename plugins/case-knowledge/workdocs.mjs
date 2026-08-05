@@ -98,6 +98,21 @@ function fileMd5(v) {
 }
 
 /**
+ * Par de conflito registrado no baseline: `{conflito: {local, remoto}}` — os
+ * dois md5 do momento em que a cópia `.conflito-` foi materializada. É o que
+ * CONGELA o par até haver ação humana. Forma inválida (estado corrompido, ou
+ * baseline de uma versão anterior) devolve undefined e o path cai nas regras
+ * normais — nunca lança.
+ */
+function conflitoPar(v) {
+  const c = v && typeof v === "object" ? v.conflito : undefined;
+  if (c && typeof c === "object" && typeof c.local === "string" && typeof c.remoto === "string") {
+    return { local: c.local, remoto: c.remoto };
+  }
+  return undefined;
+}
+
+/**
  * Guards de PATH, sem julgar o conteúdo: path relativo canônico (separador
  * `/`), sem `\`, sem `:` (absoluto Windows e ADS de NTFS), sem caractere de
  * controle, sem segmento vazio (cobre absoluto POSIX, `a//b` e `nota.md/`) e
@@ -197,7 +212,7 @@ export function conflictPath(relPath, authorSlug) {
  *
  *   manifest:   { <path>: md5|{md5} }  — o que o servidor tem
  *   localFiles: { <path>: md5|{md5}|{motivo} } — o que há no disco
- *   baseline:   { <path>: md5|{md5} }  — estado do último sync
+ *   baseline:   { <path>: md5|{md5}|{conflito:{local,remoto}} } — último sync
  *
  * PRESENTE-E-INELEGÍVEL: uma entrada local com a CHAVE presente mas SEM md5
  * significa "existe no disco, o canal não o transporta" — acima do teto por
@@ -207,13 +222,30 @@ export function conflictPath(relPath, authorSlug) {
  * Ausência de CHAVE é o único "não existe local"; qualquer dúvida sobre o
  * arquivo tem que virar chave presente, nunca sumiço.
  *
- * Retorna { downloads: [path], uploads: [path], conflicts: [path], warnings: [] }
- * (listas ordenadas — plano determinístico).
+ * CONFLITO CONGELA ATÉ AÇÃO HUMANA. Quando o conflito é materializado, o
+ * baseline guarda o PAR `{local, remoto}` daquele instante. Enquanto os dois
+ * lados continuarem iguais ao par, o arquivo é INERTE (`frozen`): a cópia
+ * `.conflito-` já está no disco ao lado, então nada se perdeu, e nem o local
+ * sobe por cima do servidor nem o remoto desce por cima do local. A saída é
+ * humana: o usuário reconcilia (o LOCAL muda -> upload) ou o hub evolui (o
+ * REMOTO muda -> conflito novo, rematerializa a cópia). Se os DOIS mudaram,
+ * é conflito novo — subir ali perderia a versão nova do servidor.
  *
- * Regras (R=remoto, L=local, B=baseline):
+ * Medição que motivou a política: no primeiro tick de uma máquina real foram 15
+ * conflitos, 14 em `MAPA_PROCESSUAL.md`; com o baseline adotando o md5 remoto,
+ * o tick seguinte subia o local ANTIGO por cima da versão atual do hub, e a
+ * próxima máquina baixava a versão ruim.
+ *
+ * Retorna { downloads, uploads, conflicts, frozen, warnings } (listas ordenadas
+ * — plano determinístico).
+ *
+ * Regras (R=remoto, L=local, B=baseline, P=par de conflito):
  *   R sem L, sem B          -> download (arquivo novo no server)
- *   R sem L, com B          -> download (deleção local NÃO propaga)
- *   L === R                 -> nada
+ *   R sem L, com B ou P     -> download (deleção local NÃO propaga)
+ *   L === R                 -> nada (sai do congelamento, se houver par)
+ *   com P, R !== P.remoto   -> conflito (hub evoluiu; rematerializa)
+ *   com P, L !== P.local    -> upload   (houve reconciliação humana)
+ *   com P, os dois parados  -> frozen   (inerte até ação humana)
  *   L === B, R !== B        -> download (server mudou, local intocado)
  *   R === B, L !== B        -> upload   (local mudou, server intocado)
  *   L !== B, R !== B, L!==R -> conflito (os dois lados mudaram)
@@ -226,7 +258,7 @@ export function conflictPath(relPath, authorSlug) {
  * não-confiável e cada path vira caminho no disco do cliente.
  */
 export function planWorkdocsSync({ manifest, localFiles, baseline } = {}) {
-  const plan = { downloads: [], uploads: [], conflicts: [], warnings: [] };
+  const plan = { downloads: [], uploads: [], conflicts: [], frozen: [], warnings: [] };
   const remote = manifest || {};
   const local = localFiles || {};
   const base = baseline || {};
@@ -243,6 +275,7 @@ export function planWorkdocsSync({ manifest, localFiles, baseline } = {}) {
   for (const p of [...paths].sort()) {
     const r = fileMd5(remote[p]);
     const l = fileMd5(local[p]);
+    const par = conflitoPar(base[p]);
     const b = fileMd5(base[p]);
 
     // Presente no disco mas fora do que o canal transporta: intocável.
@@ -257,15 +290,25 @@ export function planWorkdocsSync({ manifest, localFiles, baseline } = {}) {
 
     if (r === undefined) {
       // Só existe local: sobe se nunca foi sincronizado; se já esteve no
-      // baseline, sumiu no server -> não ressuscita nem apaga (v1).
-      if (l !== undefined && b === undefined) plan.uploads.push(p);
+      // baseline (md5 ou par), sumiu no server -> não ressuscita nem apaga (v1).
+      if (l !== undefined && b === undefined && par === undefined) plan.uploads.push(p);
       continue;
     }
     if (l === undefined) {
       plan.downloads.push(p); // seed ou deleção local (que não propaga)
       continue;
     }
-    if (l === r) continue; // em dia
+    if (l === r) continue; // em dia (colapsa o par, se houver)
+
+    if (par !== undefined) {
+      // Conflito congelado: só ação humana descongela. Remoto primeiro — se o
+      // hub andou, subir o local perderia a versão nova.
+      if (r !== par.remoto) plan.conflicts.push(p);
+      else if (l !== par.local) plan.uploads.push(p);
+      else plan.frozen.push(p);
+      continue;
+    }
+
     if (b !== undefined && l === b) plan.downloads.push(p);
     else if (b !== undefined && r === b) plan.uploads.push(p);
     else plan.conflicts.push(p);
@@ -283,14 +326,14 @@ export function planWorkdocsSync({ manifest, localFiles, baseline } = {}) {
  *   uploaded: Set (ou Map) de paths que o servidor aceitou.
  *
  *   - baixado          -> md5 do que foi gravado (local passou a ser igual)
- *   - conflito materializado -> md5 do que foi gravado na cópia: a versão
- *     remota já está preservada ao lado, então o local deixa de ser
- *     "divergente sem base" e sobe no próximo ciclo. Sem isso o par ficaria
- *     congelado em conflito para sempre e a resolução manual nunca propagaria.
- *     Conflito NÃO materializado não entra aqui — adotar o md5 remoto sem ter
- *     escrito nada destruiria a versão da VM no ciclo seguinte.
- *   - subido           -> md5 local (o server passou a tê-lo)
- *   - já sincronizado  -> md5 comum
+ *   - conflito materializado -> PAR `{conflito:{local, remoto}}`: os dois md5
+ *     do instante em que a cópia foi gravada. É o par que CONGELA o arquivo até
+ *     ação humana (ver `planWorkdocsSync`). NÃO grava o md5 remoto solto: isso
+ *     mandaria o local subir por cima do hub no tick seguinte — foi o defeito
+ *     que o review final mediu em produção. Conflito NÃO materializado não
+ *     entra aqui (mantém o baseline anterior).
+ *   - subido           -> md5 local (o server passou a tê-lo; colapsa o par)
+ *   - já sincronizado  -> md5 comum (colapsa o par: os lados convergiram)
  *   - falha            -> mantém o baseline anterior (o próximo ciclo é o retry)
  *   - sumiu dos dois lados -> entrada removida
  */
@@ -325,12 +368,18 @@ export function computeWorkdocsBaseline({
     const r = fileMd5(remote[p]);
     const l = fileMd5(local[p]);
     const b = fileMd5(prev[p]);
+    const par = conflitoPar(prev[p]);
     const localInelegivel = l === undefined && Object.prototype.hasOwnProperty.call(local, p);
     if (r === undefined && l === undefined && !localInelegivel) continue; // órfão dos dois lados
     if (dl.has(p)) next[p] = md5Gravado(dl, p) ?? r;
-    else if (cf.has(p)) next[p] = md5Gravado(cf, p) ?? r;
-    else if (up.has(p) && l !== undefined) next[p] = l;
+    else if (cf.has(p)) {
+      // Par do instante da materialização: é o que congela até ação humana.
+      const remoto = md5Gravado(cf, p) ?? r;
+      if (l !== undefined && remoto !== undefined) next[p] = { conflito: { local: l, remoto } };
+      else if (b !== undefined) next[p] = b;
+    } else if (up.has(p) && l !== undefined) next[p] = l;
     else if (r !== undefined && r === l) next[p] = r;
+    else if (par !== undefined) next[p] = { conflito: { ...par } }; // segue congelado
     else if (b !== undefined) next[p] = b;
     if (next[p] === undefined) delete next[p];
   }

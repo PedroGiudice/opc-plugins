@@ -173,7 +173,7 @@ test("plano: iguais nos dois lados -> nenhuma ação", () => {
     localFiles: { "a.md": "v1" },
     baseline: {},
   });
-  assert.deepEqual(plan, { downloads: [], uploads: [], conflicts: [], warnings: [] });
+  assert.deepEqual(plan, { downloads: [], uploads: [], conflicts: [], frozen: [], warnings: [] });
 });
 
 test("plano: ausente local com baseline -> download (deleção local NÃO propaga)", () => {
@@ -211,7 +211,7 @@ test("plano: ausente no server + com baseline -> nenhuma ação (deleção no se
     localFiles: { "a.md": "v1" },
     baseline: { "a.md": "v1" },
   });
-  assert.deepEqual(plan, { downloads: [], uploads: [], conflicts: [], warnings: [] });
+  assert.deepEqual(plan, { downloads: [], uploads: [], conflicts: [], frozen: [], warnings: [] });
 });
 
 test("plano: local presente mas inelegível (acima de 2 MiB) nunca vira download (C1)", () => {
@@ -279,12 +279,14 @@ test("plano: tolera entradas ausentes/nulas", () => {
     downloads: [],
     uploads: [],
     conflicts: [],
+    frozen: [],
     warnings: [],
   });
   assert.deepEqual(planWorkdocsSync({ manifest: null, localFiles: null, baseline: null }), {
     downloads: [],
     uploads: [],
     conflicts: [],
+    frozen: [],
     warnings: [],
   });
 });
@@ -322,14 +324,18 @@ test("baseline: upload bem-sucedido adota o md5 local", () => {
   assert.deepEqual(next, { "a.md": "vLocal" });
 });
 
-test("baseline: conflito materializado adota o md5 do server (local vence no próximo ciclo)", () => {
+test("baseline: conflito materializado NÃO adota o md5 do server solto (política revista)", () => {
+  // A política anterior gravava o md5 remoto aqui, e o tick seguinte subia o
+  // local por cima do hub. O review final mediu o estrago em produção; agora
+  // grava o PAR e o arquivo congela até ação humana.
   const next = computeWorkdocsBaseline({
     manifest: { "a.md": { md5: "vRemoto" } },
     localFiles: { "a.md": "vLocal" },
     baseline: { "a.md": "v0" },
     conflicted: new Map([["a.md", "vRemoto"]]),
   });
-  assert.deepEqual(next, { "a.md": "vRemoto" });
+  assert.notDeepEqual(next, { "a.md": "vRemoto" });
+  assert.deepEqual(next, { "a.md": { conflito: { local: "vLocal", remoto: "vRemoto" } } });
 });
 
 test("baseline: conflito NÃO materializado mantém o baseline anterior (I5)", () => {
@@ -477,4 +483,112 @@ test("isWorkdocPath: rejeita a faixa de controle C1 (paridade com is_control do 
   assert.equal(isWorkdocPath("a\u001F.md"), false); // fim do range C0
   assert.equal(isWorkdocPath("notas\u0085/x.md"), false); // também em segmento de diretório
   assert.equal(isWorkdocPath("a\u00A0.md"), true); // NBSP não é controle (Zs, não Cc)
+});
+
+// ---------- conflito congelado (política pós review final) ----------
+
+const PAR = (local, remoto) => ({ conflito: { local, remoto } });
+
+test("conflito congelado: par registrado e os dois lados parados -> INERTE", () => {
+  const plan = planWorkdocsSync({
+    manifest: { "a.md": { md5: "vRemoto" } },
+    localFiles: { "a.md": "vLocal" },
+    baseline: { "a.md": PAR("vLocal", "vRemoto") },
+  });
+  assert.deepEqual(plan.downloads, []);
+  assert.deepEqual(plan.uploads, [], "subir aqui destruiria a versão do hub");
+  assert.deepEqual(plan.conflicts, [], "a cópia já está no disco; nada a rematerializar");
+  assert.deepEqual(plan.frozen, ["a.md"]);
+});
+
+test("conflito congelado: LOCAL mudou (reconciliação humana) -> upload", () => {
+  const plan = planWorkdocsSync({
+    manifest: { "a.md": { md5: "vRemoto" } },
+    localFiles: { "a.md": "vReconciliado" },
+    baseline: { "a.md": PAR("vLocal", "vRemoto") },
+  });
+  assert.deepEqual(plan.uploads, ["a.md"]);
+  assert.deepEqual(plan.frozen, []);
+});
+
+test("conflito congelado: REMOTO mudou -> conflito novo, rematerializa a cópia", () => {
+  const plan = planWorkdocsSync({
+    manifest: { "a.md": { md5: "vRemoto2" } },
+    localFiles: { "a.md": "vLocal" },
+    baseline: { "a.md": PAR("vLocal", "vRemoto") },
+  });
+  assert.deepEqual(plan.conflicts, ["a.md"]);
+  assert.deepEqual(plan.uploads, []);
+});
+
+test("conflito congelado: os DOIS mudaram -> conflito novo (nunca upload)", () => {
+  const plan = planWorkdocsSync({
+    manifest: { "a.md": { md5: "vRemoto2" } },
+    localFiles: { "a.md": "vLocal2" },
+    baseline: { "a.md": PAR("vLocal", "vRemoto") },
+  });
+  assert.deepEqual(plan.conflicts, ["a.md"], "upload aqui perderia o remoto novo");
+  assert.deepEqual(plan.uploads, []);
+});
+
+test("conflito congelado: lados convergiram -> nada, sai do congelamento", () => {
+  const plan = planWorkdocsSync({
+    manifest: { "a.md": { md5: "vIgual" } },
+    localFiles: { "a.md": "vIgual" },
+    baseline: { "a.md": PAR("vLocal", "vRemoto") },
+  });
+  assert.deepEqual(plan, { downloads: [], uploads: [], conflicts: [], frozen: [], warnings: [] });
+  const next = computeWorkdocsBaseline({
+    manifest: { "a.md": { md5: "vIgual" } },
+    localFiles: { "a.md": "vIgual" },
+    baseline: { "a.md": PAR("vLocal", "vRemoto") },
+  });
+  assert.deepEqual(next, { "a.md": "vIgual" }, "o par colapsa para o md5 comum");
+});
+
+test("conflito congelado: local apagado -> download (deleção não propaga)", () => {
+  const plan = planWorkdocsSync({
+    manifest: { "a.md": { md5: "vRemoto" } },
+    localFiles: {},
+    baseline: { "a.md": PAR("vLocal", "vRemoto") },
+  });
+  assert.deepEqual(plan.downloads, ["a.md"]);
+});
+
+test("baseline: conflito materializado grava o PAR {local, remoto}, não o md5 remoto", () => {
+  const next = computeWorkdocsBaseline({
+    manifest: { "a.md": { md5: "vRemoto" } },
+    localFiles: { "a.md": "vLocal" },
+    baseline: { "a.md": "v0" },
+    conflicted: new Map([["a.md", "vRemoto"]]),
+  });
+  assert.deepEqual(next, { "a.md": PAR("vLocal", "vRemoto") });
+});
+
+test("baseline: conflito congelado mantém o par intacto entre ticks", () => {
+  const entrada = {
+    manifest: { "a.md": { md5: "vRemoto" } },
+    localFiles: { "a.md": "vLocal" },
+    baseline: { "a.md": PAR("vLocal", "vRemoto") },
+  };
+  assert.deepEqual(computeWorkdocsBaseline(entrada), { "a.md": PAR("vLocal", "vRemoto") });
+});
+
+test("baseline: upload após reconciliação humana colapsa o par para o md5 local", () => {
+  const next = computeWorkdocsBaseline({
+    manifest: { "a.md": { md5: "vRemoto" } },
+    localFiles: { "a.md": "vReconciliado" },
+    baseline: { "a.md": PAR("vLocal", "vRemoto") },
+    uploaded: new Set(["a.md"]),
+  });
+  assert.deepEqual(next, { "a.md": "vReconciliado" });
+});
+
+test("baseline: par malformado é tratado como ausente (tolerante a estado corrompido)", () => {
+  const plan = planWorkdocsSync({
+    manifest: { "a.md": { md5: "vRemoto" } },
+    localFiles: { "a.md": "vLocal" },
+    baseline: { "a.md": { conflito: { local: 42 } } },
+  });
+  assert.deepEqual(plan.conflicts, ["a.md"]);
 });
