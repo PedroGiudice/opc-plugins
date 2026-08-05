@@ -16,7 +16,7 @@ import { createHash } from "node:crypto";
 import {
   existsSync, mkdirSync, readdirSync, readFileSync,
   writeFileSync, renameSync, appendFileSync, copyFileSync, rmdirSync, unlinkSync,
-  statSync, openSync, readSync, closeSync,
+  statSync, lstatSync, openSync, readSync, closeSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -1546,6 +1546,36 @@ export function readCaseWorkdocs(caseDir, maxFileBytes = WORKDOC_MAX_FILE_BYTES)
 }
 
 /**
+ * Resolve `<caseDir>/<rel>` para ESCRITA, recusando quando qualquer componente
+ * do path já existe no disco como symlink. Espelha `safe_join_workdoc` do
+ * servidor (`api.rs`), componente a componente com `lstat`.
+ *
+ * O guard por-path (`isWorkdocPath`/`isSafeRelPath`) NÃO basta aqui: ele olha o
+ * texto do path, e `mkdirSync(..., {recursive:true})` + `writeAtomic` RESOLVEM
+ * symlink de diretório. Com `caso-a/notas -> /tmp/qualquer`, um manifest
+ * anunciando `notas/x.md` faria o conteúdo do servidor ser gravado FORA da
+ * pasta do caso — em qualquer lugar onde o link aponte. Componente ausente
+ * pode ser criado; o que não pode é já existir como link.
+ *
+ * Retorna `{ path }` ou `{ erro }` (motivo em PT-BR para o log).
+ */
+export function resolveWorkdocDestino(caseDir, rel) {
+  if (!isSafeRelPath(rel)) return { erro: "path fora dos guards de path" };
+  let resolvido = caseDir;
+  for (const seg of rel.split("/")) {
+    resolvido = join(resolvido, seg);
+    let st;
+    try {
+      st = lstatSync(resolvido); // lstat: enxerga o PRÓPRIO link, não o alvo
+    } catch {
+      continue; // componente ausente ainda vai ser criado -- e não é symlink
+    }
+    if (st.isSymbolicLink()) return { erro: "componente do path é um symlink" };
+  }
+  return { path: resolvido };
+}
+
+/**
  * Fase de workdocs do tick. Espelha a assinatura de `syncMemoria`.
  *
  * Contratos do servidor:
@@ -1613,14 +1643,21 @@ export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
       appendLog(casesBase, `workdocs ${caso}: path inseguro no plano (${relOrigem}) -> skip`);
       return null;
     }
+    // Guard de ESCRITA (o de path não cobre): nenhum componente do destino pode
+    // já existir como symlink, senão mkdir/rename gravariam fora da pasta do
+    // caso. Antes do GET — não faz sentido baixar o que não pode ser gravado.
+    const alvo = resolveWorkdocDestino(join(casesBase, caso), relDestino);
+    if (alvo.erro) {
+      appendLog(casesBase, `workdocs ${caso}: ${relDestino} recusado (${alvo.erro}) -> nada escrito`);
+      return null;
+    }
     if (orcamentoDownload <= 0) return null;
     orcamentoDownload--;
     try {
       const url = `${apiBase}/cases/${encodeURIComponent(caso)}/workdocs/file?path=${encodeURIComponent(relOrigem)}`;
       const buf = await doGetBytes(url);
-      const dest = join(casesBase, caso, ...relDestino.split("/"));
-      mkdirSync(dirname(dest), { recursive: true });
-      writeAtomic(dest, buf);
+      mkdirSync(dirname(alvo.path), { recursive: true });
+      writeAtomic(alvo.path, buf);
       return md5hex(buf);
     } catch (err) {
       erros++;
@@ -1814,6 +1851,9 @@ export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
 function conflitPathDisponivel(caseDir, rel, selfAuthor, remoteMd5) {
   const base = conflictPath(rel, selfAuthor);
   if (base === null) return null;
+  // Mesmo guard de escrita do download: com um componente de diretório
+  // linkado, a SONDA abaixo (`existsSync`/md5) já leria fora da pasta do caso.
+  if (resolveWorkdocDestino(caseDir, base).erro) return null;
   const dot = base.lastIndexOf(".");
   const ext = base.slice(dot);
   const semExt = base.slice(0, dot);

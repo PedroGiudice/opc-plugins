@@ -2817,3 +2817,67 @@ test("syncWorkdocs: pasta de pipeline com outra caixa é podada (fronteira sem c
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+test("syncWorkdocs: componente de diretório que é symlink NÃO recebe escrita (paridade com safe_join_workdoc)", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr161-symdir-"));
+  const fora = mkdtempSync(join(tmpdir(), "cmr161-FORA-"));
+  try {
+    const caso = join(base, "caso-a");
+    mkdirSync(caso, { recursive: true });
+    symlinkSync(fora, join(caso, "notas")); // diretório linkado para fora do caso
+    writeFileSync(join(base, ".sync-state.json"), '{"caso-a":{}}');
+
+    const { deps } = makeWorkdocsApi({
+      get: { "/workdocs-manifest": { cases: { "caso-a": { "notas/x.md": { md5: "vm1" } } } } },
+      bytes: { "path=notas%2Fx.md": "conteúdo que NÃO pode sair da pasta do caso" },
+    });
+
+    await syncWorkdocs("http://t/api", base, "pedro-giudice", deps);
+
+    assert.deepEqual(readdirSync(fora), [], "nada pode ser escrito fora da pasta do caso");
+    assert.equal(lstatSync(join(caso, "notas")).isSymbolicLink(), true, "o link não pode virar pasta");
+    assert.match(readFileSync(join(base, ".sync.log"), "utf-8"), /symlink/);
+    // e o baseline não pode registrar um download que não aconteceu
+    const st = JSON.parse(readFileSync(join(base, ".workdocs-state.json"), "utf-8"));
+    assert.equal(st["caso-a"]?.["notas/x.md"], undefined);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+    rmSync(fora, { recursive: true, force: true });
+  }
+});
+
+test("syncWorkdocs: arquivo atrás de diretório symlink não é lido, escrito nem enviado", async () => {
+  const base = mkdtempSync(join(tmpdir(), "cmr161-symdir-conflito-"));
+  const fora = mkdtempSync(join(tmpdir(), "cmr161-FORA-conflito-"));
+  try {
+    const caso = join(base, "caso-a");
+    mkdirSync(caso, { recursive: true });
+    symlinkSync(fora, join(caso, "notas"));
+    // baseline sugere divergência; o alvo do link NUNCA pode ser tocado por isso
+    writeFileSync(join(base, ".sync-state.json"), '{"caso-a":{}}');
+    writeFileSync(
+      join(base, ".workdocs-state.json"),
+      JSON.stringify({ "caso-a": { "notas/tese.md": "v0" } }),
+    );
+    // arquivo "local" mora no alvo do link -> o scan NAO o ve (symlink de dir nao e percorrido)
+    writeFileSync(join(fora, "tese.md"), "versão local fora do caso");
+
+    const { deps } = makeWorkdocsApi({
+      get: { "/workdocs-manifest": { cases: { "caso-a": { "notas/tese.md": { md5: "vmX" } } } } },
+      bytes: { "path=notas%2Ftese.md": "versão da VM" },
+    });
+
+    await syncWorkdocs("http://t/api", base, "pedro-giudice", deps);
+
+    assert.deepEqual(
+      readdirSync(fora),
+      ["tese.md"],
+      "nem o download nem a cópia de conflito podem escrever fora",
+    );
+    assert.equal(readFileSync(join(fora, "tese.md"), "utf-8"), "versão local fora do caso");
+    assert.equal(lstatSync(join(caso, "notas")).isSymbolicLink(), true);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+    rmSync(fora, { recursive: true, force: true });
+  }
+});
