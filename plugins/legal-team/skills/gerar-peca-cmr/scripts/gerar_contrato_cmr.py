@@ -25,6 +25,8 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
+from docx_guard import salvar_com_guard
+
 
 class ContratoCMR:
     """Gera contrato societário formatado no padrão CMR Advogados."""
@@ -333,8 +335,7 @@ class ContratoCMR:
         self._add_run(p2c, f"CPF: {cpf2}")
 
     def salvar(self, path):
-        self.doc.save(path)
-        print(f"Salvo: {path}")
+        return salvar_com_guard(self.doc, path)
 
 
 def _demo():

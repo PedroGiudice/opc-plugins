@@ -45,6 +45,8 @@ from docx.oxml import OxmlElement
 from lxml import etree
 import copy
 
+from docx_guard import salvar_com_guard
+
 
 class PecaCMR:
     """Gera peça processual formatada no padrão CMR Advogados."""
@@ -586,8 +588,7 @@ class PecaCMR:
                 self._add_run(p, val)
 
     def salvar(self, path):
-        self.doc.save(path)
-        print(f"Salvo: {path}")
+        return salvar_com_guard(self.doc, path)
 
 
 def _demo():

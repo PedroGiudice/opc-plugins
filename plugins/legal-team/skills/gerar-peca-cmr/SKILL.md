@@ -101,6 +101,30 @@ peca.assinatura_dupla("Nome1", "OAB1", "Nome2", "OAB2")
 peca.salvar("caminho/arquivo.docx")
 ```
 
+## Guard de sobrescrita (protecao de revisao manual)
+
+`salvar()` NUNCA sobrescreve um .docx que foi editado fora do gerador (Word)
+ou que esta aberto no Word. Nesses casos ele grava a versao nova ao lado, com
+nome carimbado (`... - GERADO dd.mm.aaaa HHhMM.docx`), e imprime linhas
+`[GUARD]` no output. Quando ninguem tocou no arquivo, sobrescreve em silencio
+— iterar rapido sobre a mesma peca continua sem atrito.
+
+Quando o `[GUARD]` disparar:
+
+1. **NAO contorne** — nao delete/renomeie o arquivo original nem regrave por
+   cima. O desvio significa que o arquivo em disco contem trabalho manual do
+   operador (ou estado desconhecido).
+2. Leia o .docx original (python-docx: paragrafos + tabelas) para ver a
+   revisao do operador e reporte a ele o que encontrou.
+3. Incorpore as alteracoes dele no script gerador, atualize a minuta `.md`
+   correspondente na pasta do caso, e regenere.
+4. Se o motivo for "aberto no Word", peca ao operador para fechar (ou salvar
+   como) antes de qualquer regravacao — gravar em disco sob Word aberto e
+   inutil: o Word regrava por cima ao salvar.
+
+O fingerprint vive nas propriedades do proprio .docx (campo Comentarios,
+`cmr-gen:<hash>`) — nao remova nem edite essa propriedade.
+
 ## Regras criticas
 
 1. **Paragrafo vazio entre cada paragrafo de conteudo** — use `peca.espaco()` entre cada chamada. Excecoes: capitulo seguido de subcapitulo (sem espaco), paragrafos consecutivos do mesmo fluxo.

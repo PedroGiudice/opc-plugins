@@ -52,6 +52,8 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
+from docx_guard import salvar_com_guard
+
 
 class RespostaNotificacaoCMR:
     """Gera carta de resposta a notificação extrajudicial no padrão CMR."""
@@ -279,5 +281,4 @@ class RespostaNotificacaoCMR:
         self._add_run(p, oab)
 
     def salvar(self, path):
-        self.doc.save(path)
-        return path
+        return salvar_com_guard(self.doc, path)

@@ -42,6 +42,8 @@ from docx import Document
 from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 
+from docx_guard import salvar_com_guard
+
 
 class AditamentoCMR:
     """Aditamento bilingue gerado a partir do template real (fidelidade 1:1)."""
@@ -193,9 +195,7 @@ class AditamentoCMR:
 
     # ------------------------------------------------------------------ #
     def salvar(self, path):
-        self.doc.save(path)
-        print(f"Salvo: {path}")
-        return path
+        return salvar_com_guard(self.doc, path)
 
 
 if __name__ == "__main__":
