@@ -2561,6 +2561,122 @@ export function selfUpdateMarketplace(scriptDir, deps = {}) {
   return "self-update: clone ja atualizado";
 }
 
+// Nome de plugin aceito no comando `claude plugin update` (defesa: nomes vem
+// de JSONs locais, mas nunca compomos linha de comando com valor fora disto).
+const PLUGIN_NAME_SAFE = /^[a-z0-9][a-z0-9_-]*$/;
+
+/**
+ * CMR-175: decide quais plugins do marketplace promover no cache install.
+ * Compara o instalado (installed_plugins.json) com o catalogo do clone.
+ * So promove o que JA esta instalado — nunca instala novo nem remove.
+ * Pura; raw invalido ou vazio -> [].
+ */
+export function planPluginUpdates(installedRaw, catalogVersions, marketplaceName = "opc-plugins") {
+  if (!installedRaw) return [];
+  let installed;
+  try {
+    installed = JSON.parse(installedRaw);
+  } catch {
+    return [];
+  }
+  const plugins = installed && typeof installed === "object" ? installed.plugins : null;
+  if (!plugins || typeof plugins !== "object") return [];
+  const updates = [];
+  for (const [key, entries] of Object.entries(plugins)) {
+    const suffix = `@${marketplaceName}`;
+    if (!key.endsWith(suffix)) continue;
+    const name = key.slice(0, -suffix.length);
+    if (!PLUGIN_NAME_SAFE.test(name)) continue;
+    const to = catalogVersions[name];
+    if (!to) continue; // fora do catalogo atual: nao mexe
+    if (!Array.isArray(entries) || entries.length === 0) continue;
+    const from = entries[0] && entries[0].version;
+    if (!from || entries.every((e) => e && e.version === to)) continue;
+    updates.push({ name, from, to });
+  }
+  updates.sort((a, b) => a.name.localeCompare(b.name));
+  return updates;
+}
+
+/**
+ * CMR-175: promove o cache install dos plugins quando o catalogo do clone
+ * (recem-atualizado pelo selfUpdateMarketplace) diverge do instalado. O
+ * `claude plugin update` instala a versao nova num dir versionado NOVO do
+ * cache e NAO remove o antigo — sessao aberta segue intacta no dir velho e
+ * so ve o novo no restart ("Restart to apply"). Best-effort: falha vira
+ * linha de log e o proximo ciclo re-tenta. Retorna [] quando nao ha nada a
+ * fazer (sem ruido a cada 5 min).
+ */
+export function updatePluginCaches(scriptDir, deps = {}) {
+  const exists = deps.exists || existsSync;
+  const readFile = deps.readFile || ((p) => readFileSync(p, "utf-8"));
+  const readdir = deps.readdir || ((p) => readdirSync(p));
+  const spawn = deps.spawn || spawnSync;
+  const home = (deps.homedir || homedir)();
+  // scriptDir = <cloneRoot>/plugins/case-knowledge
+  const cloneRoot = dirname(dirname(scriptDir));
+  // Sem catalogo, estamos rodando do cache install ou copia avulsa: no-op
+  // silencioso (diferente do self-update, aqui nao ha o que promover).
+  if (!exists(join(cloneRoot, ".claude-plugin", "marketplace.json"))) return [];
+
+  const catalogVersions = {};
+  let names = [];
+  try {
+    names = readdir(join(cloneRoot, "plugins"));
+  } catch {
+    return [];
+  }
+  for (const name of names) {
+    try {
+      const manifest = JSON.parse(readFile(join(cloneRoot, "plugins", name, ".claude-plugin", "plugin.json")));
+      if (manifest && manifest.version) catalogVersions[name] = String(manifest.version);
+    } catch {
+      // plugin sem manifest legivel: fica fora do catalogo deste ciclo
+    }
+  }
+
+  let installedRaw = null;
+  try {
+    installedRaw = readFile(join(home, ".claude", "plugins", "installed_plugins.json"));
+  } catch {
+    return [];
+  }
+  const plan = planPluginUpdates(installedRaw, catalogVersions);
+  if (plan.length === 0) return [];
+
+  // Resolve o CLI uma vez, so quando ha trabalho. No Windows a scheduled
+  // task nem sempre herda um PATH com ~/.local/bin — fallback explicito.
+  const candidates = ["claude", join(home, ".local", "bin", process.platform === "win32" ? "claude.exe" : "claude")];
+  let cli = null;
+  for (const candidate of candidates) {
+    const probe = spawn(candidate, ["--version"], { encoding: "utf-8", timeout: 30_000 });
+    if (!probe.error && probe.status === 0) {
+      cli = candidate;
+      break;
+    }
+  }
+  if (!cli) return ["plugin-update: pulado (claude CLI nao encontrado)"];
+
+  // Sequencial de proposito: cada update reescreve installed_plugins.json;
+  // paralelo corromperia o JSON e disputaria o cache npm.
+  const lines = [];
+  for (const { name, from, to } of plan) {
+    const r = spawn(cli, ["plugin", "update", `${name}@opc-plugins`], {
+      encoding: "utf-8",
+      timeout: 180_000,
+    });
+    if (r.error || r.status !== 0) {
+      const motivo = r.error
+        ? r.error.message
+        : String(r.stderr || r.stdout || "").trim().split("\n")[0] || `exit ${r.status}`;
+      lines.push(`plugin-update: ${name} falhou (${motivo})`);
+      continue;
+    }
+    lines.push(`plugin-update: ${name} ${from} -> ${to}`);
+  }
+  return lines;
+}
+
 async function main() {
   const apiBase = process.env.CASE_KNOWLEDGE_API_BASE || defaultApiBase();
   const casesBase = process.env.CASE_KNOWLEDGE_CASES_BASE || defaultCasesBase();
@@ -2575,6 +2691,18 @@ async function main() {
     if (!line.includes("ja atualizado")) appendLog(casesBase, line);
   } catch (err) {
     appendLog(casesBase, `self-update: erro inesperado: ${err.message}`);
+  }
+
+  // CMR-175: com o clone em dia (acima), promove o cache install dos plugins
+  // divergentes — e o que faz agents/tools MCP/hooks de um release chegarem
+  // sem `claude plugin update` manual por maquina. Sessao aberta permanece no
+  // dir versionado antigo (preservado); o novo vale no restart do CC.
+  try {
+    for (const line of updatePluginCaches(dirname(fileURLToPath(import.meta.url)))) {
+      appendLog(casesBase, line);
+    }
+  } catch (err) {
+    appendLog(casesBase, `plugin-update: erro inesperado: ${err.message}`);
   }
 
   // CMR-138: autor da memoria (namespace-por-autor) derivado UMA vez do access_jwt,

@@ -19,6 +19,8 @@ import {
   readFeedbackState,
   buildPeersIndex,
   selfUpdateMarketplace,
+  planPluginUpdates,
+  updatePluginCaches,
   planScaffoldingSync,
   buildFeedbackIndex,
   syncMemoria,
@@ -3103,4 +3105,152 @@ test("syncWorkdocs: baseline de caso não processado no tick é carregado adiant
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// planPluginUpdates / updatePluginCaches (CMR-175: promover cache install
+// quando o catalogo do clone diverge do instalado)
+
+const INSTALLED_RAW = JSON.stringify({
+  version: 2,
+  plugins: {
+    "legal-team@opc-plugins": [
+      { scope: "user", installPath: "/x/legal-team/0.6.1", version: "0.6.1" },
+    ],
+    "case-knowledge@opc-plugins": [
+      { scope: "user", installPath: "/x/case-knowledge/0.20.0", version: "0.20.0" },
+    ],
+    "context7@claude-plugins-official": [
+      { scope: "project", installPath: "/x/context7/abc", version: "61c0597779bd" },
+    ],
+  },
+});
+
+test("planPluginUpdates: raw invalido ou ausente -> vazio", () => {
+  assert.deepEqual(planPluginUpdates(null, { "legal-team": "0.7.1" }), []);
+  assert.deepEqual(planPluginUpdates("nao-e-json", { "legal-team": "0.7.1" }), []);
+  assert.deepEqual(planPluginUpdates("{}", { "legal-team": "0.7.1" }), []);
+});
+
+test("planPluginUpdates: versao divergente do catalogo -> update from/to", () => {
+  const plan = planPluginUpdates(INSTALLED_RAW, {
+    "legal-team": "0.7.1",
+    "case-knowledge": "0.20.0",
+  });
+  assert.deepEqual(plan, [{ name: "legal-team", from: "0.6.1", to: "0.7.1" }]);
+});
+
+test("planPluginUpdates: tudo em dia -> vazio", () => {
+  const plan = planPluginUpdates(INSTALLED_RAW, {
+    "legal-team": "0.6.1",
+    "case-knowledge": "0.20.0",
+  });
+  assert.deepEqual(plan, []);
+});
+
+test("planPluginUpdates: outro marketplace e ausente do catalogo -> ignorados", () => {
+  // context7 e de outro marketplace; case-knowledge fora do catalogo passado.
+  // Nunca instala plugin novo nem remove: so promove o que ja esta instalado.
+  const plan = planPluginUpdates(INSTALLED_RAW, { "plugin-novo": "1.0.0" });
+  assert.deepEqual(plan, []);
+});
+
+test("planPluginUpdates: nome fora do padrao seguro -> ignorado", () => {
+  const raw = JSON.stringify({
+    plugins: { "a b;rm@opc-plugins": [{ scope: "user", version: "1.0.0" }] },
+  });
+  assert.deepEqual(planPluginUpdates(raw, { "a b;rm": "2.0.0" }), []);
+});
+
+function fakePluginEnv({ catalog, installedRaw, spawnResults }) {
+  const calls = [];
+  const files = {
+    "/fake/home/.claude/plugins/installed_plugins.json": installedRaw,
+  };
+  for (const [name, version] of Object.entries(catalog || {})) {
+    files[join("/fake/clone/plugins", name, ".claude-plugin", "plugin.json")] =
+      JSON.stringify({ name, version });
+  }
+  const deps = {
+    homedir: () => "/fake/home",
+    exists: (p) => p === join("/fake/clone", ".claude-plugin", "marketplace.json"),
+    readdir: () => Object.keys(catalog || {}),
+    readFile: (p) => {
+      if (!(p in files)) throw new Error(`ENOENT: ${p}`);
+      return files[p];
+    },
+    spawn: (cmd, args, opts) => {
+      calls.push({ cmd, args, opts });
+      const key = args[0] === "--version" ? "version" : args[2] || "update";
+      return (spawnResults || {})[key] || { status: 0, stdout: "", stderr: "" };
+    },
+  };
+  return { deps, calls };
+}
+
+test("updatePluginCaches: sem marketplace.json (cache install) -> silencioso, sem spawn", () => {
+  const { deps, calls } = fakePluginEnv({ catalog: { "legal-team": "0.7.1" }, installedRaw: INSTALLED_RAW });
+  deps.exists = () => false;
+  const lines = updatePluginCaches("/fake/clone/plugins/case-knowledge", deps);
+  assert.deepEqual(lines, []);
+  assert.equal(calls.length, 0);
+});
+
+test("updatePluginCaches: tudo em dia -> silencioso, sem spawn", () => {
+  const { deps, calls } = fakePluginEnv({
+    catalog: { "legal-team": "0.6.1", "case-knowledge": "0.20.0" },
+    installedRaw: INSTALLED_RAW,
+  });
+  const lines = updatePluginCaches("/fake/clone/plugins/case-knowledge", deps);
+  assert.deepEqual(lines, []);
+  assert.equal(calls.length, 0);
+});
+
+test("updatePluginCaches: divergencia -> roda claude plugin update e loga from -> to", () => {
+  const { deps, calls } = fakePluginEnv({
+    catalog: { "legal-team": "0.7.1", "case-knowledge": "0.20.0" },
+    installedRaw: INSTALLED_RAW,
+    spawnResults: {
+      version: { status: 0, stdout: "2.1.40\n", stderr: "" },
+      "legal-team@opc-plugins": { status: 0, stdout: "updated\n", stderr: "" },
+    },
+  });
+  const lines = updatePluginCaches("/fake/clone/plugins/case-knowledge", deps);
+  assert.deepEqual(lines, ["plugin-update: legal-team 0.6.1 -> 0.7.1"]);
+  const update = calls.find((c) => c.args[0] === "plugin");
+  assert.deepEqual(update.args, ["plugin", "update", "legal-team@opc-plugins"]);
+  assert.ok(update.opts.timeout >= 60_000, "update roda npm install; timeout curto demais");
+});
+
+test("updatePluginCaches: update falha -> linha de falha, nao lanca, segue os demais", () => {
+  const installed = JSON.stringify({
+    plugins: {
+      "aaa@opc-plugins": [{ scope: "user", version: "1.0.0" }],
+      "bbb@opc-plugins": [{ scope: "user", version: "1.0.0" }],
+    },
+  });
+  const { deps } = fakePluginEnv({
+    catalog: { aaa: "1.1.0", bbb: "1.1.0" },
+    installedRaw: installed,
+    spawnResults: {
+      version: { status: 0, stdout: "2.1.40\n", stderr: "" },
+      "aaa@opc-plugins": { status: 1, stdout: "", stderr: "npm install failed\n" },
+      "bbb@opc-plugins": { status: 0, stdout: "", stderr: "" },
+    },
+  });
+  const lines = updatePluginCaches("/fake/clone/plugins/case-knowledge", deps);
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /plugin-update: aaa falhou \(npm install failed\)/);
+  assert.equal(lines[1], "plugin-update: bbb 1.0.0 -> 1.1.0");
+});
+
+test("updatePluginCaches: claude CLI ausente em todos os candidatos -> linha de pulo", () => {
+  const { deps } = fakePluginEnv({
+    catalog: { "legal-team": "0.7.1" },
+    installedRaw: INSTALLED_RAW,
+  });
+  deps.spawn = () => ({ error: new Error("spawnSync claude ENOENT"), status: null, stdout: "", stderr: "" });
+  const lines = updatePluginCaches("/fake/clone/plugins/case-knowledge", deps);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /plugin-update: pulado \(claude CLI nao encontrado\)/);
 });
