@@ -467,3 +467,93 @@ export function renderReconstrucao(response, { globalCap = 60000 } = {}) {
       : null,
   };
 }
+
+// === CMR-146: caso "casca" (existe no tenant, sem base embedada) ===
+
+/**
+ * Rotas da API que leem a collection Qdrant do caso — as unicas em que
+ * "caso nao encontrado" pode significar collection ausente.
+ *
+ * O gate de pertinencia (caso fora do tenant) vive nas rotas de FILESYSTEM
+ * (`/metadata`, `/briefing`, `/memoria`, `/workdocs`) e devolve uma mensagem
+ * BYTE-IDENTICA a do 404 de collection. Como o body nao distingue os dois, a
+ * rota e o unico sinal: so o que esta nesta allowlist pode virar "sem base".
+ */
+const ROTAS_DE_COLLECTION = /\/cases\/[^/]+\/(search|stats|contexto|reconstruir|document(\/|$))/;
+
+/**
+ * Espelha `is_collection_not_found` da API Rust (api.rs): mensagem crua do
+ * qdrant-client para collection inexistente. Usado no caminho 500, porque
+ * stats/document/contexto NAO mapeiam esse erro para 404 do lado servidor.
+ */
+function mensagemDeCollectionAusente(msg) {
+  const m = msg.toLowerCase();
+  return (
+    m.includes("collection") &&
+    (m.includes("doesn't exist") ||
+      m.includes("does not exist") ||
+      m.includes("not found") ||
+      m.includes("notfound"))
+  );
+}
+
+/** Extrai o texto do erro de um body que pode vir como objeto, JSON cru ou texto. */
+function textoDoErro(body) {
+  if (body == null) return null;
+  if (typeof body === "object") {
+    return typeof body.error === "string" ? body.error : null;
+  }
+  if (typeof body !== "string") return null;
+  try {
+    const parsed = JSON.parse(body);
+    if (parsed && typeof parsed === "object" && typeof parsed.error === "string") {
+      return parsed.error;
+    }
+  } catch {
+    // Nao e JSON: cai no texto cru (ex.: erro de proxy/gateway).
+  }
+  return body;
+}
+
+/**
+ * `true` quando a resposta da API significa "a collection Qdrant deste caso
+ * nao existe" — o caso e uma casca (criado no app sem extracao) ou ainda nao
+ * foi ingerido. Pura: decide so por (status, body, path).
+ *
+ * Dois shapes reais, porque a API Rust nao e uniforme:
+ *   - 404 `{"error":"not found: caso <nome> nao encontrado"}` — search,
+ *     reconstruir (ambos os ramos), info e facet passam pelo
+ *     `is_collection_not_found` e viram 404 anti-enumeracao.
+ *   - 5xx `{"error":"Collection \`...\` doesn't exist!"}` — stats, document e
+ *     contexto NAO tem esse mapeamento e deixam o erro cru do Qdrant virar 500.
+ *
+ * Falsos positivos barrados de proposito: 404 de documento inexistente
+ * (collection existe), 404 do gate de pertinencia (rota fora da allowlist),
+ * 500 de indice faltando e erros de conexao.
+ */
+export function detectaCollectionAusente(status, body, path) {
+  if (typeof path !== "string" || !ROTAS_DE_COLLECTION.test(path)) return false;
+  const msg = textoDoErro(body);
+  if (!msg) return false;
+
+  if (status === 404) {
+    // So "caso X nao encontrado". "documento 'X' nao encontrado" fica de fora:
+    // ali a collection existe e a peca e que nao esta la.
+    return /\bcaso\s+.+\s+nao\s+encontrado/i.test(msg);
+  }
+  if (status >= 500) return mensagemDeCollectionAusente(msg);
+  return false;
+}
+
+/**
+ * Texto entregue pelas tools de busca quando o caso nao tem base embedada.
+ * Nao e erro: e o estado honesto de uma casca. Diz o que ainda funciona
+ * (memoria de sessao, workdocs) e como sair do estado (subir os autos pelo app).
+ */
+export function renderCaseSemBase(caseName) {
+  return (
+    `Caso sem base embedada (${caseName}) — os autos deste caso não foram ` +
+    `extraídos/indexados. Memória de sessão e workdocs funcionam normalmente. ` +
+    `A busca fica disponível se os autos subirem pelo app (mesmo caso).`
+  );
+}

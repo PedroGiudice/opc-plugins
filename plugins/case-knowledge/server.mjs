@@ -21,6 +21,8 @@ import {
   capContextChunks,
   renderDocumentChunks,
   renderReconstrucao,
+  detectaCollectionAusente,
+  renderCaseSemBase,
 } from "./format.mjs";
 import { requestWithAuth, APP_BASE, loginFlow } from "./auth.mjs";
 
@@ -95,10 +97,7 @@ async function apiPost(path, body) {
       body: JSON.stringify(body),
     })
   );
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`API ${res.status}: ${text}`);
-  }
+  if (!res.ok) throw erroDaApi(res, await res.text(), path);
   return await res.json();
 }
 
@@ -106,11 +105,31 @@ async function apiGet(path) {
   const res = await requestWithAuth((authHeaders) =>
     fetchWithRetry(`${API_BASE}${path}`, { headers: { ...authHeaders } })
   );
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`API ${res.status}: ${text}`);
-  }
+  if (!res.ok) throw erroDaApi(res, await res.text(), path);
   return await res.json();
+}
+
+/**
+ * Erro de resposta nao-ok da API, carregando status/body/path na propria
+ * instancia. Sem isso a unica informacao seria a string da mensagem, e o
+ * detector de caso sem base (CMR-146) teria de reparsear texto.
+ */
+function erroDaApi(res, text, path) {
+  const err = new Error(`API ${res.status}: ${text}`);
+  err.status = res.status;
+  err.body = text;
+  err.path = path;
+  return err;
+}
+
+/**
+ * Resposta pronta de "caso sem base embedada" quando o erro indica collection
+ * ausente (caso casca do CMR-146), ou `null` quando o erro e outra coisa.
+ * NAO marca `isError`: a casca e um estado legitimo do caso, nao uma falha.
+ */
+function respostaSemBase(err) {
+  if (!CASE || !detectaCollectionAusente(err.status, err.body, err.path)) return null;
+  return { content: [{ type: "text", text: renderCaseSemBase(CASE.name) }] };
 }
 
 /** Path com drive letter Windows (separador nativo ou `/`). */
@@ -360,7 +379,8 @@ server.tool(
         : "";
       return { content: [{ type: "text", text: degradeNotice(degraded, content_chars) + header + text }] };
     } catch (err) {
-      return { content: [{ type: "text", text: `Erro na busca: ${err.message}` }], isError: true };
+      return respostaSemBase(err)
+        ?? { content: [{ type: "text", text: `Erro na busca: ${err.message}` }], isError: true };
     }
   }
 );
@@ -445,7 +465,8 @@ server.tool(
       const header = `Documento: ${documento}\nChunks ${from}-${to} (central: ${chunk_index})\n\n`;
       return { content: [{ type: "text", text: notice + header + formatted }] };
     } catch (err) {
-      return { content: [{ type: "text", text: `Erro ao expandir contexto: ${err.message}` }], isError: true };
+      return respostaSemBase(err)
+        ?? { content: [{ type: "text", text: `Erro ao expandir contexto: ${err.message}` }], isError: true };
     }
   }
 );
@@ -483,7 +504,8 @@ server.tool(
       const { text } = renderReconstrucao(data, { globalCap: OUTPUT_CAP_CHARS });
       return { content: [{ type: "text", text }] };
     } catch (err) {
-      return { content: [{ type: "text", text: `Erro na reconstrucao: ${err.message}` }], isError: true };
+      return respostaSemBase(err)
+        ?? { content: [{ type: "text", text: `Erro na reconstrucao: ${err.message}` }], isError: true };
     }
   }
 );
@@ -508,7 +530,8 @@ server.tool(
       ];
       return { content: [{ type: "text", text: lines.join("\n") }] };
     } catch (err) {
-      return { content: [{ type: "text", text: `Erro ao obter stats: ${err.message}` }], isError: true };
+      return respostaSemBase(err)
+        ?? { content: [{ type: "text", text: `Erro ao obter stats: ${err.message}` }], isError: true };
     }
   }
 );
@@ -942,7 +965,8 @@ server.tool(
         `Chunks ${out.delivered_from}-${out.delivered_to} de ${out.total} (ordem sequencial)\n\n`;
       return { content: [{ type: "text", text: notice + header + out.text }] };
     } catch (err) {
-      return { content: [{ type: "text", text: `Erro no document: ${err.message}` }], isError: true };
+      return respostaSemBase(err)
+        ?? { content: [{ type: "text", text: `Erro no document: ${err.message}` }], isError: true };
     }
   }
 );

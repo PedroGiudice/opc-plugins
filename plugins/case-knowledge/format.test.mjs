@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { truncateContent, previewResult, renderLines, buildCappedPayload, capContextChunks, renderDocumentChunks } from "./format.mjs";
+import { truncateContent, previewResult, renderLines, buildCappedPayload, capContextChunks, renderDocumentChunks, detectaCollectionAusente, renderCaseSemBase } from "./format.mjs";
 
 test("truncateContent: content curto retorna intacto", () => {
   const r = truncateContent("texto curto", 1200);
@@ -302,4 +302,193 @@ test("renderDocumentChunks: from_chunk alem do fim retorna vazio sem lancar", ()
   assert.equal(out.delivered_from, null);
   assert.equal(out.next_from, null);
   assert.equal(out.total, 1);
+});
+
+// === CMR-146: caso sem base embedada (casca) ===
+//
+// Fixtures derivadas do codigo real da API Rust
+// (case-docs `crates/case-ingest/src/bin/api.rs`):
+//
+//  - 404 de collection ausente: `ApiError::NotFound(format!("caso {case_name}
+//    nao encontrado"))` + `#[error("not found: {0}")]` -> body
+//    `{"error":"not found: caso <nome> nao encontrado"}`. Emitido por
+//    search_handler, reconstruir_handler, info_handler e facet_handler.
+//  - 500 de collection ausente: stats/document/contexto NAO passam pelo
+//    `is_collection_not_found`; o erro cru do Qdrant sobe como
+//    `ApiError::Internal` -> 500 com a mensagem do qdrant-client.
+//  - 404 do gate de pertinencia (caso fora do tenant): mensagem BYTE-IDENTICA
+//    a do 404 de collection; so a ROTA distingue (briefing/metadata/memoria
+//    conferem o diretorio em disco, as rotas de collection nao).
+
+test("detectaCollectionAusente: 404 de collection no search e casca", () => {
+  assert.equal(
+    detectaCollectionAusente(
+      404,
+      { error: "not found: caso zz-casca nao encontrado" },
+      "/cases/zz-casca/search"
+    ),
+    true
+  );
+});
+
+test("detectaCollectionAusente: 404 de collection no reconstruir e casca", () => {
+  assert.equal(
+    detectaCollectionAusente(
+      404,
+      { error: "not found: caso zz-casca nao encontrado" },
+      "/cases/zz-casca/reconstruir"
+    ),
+    true
+  );
+});
+
+test("detectaCollectionAusente: 500 do Qdrant \"doesn't exist\" no stats e casca", () => {
+  // Mensagem real do qdrant-client (mesma fixture do teste Rust
+  // `detecta_collection_not_found_do_qdrant`).
+  assert.equal(
+    detectaCollectionAusente(
+      500,
+      { error: "Collection `t1-case-zz-casca` doesn't exist!" },
+      "/cases/zz-casca/stats"
+    ),
+    true
+  );
+});
+
+test("detectaCollectionAusente: 500 status NotFound do Qdrant no contexto e casca", () => {
+  // Fixture do teste Rust `detecta_collection_not_found_variante_not_found`.
+  assert.equal(
+    detectaCollectionAusente(
+      500,
+      { error: 'status: NotFound, message: "Collection not found"' },
+      "/cases/zz-casca/contexto"
+    ),
+    true
+  );
+});
+
+test("detectaCollectionAusente: 500 do Qdrant no document e casca", () => {
+  assert.equal(
+    detectaCollectionAusente(
+      500,
+      { error: "Collection `t1-case-zz-casca` doesn't exist!" },
+      "/cases/zz-casca/document/peticao%20inicial.json"
+    ),
+    true
+  );
+});
+
+test("detectaCollectionAusente: 404 do gate de pertinencia NAO e casca", () => {
+  // Caso fora do tenant / inexistente em disco. Body identico ao 404 de
+  // collection; a rota (metadata, com gate de filesystem) e o unico sinal.
+  assert.equal(
+    detectaCollectionAusente(
+      404,
+      { error: "not found: caso zz-alheio nao encontrado" },
+      "/cases/zz-alheio/metadata"
+    ),
+    false
+  );
+});
+
+test("detectaCollectionAusente: 404 de briefing NAO e casca", () => {
+  assert.equal(
+    detectaCollectionAusente(
+      404,
+      { error: "not found: caso zz-alheio nao encontrado" },
+      "/cases/zz-alheio/briefing"
+    ),
+    false
+  );
+});
+
+test("detectaCollectionAusente: 404 de documento inexistente NAO e casca", () => {
+  // Collection existe, o documento pedido e que nao esta la.
+  assert.equal(
+    detectaCollectionAusente(
+      404,
+      { error: "not found: documento 'inexistente.json' nao encontrado" },
+      "/cases/zz-ingerido/document/inexistente.json"
+    ),
+    false
+  );
+});
+
+test("detectaCollectionAusente: 500 alheio (conexao) NAO e casca", () => {
+  assert.equal(
+    detectaCollectionAusente(500, { error: "connection refused" }, "/cases/zz/stats"),
+    false
+  );
+});
+
+test("detectaCollectionAusente: 500 de index faltando NAO e casca", () => {
+  assert.equal(
+    detectaCollectionAusente(
+      500,
+      { error: 'Index required but not found for "data_juntada" of one of the following types: [datetime]' },
+      "/cases/zz/search"
+    ),
+    false
+  );
+});
+
+test("detectaCollectionAusente: 401 e 403 NAO sao casca", () => {
+  assert.equal(
+    detectaCollectionAusente(401, { error: "unauthorized: bearer ausente" }, "/cases/zz/search"),
+    false
+  );
+  assert.equal(
+    detectaCollectionAusente(403, { error: "forbidden: scope invalido" }, "/cases/zz/search"),
+    false
+  );
+});
+
+test("detectaCollectionAusente: 200 nunca e casca", () => {
+  assert.equal(detectaCollectionAusente(200, { results: [] }, "/cases/zz/search"), false);
+});
+
+test("detectaCollectionAusente: aceita body como string JSON crua", () => {
+  assert.equal(
+    detectaCollectionAusente(
+      404,
+      '{"error":"not found: caso zz-casca nao encontrado"}',
+      "/cases/zz-casca/search"
+    ),
+    true
+  );
+});
+
+test("detectaCollectionAusente: body nao-JSON cai no texto cru", () => {
+  assert.equal(
+    detectaCollectionAusente(500, "Collection `t1-case-zz` doesn't exist!", "/cases/zz/stats"),
+    true
+  );
+  assert.equal(
+    detectaCollectionAusente(502, "<html>bad gateway</html>", "/cases/zz/stats"),
+    false
+  );
+});
+
+test("detectaCollectionAusente: body ausente nunca e casca", () => {
+  assert.equal(detectaCollectionAusente(404, null, "/cases/zz/search"), false);
+  assert.equal(detectaCollectionAusente(404, undefined, "/cases/zz/search"), false);
+});
+
+test("detectaCollectionAusente: rota ausente nunca e casca", () => {
+  assert.equal(
+    detectaCollectionAusente(404, { error: "not found: caso zz nao encontrado" }, undefined),
+    false
+  );
+});
+
+test("renderCaseSemBase: texto honesto com nome do caso, memoria e workdocs", () => {
+  const texto = renderCaseSemBase("zz-casca");
+  assert.ok(texto.includes("zz-casca"), "cita o nome do caso");
+  assert.ok(texto.includes("sem base embedada"));
+  assert.ok(/n(a|ã)o foram extra/i.test(texto), "explica que os autos nao foram extraidos");
+  assert.ok(/mem(o|ó)ria/i.test(texto), "diz que a memoria funciona");
+  assert.ok(/workdocs/i.test(texto), "diz que workdocs funciona");
+  assert.ok(/app/i.test(texto), "aponta o caminho de subir os autos pelo app");
+  // Regra do repo: zero emojis no output.
+  assert.ok(!/\p{Extended_Pictographic}/u.test(texto), "sem emojis");
 });
