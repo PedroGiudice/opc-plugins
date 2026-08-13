@@ -492,3 +492,98 @@ test("renderCaseSemBase: texto honesto com nome do caso, memoria e workdocs", ()
   // Regra do repo: zero emojis no output.
   assert.ok(!/\p{Extended_Pictographic}/u.test(texto), "sem emojis");
 });
+
+// --- I1: o 404 tem de casar o NOME DO CASO, nao qualquer "caso ..." na frase ---
+//
+// O nome do documento e livre e cabe a palavra "caso" dentro dele. Sem ancorar
+// no nome real (que vem do path), um documento inexistente num caso PLENAMENTE
+// INGERIDO seria reportado como "sem base embedada" — mentira sobre autos que
+// existem.
+
+test("detectaCollectionAusente: 'caso' dentro de nome de documento NAO e casca", () => {
+  assert.equal(
+    detectaCollectionAusente(
+      404,
+      { error: "not found: documento 'caso 123 - contrato.pdf' nao encontrado" },
+      "/cases/zz-ok/document/caso%20123%20-%20contrato.pdf"
+    ),
+    false
+  );
+});
+
+test("detectaCollectionAusente: 'do caso N' dentro de nome de documento NAO e casca", () => {
+  assert.equal(
+    detectaCollectionAusente(
+      404,
+      { error: "not found: documento 'Autos do caso 5 fls 1-40.json' nao encontrado" },
+      "/cases/zz-ok/document/Autos%20do%20caso%205%20fls%201-40.json"
+    ),
+    false
+  );
+});
+
+test("detectaCollectionAusente: nome real com hifen e ponto segue sendo casca", () => {
+  assert.equal(
+    detectaCollectionAusente(
+      404,
+      { error: "not found: caso glenmark-r.d-incineracao nao encontrado" },
+      "/cases/glenmark-r.d-incineracao/search"
+    ),
+    true
+  );
+});
+
+test("detectaCollectionAusente: ponto do nome nao vira coringa de regex", () => {
+  assert.equal(
+    detectaCollectionAusente(
+      404,
+      { error: "not found: caso zzXcasca nao encontrado" },
+      "/cases/zz.casca/search"
+    ),
+    false
+  );
+});
+
+test("detectaCollectionAusente: nome do caso divergente do path NAO e casca", () => {
+  assert.equal(
+    detectaCollectionAusente(
+      404,
+      { error: "not found: caso outro-caso nao encontrado" },
+      "/cases/zz-casca/search"
+    ),
+    false
+  );
+});
+
+test("detectaCollectionAusente: sobra de texto depois da mensagem NAO e casca", () => {
+  assert.equal(
+    detectaCollectionAusente(
+      404,
+      { error: "not found: caso zz-casca nao encontrado no documento X" },
+      "/cases/zz-casca/search"
+    ),
+    false
+  );
+});
+
+test("detectaCollectionAusente: nome do caso com espaco (path cru) e casca", () => {
+  assert.equal(
+    detectaCollectionAusente(
+      404,
+      { error: "not found: caso Novartis Anais Prado nao encontrado" },
+      "/cases/Novartis Anais Prado/search"
+    ),
+    true
+  );
+});
+
+test("detectaCollectionAusente: path com % invalido nao lanca", () => {
+  // decodeURIComponent lancaria URIError; o detector cai no nome cru.
+  assert.doesNotThrow(() =>
+    detectaCollectionAusente(
+      404,
+      { error: "not found: caso 100%-casca nao encontrado" },
+      "/cases/100%-casca/search"
+    )
+  );
+});

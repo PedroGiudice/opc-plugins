@@ -497,6 +497,27 @@ function mensagemDeCollectionAusente(msg) {
   );
 }
 
+/** Neutraliza metacaracteres para interpolar texto literal em RegExp. */
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Nome do caso embutido no path da API (`/cases/<nome>/...`), ou `null`.
+ * O nome vai cru no path (o server.mjs interpola `CASE.name` sem encodar),
+ * mas segmentos de path podem chegar percent-encoded; `decodeURIComponent`
+ * lanca em `%` solto, entao o nome cru e o fallback.
+ */
+function casoDoPath(path) {
+  const m = /\/cases\/([^/]+)\//.exec(path);
+  if (!m) return null;
+  try {
+    return decodeURIComponent(m[1]);
+  } catch {
+    return m[1];
+  }
+}
+
 /** Extrai o texto do erro de um body que pode vir como objeto, JSON cru ou texto. */
 function textoDoErro(body) {
   if (body == null) return null;
@@ -537,9 +558,17 @@ export function detectaCollectionAusente(status, body, path) {
   if (!msg) return false;
 
   if (status === 404) {
-    // So "caso X nao encontrado". "documento 'X' nao encontrado" fica de fora:
-    // ali a collection existe e a peca e que nao esta la.
-    return /\bcaso\s+.+\s+nao\s+encontrado/i.test(msg);
+    // Casa a mensagem INTEIRA contra o nome do caso extraido do path. Um
+    // `.+` no lugar do nome atravessaria nome de documento que contenha a
+    // palavra "caso" (ex.: "documento 'caso 123 - contrato.pdf' nao
+    // encontrado") e mentiria "sem base embedada" sobre autos que existem.
+    const caso = casoDoPath(path);
+    if (!caso) return false; // fail-safe: erro cru e melhor que mentira.
+    const esperado = new RegExp(
+      `^not found: caso ${escapeRegex(caso)} nao encontrado$`,
+      "i"
+    );
+    return esperado.test(msg.trim());
   }
   if (status >= 500) return mensagemDeCollectionAusente(msg);
   return false;
