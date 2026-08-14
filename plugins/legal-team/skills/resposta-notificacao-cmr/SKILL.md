@@ -20,7 +20,10 @@ confissao em juizo depois**. A carta de resposta e um documento pre-litigio:
 presuma que ela sera anexada a uma peticao inicial contra a cliente.
 
 **REQUIRED BACKGROUND:** redacao-cmr (nucleo invariante: ordem direta, voz
-ativa, frase-lamina, conectivos da casa). Esta skill so define o que MUDA no
+ativa, frase-lamina, conectivos da casa, orcamento de travessao e
+dois-pontos). Na carta o orcamento e ainda mais apertado que na peca: texto
+curto satura rapido, e a carta e o genero em que o tique de maquina mais
+salta aos olhos do destinatario. Esta skill so define o que MUDA no
 genero. Formatacao final: gerar-peca-cmr, classe `RespostaNotificacaoCMR`
 (Arial 12, 1.15, sem numeracao — NAO usar PecaCMR).
 

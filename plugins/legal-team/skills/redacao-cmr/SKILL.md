@@ -53,7 +53,7 @@ podem ser simples ou complexos; a estrutura acompanha o grau de complexidade.
 ### Periodo e ritmo
 
 - Alternancia deliberada: periodo longo subordinado (com incisos entre
-  travessoes) fechado por **frase-lamina curta** — que e sempre uma CONCLUSAO
+  travessoes, dentro do orcamento abaixo) fechado por **frase-lamina curta** — que e sempre uma CONCLUSAO
   JURIDICA comprimida (regra de direito, subsuncao ou constatacao sobre os
   autos), sustentada pelo que a antecede: "Sem razao, contudo." /
   "A contradicao e manifesta." / "Essa distincao e decisiva."
@@ -77,8 +77,40 @@ podem ser simples ou complexos; a estrutura acompanha o grau de complexidade.
 - Anafora negativa para lacuna probatoria: "Nao juntou [...]. Nao requereu
   [...]. Nao alegou [...]."
 - Dois-pontos como operador de definicao/desfecho e antitese: "E uma obrigacao
-  de meio, nao de resultado: ...".
+  de meio, nao de resultado: ..." (dosagem na subsecao abaixo).
 - Incisos romanos (i), (ii)... para premissas e requisitos.
+
+### Dosagem de travessao e dois-pontos (o tique de maquina)
+
+Os dois dispositivos sao da casa e estao prescritos acima. Nao ha vedacao —
+ha ORCAMENTO. O problema nunca e a ocorrencia isolada: e a frequencia e a
+uniformidade. Texto gerado por modelo se denuncia por repetir o mesmo
+movimento (afirmacao, travessao, glosa da afirmacao) pagina apos pagina e por
+abrir explicacao com dois-pontos em paragrafos consecutivos. O leitor sente o
+padrao antes de saber nomea-lo; o texto perde assinatura humana e, num
+documento que leva a marca do escritorio, isso custa credibilidade.
+
+| Dispositivo | Orcamento | Cabe quando |
+|---|---|---|
+| Travessao parentetico (par) | max. 1 por pagina; nunca em paragrafos seguidos | o inciso tem pontuacao interna propria ou e longo demais para virgula: "Ainda que assim nao fosse — e apenas por dever de argumentacao —, ..." |
+| Travessao de fecho (consequencia normativa) | 1 por capitulo, no arremate que importa | o periodo fecha com a norma violada: "— em desacordo com o art. 489, §1º, IV, do CPC..." |
+| Dois-pontos | max. 1 por paragrafo; nunca em paragrafos seguidos | ANUNCIA o que vem: enumeracao, transcricao, jurisprudencia ("Vejamos:"), definicao ou antitese |
+
+Uso ilegitimo, em qualquer quantidade: dois-pontos que apenas reformula com
+outras palavras o que o periodo ja disse. Isso e glosa — vai em periodo
+proprio ou sai. Travessao que substitui virgula sem ganho de leitura idem.
+
+Substituicao padrao quando o orcamento estourou, nesta ordem: **ponto final**
+(dois periodos curtos), virgula, ponto-e-virgula, parenteses. Cortar o
+dispositivo quase sempre melhora a frase; quase nunca a piora.
+
+Padroes a evitar por saturacao, mesmo dentro do orcamento: a cadeia "X — e nao
+Y" repetida ao longo da peca; o par "nao e A: e B" em serie; travessao duplo e
+dois-pontos no MESMO periodo.
+
+Teste visual antes de entregar: olhe a pagina como bloco, sem ler. Se ha 3 ou
+mais travessoes ou 3 ou mais dois-pontos visiveis de uma vez, corte os que nao
+passam nos criterios da tabela.
 
 ### Ordem direta e voz ativa (anti-juridiques)
 
@@ -232,7 +264,10 @@ Formulas literais completas em `references/formulas-cmr.md`. Mapa:
 8. [ ] Zero doutrina nominal; jurisprudencia integral-ou-numero?
 9. [ ] Revisao ortografica completa (o corpus 2024 tinha typos; o alvo e 2026:
        limpo)?
-10. [ ] Corpo em ordem direta e voz ativa? Nenhuma anastrofe ("Conhecido deve
+10. [ ] Travessao e dois-pontos dentro do orcamento (max. 1 de cada por
+        pagina/paragrafo, nunca em paragrafos seguidos)? Nenhum dois-pontos
+        que so reformula o periodo anterior? Teste visual da pagina feito?
+11. [ ] Corpo em ordem direta e voz ativa? Nenhuma anastrofe ("Conhecido deve
         ser..."), nominalizacao evitavel ou cadeia de -mente? Toda frase passa
         no teste de voz alta? Toda frase curta de fecho carrega conteudo
         juridico (regra/subsuncao/fato) — nenhuma tirada de efeito?
