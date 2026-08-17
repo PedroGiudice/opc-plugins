@@ -645,3 +645,53 @@ test("data juntada vinda do YAML como Date sai em ISO", () => {
   };
   assert.match(renderManifesto(m, {}), /2025-07-03/);
 });
+
+test("copia de outra acao e marcada na linha, em qualquer nivel", () => {
+  const m = {
+    caso: "z", total_documentos: 3,
+    documentos: [
+      {
+        segmento_id: "a#p0009", peca: "contestacao", peso: "ato",
+        titulo: "CONTESTACAO", fls: [9, 10], chunks: 2, chunks_peca: 2,
+        anexos: [
+          { segmento_id: "a#p0011", peca: "inicial", titulo: "PETICAO INICIAL",
+            fls: [11, 12], chunks: 2, chunks_copia: 2 },
+        ],
+      },
+      // Copia sem ato anterior no arquivo: fica no nivel 1, sem pai.
+      { segmento_id: "a#p0020", peca: "sentenca", peso: "ato", fls: [20, 21],
+        chunks: 2, chunks_copia: 2 },
+    ],
+  };
+  const out = renderManifesto(m, {});
+  const linhas = out.split("\n");
+  const anexo = linhas.find((l) => l.includes("a#p0011"));
+  const nivel1 = linhas.find((l) => l.includes("a#p0020"));
+  const propria = linhas.find((l) => l.includes("a#p0009"));
+  assert.match(anexo, /inicial \(copia de outra acao\)/);
+  assert.match(nivel1, /sentenca \(copia de outra acao\)/);
+  assert.doesNotMatch(propria, /copia de outra acao/, "peca propria nao leva marca");
+});
+
+test("segmento com conteudo proprio e copia sinaliza mistura", () => {
+  const m = {
+    caso: "z", total_documentos: 1,
+    documentos: [{ segmento_id: "a#p0001", peca: "inicial", peso: "ato",
+      fls: [1, 9], chunks: 9, chunks_peca: 7, chunks_copia: 2 }],
+  };
+  assert.match(renderManifesto(m, {}), /inicial \(contem copia de outra acao\)/);
+});
+
+test("chunk no singular nao vira plural", () => {
+  const m = {
+    caso: "z", total_documentos: 2,
+    documentos: [
+      { segmento_id: "a#p0053", peca: "certidao", peso: "ato", fls: [53, 53], chunks: 1 },
+      { segmento_id: "a#p0054", peca: "mandado", peso: "ato", fls: [54, 55], chunks: 2 },
+    ],
+  };
+  const out = renderManifesto(m, {});
+  assert.match(out, /\[1 chunk\]/);
+  assert.match(out, /\[2 chunks\]/);
+  assert.doesNotMatch(out, /\[1 chunks\]/);
+});

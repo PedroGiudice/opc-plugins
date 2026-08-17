@@ -605,6 +605,24 @@ function dataISO(v) {
   return String(v).slice(0, 10);
 }
 
+/**
+ * Marca de copia externa: o segmento nao e peca DESTES autos, e reproducao de
+ * outra acao juntada como documento.
+ *
+ * Estruturalmente uma copia dessas aparece igual a uma peca (uma "inicial"
+ * pendurada na contestacao, por exemplo), e quem le rapido pode cita-la como
+ * se fosse dos autos — citar peca de outra acao numa peticao e erro material.
+ * O manifesto ja distingue: `chunks_copia` conta o conteudo marcado como copia
+ * externa; `chunks_peca`, o proprio. A marca sai em qualquer nivel — copia sem
+ * ato anterior no arquivo fica no nivel 1, sem pai.
+ */
+function marcaCopiaExterna(d) {
+  const copia = Number(d.chunks_copia ?? 0);
+  if (!(copia > 0)) return "";
+  const proprio = Number(d.chunks_peca ?? 0);
+  return proprio > 0 ? " (contem copia de outra acao)" : " (copia de outra acao)";
+}
+
 /** Uma linha do manifesto. `indent > 0` marca anexo pendurado no ato acima. */
 function linhaDoc(d, indent) {
   const pad = " ".repeat(indent);
@@ -613,12 +631,15 @@ function linhaDoc(d, indent) {
   const sub = d.subtipo ? `/${d.subtipo}` : "";
   const tit = d.titulo ? `  "${d.titulo}"` : "";
   const data = d.data_juntada ? `  ${dataISO(d.data_juntada)}` : "";
-  const chunks = d.chunks != null ? `  [${d.chunks} chunks]` : "";
+  const chunks = d.chunks != null
+    ? `  [${d.chunks} ${Number(d.chunks) === 1 ? "chunk" : "chunks"}]`
+    : "";
   // O id e o endereco de leitura do segmento (tool document, parametro
   // `segmento`). Sem segmentacao, o endereco continua sendo o arquivo.
   const id = d.segmento_id ? `  <${d.segmento_id}>` : "";
   const nome = d.segmento_id ? `${d.peca ?? "?"}${sub}` : (d.nome ?? "?");
-  return `${pad}${marca}${nome}  ${fls}${data}${tit}${chunks}${id}`.trimEnd();
+  // A marca de copia vem grudada na classe: e a primeira coisa lida na linha.
+  return `${pad}${marca}${nome}${marcaCopiaExterna(d)}  ${fls}${data}${tit}${chunks}${id}`.trimEnd();
 }
 
 /**
