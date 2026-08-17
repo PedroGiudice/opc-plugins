@@ -21,6 +21,7 @@ import {
   capContextChunks,
   renderDocumentChunks,
   renderReconstrucao,
+  renderManifesto,
   detectaCollectionAusente,
   renderCaseSemBase,
 } from "./format.mjs";
@@ -250,7 +251,8 @@ server.tool(
     "posicao_relativa (posicao do chunk dentro do documento, 0.0-1.0), " +
     "tipo_conteudo (peca, copia_externa, documento_pre_processual), " +
     "page_start/page_end (paginas do documento original que o chunk cobre), " +
-    "parent_peca (peca-pai quando o chunk e de um anexo). " +
+    "segmento_id e titulo (identidade do documento logico a que o chunk pertence, " +
+    "quando o caso ja foi segmentado). " +
     "Use agrupar=true para diversidade de documentos nos resultados " +
     "(evita que um documento grande monopolize). " +
     "IMPORTANTE: o campo content de cada resultado e um PREVIEW (default 1200 chars; " +
@@ -271,8 +273,12 @@ server.tool(
         "embargos_declaracao, agravo, apelacao, recurso_ordinario, contrarrazoes, sentenca, acordao, " +
         "decisao_interlocutoria, despacho, ato_ordinatorio, certidao, mandado, ata_audiencia, " +
         "procuracao, guia_custas, contrato, documento_pessoal, comprovante, laudo, outros_anexos"),
-    parent_peca: z.string().optional()
-      .describe("Filtrar por peca-pai (ex: 'p3' para anexos da peca na pagina 3). Formato: pN onde N e o numero da pagina da peca principal."),
+    subtipo: z.string().optional()
+      .describe("Refinamento da classe da peca (ex: 'order_form' dentro de contrato). " +
+        "Use facet('subtipo') para ver os valores existentes no caso."),
+    parte_peticionante: z.enum(["autor", "reu", "terceiro", "mp", "juizo"]).optional()
+      .describe("Quem protocolou o documento logico. Vale para QUALQUER classe — " +
+        "e o caminho para 'tudo que a re protocolou' sem depender do nome da peca."),
     fase: z.string().optional()
       .describe("Filtrar por fase processual: conhecimento, instrucao, recursal, execucao"),
     documento: z.string().optional()
@@ -296,14 +302,14 @@ server.tool(
         "0 = retorna content integral SEM truncar — use com limit baixo (<=3) para nao " +
         "estourar o limite de output. Para leitura pontual na integra prefira a tool contexto."),
   },
-  async ({ query, limit, peca, parent_peca, fase, documento, numero_processo, categoria, agrupar, casos, content_chars }) => {
+  async ({ query, limit, peca, subtipo, parte_peticionante, fase, documento, numero_processo, categoria, agrupar, casos, content_chars }) => {
     try {
       if (!CASE) {
         throw new Error("Sessao nao esta dentro de um caso. Navegue para cases/<nome> antes.");
       }
 
       const isBatch = Array.isArray(query);
-      const body = { query, limit, peca, parent_peca, fase, documento, numero_processo, categoria, agrupar };
+      const body = { query, limit, peca, subtipo, parte_peticionante, fase, documento, numero_processo, categoria, agrupar };
 
       // Batch mode: 1 chamada na API com array de queries (Qdrant search_batch nativo).
       // Cross-reference em batch nao e suportado.
@@ -486,8 +492,10 @@ server.tool(
       .describe("passagens: faixas ao redor dos matches. documento: top-N documentos inteiros."),
     janela: z.number().int().min(0).max(6).default(2)
       .describe("Chunks de contexto antes/depois de cada match (modo passagens)."),
-    max_documentos: z.number().int().min(1).max(6).default(3)
-      .describe("Documentos distintos reconstruidos (top por relevancia)."),
+    max_documentos: z.number().int().min(1).max(20).optional()
+      .describe("Unidades distintas reconstruidas (top por relevancia). A unidade e o " +
+        "SEGMENTO (documento logico) quando o caso esta segmentado, entao um arquivo " +
+        "monolitico conta varias: default 3, ou 12 quando `documento` e informado."),
     peca: z.string().optional().describe("Filtrar recall por peca."),
     fase: z.string().optional().describe("Filtrar por fase."),
     documento: z.string().optional().describe("Restringir a um documento (nome exato)."),
@@ -496,8 +504,11 @@ server.tool(
   async ({ query, modo, janela, max_documentos, peca, fase, documento, numero_processo }) => {
     try {
       if (!CASE) throw new Error("Sessao nao esta dentro de um caso. Navegue para cases/<nome>.");
+      // Com `documento` explicito o pedido e "este arquivo", e num monolitico
+      // cada peca dentro dele consome uma unidade do cap.
+      const maxDocs = max_documentos ?? (documento ? 12 : 3);
       const data = await apiPost(`/cases/${CASE.name}/reconstruir`, {
-        query, modo, janela, max_documentos,
+        query, modo, janela, max_documentos: maxDocs,
         recall_limit: 80, max_chunks_por_doc: 24, max_chunks_global: 48,
         peca, fase, documento, numero_processo,
       });
@@ -602,12 +613,20 @@ server.tool(
 // Tool: manifesto (local — reads YAML file)
 server.tool(
   "manifesto",
-  "Retorna o indice cronologico do caso atual. " +
-    "Lista documentos em ordem processual com tipo, data de juntada e numero de chunks. " +
-    "Usar no inicio da sessao para entender a estrutura e cronologia do caso. " +
+  "Retorna o indice do caso atual em ARVORE: cada ato processual em ordem, " +
+    "com os documentos que o acompanham aninhados sob ele, mais fls., titulo " +
+    "literal, data de juntada e numero de chunks. Num arquivo monolitico (um " +
+    "PDF com os autos inteiros) cada peca aparece como uma linha propria, com " +
+    "o id do segmento entre <> — endereco de leitura da tool document. " +
+    "Expediente de serventia (certidao, mandado, ato ordinatorio) vem colapsado " +
+    "numa linha agregada; use expandir_expediente=true para ver item a item. " +
+    "Usar no inicio da sessao para entender a estrutura e a cronologia do caso. " +
     "Requer que 'case-ingest enrich' e 'case-ingest manifesto' tenham sido executados.",
-  {},
-  async () => {
+  {
+    expandir_expediente: z.boolean().default(false)
+      .describe("Lista o expediente de serventia item a item em vez da linha agregada."),
+  },
+  async ({ expandir_expediente }) => {
     try {
       if (!CASE) {
         return {
@@ -622,8 +641,13 @@ server.tool(
           isError: true,
         };
       }
-      const content = readFileSync(yamlPath, "utf-8");
-      return { content: [{ type: "text", text: content }] };
+      const bruto = readFileSync(yamlPath, "utf-8");
+      // Manifesto legado (lista plana de arquivos) degrada para lista simples
+      // dentro do proprio render — caso ja ingerido nunca perde o manifesto.
+      const texto = renderManifesto(yaml.load(bruto), {
+        expandirExpediente: expandir_expediente,
+      });
+      return { content: [{ type: "text", text: texto }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Erro ao ler manifesto: ${err.message}` }], isError: true };
     }
@@ -734,9 +758,11 @@ server.tool(
   "facet",
   "Conta valores distintos em um campo do payload (Qdrant facet API). " +
     "Util para perguntas tipo 'quantos chunks de cada peca', 'quais documentos existem', " +
-    "'distribuicao de fases processuais'. Suporta filtro por peca para escopear.",
+    "'distribuicao de fases processuais'. Suporta filtro por peca para escopear. " +
+    "Chaves de segmento (documento logico): subtipo, segmento_id, parte_peticionante.",
   {
-    key: z.string().describe("Campo do payload (peca, fase, documento, sistema_assinatura, etc.)"),
+    key: z.string().describe("Campo do payload: peca, fase, documento, categoria, " +
+      "sistema_assinatura, subtipo, segmento_id, parte_peticionante, etc."),
     limit: z.number().int().min(1).max(200).default(50)
       .describe("Numero maximo de valores distintos retornados"),
     peca: z.string().optional().describe("Filtrar por peca antes de contar"),
@@ -923,36 +949,52 @@ server.tool(
 // Tool: document — peca inteira em ordem sequencial (Qdrant scroll)
 server.tool(
   "document",
-  "Retorna um documento/peca INTEIRO do caso, chunks completos em ordem sequencial " +
+  "Retorna um documento INTEIRO do caso, chunks completos em ordem sequencial " +
     "(Qdrant scroll, sem query vetorial). Caminho canonico para ler uma peca do inicio " +
     "ao fim — complementa contexto, que abre janela ao redor de UM chunk achado no search. " +
-    "Use o nome EXATO do campo 'documento' (resultados de search, manifesto ou facet). " +
-    "Se o documento nao couber no limite de output, entrega o prefixo que coube e indica " +
+    "Duas unidades, exatamente uma por chamada: `documento` le o ARQUIVO inteiro (nome " +
+    "exato do campo 'documento'); `segmento` le UM documento logico dentro de um arquivo " +
+    "monolitico (id no formato <arquivo>#pNNNN, vindo do manifesto ou do campo segmento_id " +
+    "dos resultados de search) — num PDF com os autos inteiros e o unico jeito de ler so a " +
+    "contestacao, so o laudo. " +
+    "Se o conteudo nao couber no limite de output, entrega o prefixo que coube e indica " +
     "from_chunk para continuar na proxima chamada (fatiamento sequencial). " +
     "Conteudo INTEGRAL, nunca preview — apto para transcricao e citacao.",
   {
-    documento: z.string()
-      .describe("Nome exato do documento (campo 'documento' de search/manifesto/facet)"),
+    documento: z.string().optional()
+      .describe("Nome exato do arquivo (campo 'documento' de search/manifesto/facet)"),
+    segmento: z.string().optional()
+      .describe("Id do documento logico (campo 'segmento_id' de search, ou o <id> do manifesto). " +
+        "Formato <arquivo>#pNNNN. Use no lugar de 'documento', nunca junto."),
     from_chunk: z.number().int().min(0).default(0)
       .describe("chunk_index inicial (default 0). Use o next_from do aviso de truncamento para continuar a leitura."),
   },
-  async ({ documento, from_chunk }) => {
+  async ({ documento, segmento, from_chunk }) => {
     try {
       if (!CASE) {
         throw new Error("Sessao nao esta dentro de um caso.");
       }
-      const data = await apiGet(
-        `/cases/${CASE.name}/document/${encodeURIComponent(documento)}`
-      );
+      if (documento && segmento) {
+        throw new Error("Informe 'documento' OU 'segmento', nunca os dois.");
+      }
+      if (!documento && !segmento) {
+        throw new Error("Informe 'documento' (arquivo inteiro) ou 'segmento' (documento logico).");
+      }
+      // O segmento_id carrega '#' e espacos: sem encode o '#' viraria
+      // fragmento de URL e nunca chegaria ao servidor.
+      const data = segmento
+        ? await apiGet(`/cases/${CASE.name}/segmento/${encodeURIComponent(segmento)}`)
+        : await apiGet(`/cases/${CASE.name}/document/${encodeURIComponent(documento)}`);
       const out = renderDocumentChunks(data.chunks || [], {
         fromChunk: from_chunk,
         globalCap: OUTPUT_CAP_CHARS,
       });
+      const rotulo = segmento ?? documento;
       if (out.delivered === 0) {
         return {
           content: [{
             type: "text",
-            text: `Nenhum chunk com chunk_index >= ${from_chunk} em '${documento}' (total: ${out.total} chunks).`,
+            text: `Nenhum chunk com chunk_index >= ${from_chunk} em '${rotulo}' (total: ${out.total} chunks).`,
           }],
         };
       }
@@ -960,8 +1002,16 @@ server.tool(
         ? `[aviso: documento maior que o limite de output — entregue ate o chunk ${out.delivered_to} ` +
           `de ${out.total}. Continue com from_chunk=${out.next_from}.]\n`
         : "";
+      // No segmento o cabecalho carrega a identidade do documento logico
+      // (titulo literal e classe), nao so o nome do arquivo que o contem.
+      const ident = segmento
+        ? `Segmento: ${segmento}\n` +
+          `Arquivo: ${data.documento ?? "?"}\n` +
+          (data.peca ? `Peca: ${data.peca}${data.subtipo ? `/${data.subtipo}` : ""}\n` : "") +
+          (data.titulo ? `Titulo: ${data.titulo}\n` : "")
+        : `Documento: ${documento}\n`;
       const header =
-        `Documento: ${documento}\n` +
+        ident +
         `Chunks ${out.delivered_from}-${out.delivered_to} de ${out.total} (ordem sequencial)\n\n`;
       return { content: [{ type: "text", text: notice + header + out.text }] };
     } catch (err) {

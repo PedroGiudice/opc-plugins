@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { truncateContent, previewResult, renderLines, buildCappedPayload, capContextChunks, renderDocumentChunks, detectaCollectionAusente, renderCaseSemBase } from "./format.mjs";
+import { truncateContent, previewResult, renderLines, buildCappedPayload, capContextChunks, renderDocumentChunks, detectaCollectionAusente, renderCaseSemBase, renderManifesto } from "./format.mjs";
 
 test("truncateContent: content curto retorna intacto", () => {
   const r = truncateContent("texto curto", 1200);
@@ -586,4 +586,62 @@ test("detectaCollectionAusente: path com % invalido nao lanca", () => {
       "/cases/100%-casca/search"
     )
   );
+});
+
+// === renderManifesto: manifesto em arvore (spec 2026-08-17) ===
+
+const arvore = {
+  caso: "x",
+  total_documentos: 5,
+  documentos: [
+    {
+      segmento_id: "a.json#p0001", peca: "inicial", peso: "ato",
+      titulo: "PETICAO INICIAL", fls: [1, 11], chunks: 11,
+      anexos: [
+        { segmento_id: "a.json#p0012", peca: "procuracao", fls: [12, 13], chunks: 2 },
+        { segmento_id: "a.json#p0041", peca: "contrato", subtipo: "order_form",
+          titulo: "Order Form SFDC-00123456", fls: [41, 52], chunks: 12 },
+      ],
+    },
+    { segmento_id: "a.json#p0053", peca: "certidao", peso: "expediente", fls: [53, 53], chunks: 1 },
+    { segmento_id: "a.json#p0054", peca: "mandado", peso: "expediente", fls: [54, 55], chunks: 2 },
+  ],
+};
+
+test("renderiza ato com anexos aninhados", () => {
+  const out = renderManifesto(arvore, {});
+  assert.match(out, /inicial/);
+  assert.match(out, /fls\. 1-11/);
+  assert.match(out, /Order Form SFDC-00123456/);
+  assert.match(out, /order_form/);
+});
+
+test("colapsa expediente por padrao", () => {
+  const out = renderManifesto(arvore, {});
+  assert.match(out, /expediente: 1 certidao, 1 mandado/);
+  assert.doesNotMatch(out, /fls\. 54-55/, "item colapsado nao aparece em linha propria");
+});
+
+test("expande expediente sob demanda", () => {
+  const out = renderManifesto(arvore, { expandirExpediente: true });
+  assert.match(out, /fls\. 54-55/);
+});
+
+test("manifesto legado sem segmento renderiza lista simples", () => {
+  const legado = {
+    caso: "y", total_documentos: 1,
+    documentos: [{ nome: "autos.json", peca: "integra_autos", chunks: 984 }],
+  };
+  const out = renderManifesto(legado, {});
+  assert.match(out, /autos\.json/);
+  assert.match(out, /984/);
+});
+
+test("data juntada vinda do YAML como Date sai em ISO", () => {
+  // js-yaml materializa timestamp como Date; String(date) daria "Thu Jul 03".
+  const m = {
+    caso: "z", total_documentos: 1,
+    documentos: [{ nome: "a.json", chunks: 3, data_juntada: new Date("2025-07-03T00:00:00Z") }],
+  };
+  assert.match(renderManifesto(m, {}), /2025-07-03/);
 });

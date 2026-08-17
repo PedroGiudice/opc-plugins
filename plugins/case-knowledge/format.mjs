@@ -586,3 +586,97 @@ export function renderCaseSemBase(caseName) {
     `A busca fica disponível se os autos subirem pelo app (mesmo caso).`
   );
 }
+
+// === Manifesto em arvore (spec 2026-08-17: segmento como unidade de acesso) ===
+
+const PESO_EXPEDIENTE = "expediente";
+
+/**
+ * Data do manifesto como "YYYY-MM-DD".
+ *
+ * O YAML traz a data como timestamp, e o js-yaml a materializa como `Date`:
+ * `String(date).slice(0,10)` daria "Thu Jul 03". Por isso o caso `Date` e
+ * tratado a parte.
+ */
+function dataISO(v) {
+  if (v instanceof Date && !Number.isNaN(v.getTime())) {
+    return v.toISOString().slice(0, 10);
+  }
+  return String(v).slice(0, 10);
+}
+
+/** Uma linha do manifesto. `indent > 0` marca anexo pendurado no ato acima. */
+function linhaDoc(d, indent) {
+  const pad = " ".repeat(indent);
+  const marca = indent > 0 ? "└ " : "";
+  const fls = Array.isArray(d.fls) ? `fls. ${d.fls[0]}-${d.fls[1]}` : "";
+  const sub = d.subtipo ? `/${d.subtipo}` : "";
+  const tit = d.titulo ? `  "${d.titulo}"` : "";
+  const data = d.data_juntada ? `  ${dataISO(d.data_juntada)}` : "";
+  const chunks = d.chunks != null ? `  [${d.chunks} chunks]` : "";
+  // O id e o endereco de leitura do segmento (tool document, parametro
+  // `segmento`). Sem segmentacao, o endereco continua sendo o arquivo.
+  const id = d.segmento_id ? `  <${d.segmento_id}>` : "";
+  const nome = d.segmento_id ? `${d.peca ?? "?"}${sub}` : (d.nome ?? "?");
+  return `${pad}${marca}${nome}  ${fls}${data}${tit}${chunks}${id}`.trimEnd();
+}
+
+/**
+ * Renderiza o manifesto hierarquico do caso.
+ *
+ * Expediente de serventia (certidao, mandado, ato ordinatorio) e colapsado
+ * numa linha agregada por padrao: em autos reais ele e ~40% dos segmentos e
+ * enterra o esqueleto do processo. `expandirExpediente` desfaz o colapso.
+ *
+ * Manifesto legado (sem `segmento_id`/`peso`) degrada para a lista simples
+ * de arquivos — nenhum caso ja ingerido perde o manifesto.
+ */
+export function renderManifesto(manifesto, { expandirExpediente = false } = {}) {
+  const docs = manifesto?.documentos ?? [];
+  const linhas = [
+    `Caso: ${manifesto?.caso ?? "?"}`,
+    `Documentos: ${manifesto?.total_documentos ?? docs.length}`,
+    "",
+  ];
+
+  let pendente = [];
+  const drenar = () => {
+    if (!pendente.length) return;
+    const cont = {};
+    for (const e of pendente) {
+      const k = e.peca ?? "?";
+      cont[k] = (cont[k] ?? 0) + 1;
+    }
+    const resumo = Object.entries(cont).map(([p, n]) => `${n} ${p}`).join(", ");
+    linhas.push(`[+ expediente: ${resumo}]`);
+    pendente = [];
+  };
+
+  let temSegmento = false;
+  for (const d of docs) {
+    if (d.segmento_id) temSegmento = true;
+    if (d.peso === PESO_EXPEDIENTE && !expandirExpediente) {
+      pendente.push(d);
+      continue;
+    }
+    drenar();
+    linhas.push(linhaDoc(d, 0));
+    for (const a of d.anexos ?? []) {
+      if (a.segmento_id) temSegmento = true;
+      linhas.push(linhaDoc(a, 2));
+    }
+  }
+  drenar();
+
+  if (temSegmento) {
+    linhas.push("");
+    linhas.push(
+      "Leitura de um documento logico: document(segmento: \"<id entre colchetes angulares>\")."
+    );
+    if (!expandirExpediente) {
+      linhas.push("Expediente colapsado: chame manifesto(expandir_expediente: true) para ver linha a linha.");
+    }
+  }
+
+  return linhas.join("\n");
+}
