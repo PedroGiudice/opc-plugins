@@ -166,9 +166,10 @@ Os angulos devem explorar facetas DO TEMA, nao temas adjacentes ou opostos.
 
 ### 5. Executar buscas
 
-**REGRA CRITICA DE PARALELISMO: UMA busca por turn. NUNCA mais de uma.**
-O backend de embeddings e single-threaded. Requests paralelas causam timeout.
-Faca UMA busca, espere o resultado, depois faca a proxima. Sem excecao.
+**PARALELISMO: dispare as buscas em lotes de ate 4 tool calls paralelas.**
+O embedding no servidor e serializado mas rapido (~50ms por query); as buscas
+Qdrant rodam em paralelo. Lotes moderados sao seguros e muito mais rapidos
+que uma busca por turn. Avalie os resultados de cada lote antes do proximo.
 
 Para cada sub-query, use a ferramenta **search** com os parametros adequados.
 
