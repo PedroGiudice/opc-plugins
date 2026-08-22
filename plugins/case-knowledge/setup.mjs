@@ -21,6 +21,16 @@
  * Uso documentado (funciona sem deps instaladas):
  *   node "$HOME\.claude\plugins\marketplaces\opc-plugins\plugins\case-knowledge\setup.mjs"
  *
+ * Flags (usadas pelo app AiDV, que orquestra o mesmo trilho numa UI):
+ *   --skip-login     nao abre navegador; exige credencial ja gravada (o app
+ *                    faz o login PKCE antes e grava no MESMO keychain).
+ *   --print-plugins  imprime a lista canonica de plugins (um por linha,
+ *                    `<plugin>@opc-plugins`) e sai. Sem efeito colateral.
+ *
+ * Alem da saida humana, cada etapa principal emite uma linha de protocolo
+ * `[setup] <etapa> ok|fail <causa>` no stdout — e o que o app AiDV parseia
+ * para mostrar progresso passo a passo.
+ *
  * Saida ASCII de proposito (sem acentos): consoles Windows com codepage OEM
  * exibem mojibake em UTF-8 acentuado — mesma convencao do auth.mjs.
  */
@@ -45,6 +55,49 @@ export function defaultApiBase() {
 export function defaultCasesBase() {
   if (IS_WIN) return join(process.env.USERPROFILE || os.homedir(), "cases");
   return join(os.homedir(), "cases");
+}
+
+/** Marketplace de onde os plugins jurídicos vem. */
+export const MARKETPLACE_NAME = "opc-plugins";
+
+/**
+ * Lista CANONICA dos plugins do pacote juridico, na ordem em que o onboarding
+ * os instala. FONTE UNICA: o app AiDV nao hardcoda a lista — le daqui por
+ * `node setup.mjs --print-plugins`. Quem instala e o `claude plugin install`
+ * (o wizard, ou o usuario pelo guia); este arquivo e a lista de verdade.
+ */
+export const SETUP_PLUGINS = [
+  "case-knowledge",
+  "stj-vec-tools",
+  "legal-vec-tools",
+  "legal-team",
+];
+
+/** `<plugin>@<marketplace>` de cada plugin canonico — argumento do `claude plugin install`. */
+export function pluginRefs() {
+  return SETUP_PLUGINS.map((p) => `${p}@${MARKETPLACE_NAME}`);
+}
+
+/** Flags reconhecidas. Argumento desconhecido e ignorado (nao liga nada). */
+export function parseFlags(argv) {
+  const args = argv || [];
+  return {
+    skipLogin: args.includes("--skip-login"),
+    printPlugins: args.includes("--print-plugins"),
+  };
+}
+
+/**
+ * Linha do protocolo de progresso lido pelo app AiDV
+ * (`runner::parse_linha_setup`): `[setup] <etapa> ok` ou
+ * `[setup] <etapa> fail <causa>`, com o prefixo ABRINDO a linha.
+ * A causa e colapsada em UMA linha — causa multi-linha viraria varias linhas
+ * e o parser leria lixo como etapa nova.
+ */
+export function progressLine(etapa, ok, causa) {
+  if (ok) return `[setup] ${etapa} ok`;
+  const texto = String(causa ?? "").replace(/\s+/g, " ").trim();
+  return `[setup] ${etapa} fail${texto ? ` ${texto}` : ""}`;
 }
 
 /** As 3 env vars persistidas no passo 5 (APIs publicas com Bearer). */
@@ -186,6 +239,21 @@ function log(msg) {
   process.stdout.write(`${msg}\n`);
 }
 
+/** Emite a linha de protocolo da etapa (alem do output humano). */
+function progress(etapa, ok, causa) {
+  log(progressLine(etapa, ok, causa));
+}
+
+/**
+ * Emite `ok` se a etapa nao acrescentou pendencia em `failures`, `fail` com as
+ * pendencias novas em caso contrario. `antes` e o tamanho de `failures` antes
+ * da etapa rodar.
+ */
+function progressDeFailures(etapa, failures, antes) {
+  const novas = failures.slice(antes);
+  progress(etapa, novas.length === 0, novas.join(" | "));
+}
+
 function fail(msg) {
   process.stderr.write(`\n[FALHA] ${msg}\n`);
   process.exit(1);
@@ -196,6 +264,7 @@ function ensureDeps(pluginDir) {
   log(`[1/6] Dependencias do plugin (${pluginDir})`);
   if (existsSync(join(pluginDir, "node_modules"))) {
     log("      node_modules presente — pulando npm install.");
+    progress("npm-install", true);
     return;
   }
   log("      Rodando npm install (primeira vez pode demorar um pouco)...");
@@ -207,25 +276,43 @@ function ensureDeps(pluginDir) {
     shell: IS_WIN,
   });
   if (r.error || r.status !== 0) {
-    fail(
+    const causa =
       `npm install falhou em ${pluginDir}` +
-        (r.error ? ` (${r.error.message})` : ` (exit ${r.status})`) +
-        ". Verifique se o Node.js LTS esta instalado e rode o setup de novo.",
-    );
+      (r.error ? ` (${r.error.message})` : ` (exit ${r.status})`);
+    progress("npm-install", false, causa);
+    fail(`${causa}. Verifique se o Node.js LTS esta instalado e rode o setup de novo.`);
   }
   log("      npm install concluido.");
+  progress("npm-install", true);
 }
 
-/** Passo 2: credencial do keychain aidvlabs-mcp; login se ausente. */
-async function ensureCredential(auth) {
+/**
+ * Passo 2: credencial do keychain aidvlabs-mcp; login se ausente.
+ *
+ * Com `skipLogin`, NUNCA abre navegador: a credencial tem de ja existir (e o
+ * caso do app AiDV, que faz o login PKCE antes e grava no mesmo keychain). A
+ * leitura e a MESMA do runtime (`auth.readCredential`: keychain do SO com
+ * fallback para arquivo), entao "existe para o setup" == "existe para as tools".
+ */
+async function ensureCredential(auth, skipLogin = false) {
   log("[2/6] Credencial (login unico das 3 bases)");
   const cred = auth.readCredential();
   if (cred && cred.access_jwt && cred.refresh) {
     log("      Credencial existente encontrada — pulando login.");
+    progress("credencial", true);
     return;
+  }
+  if (skipLogin) {
+    const causa = `sem credencial em ${auth.KEYCHAIN_SERVICE} (--skip-login nao faz login)`;
+    progress("credencial", false, causa);
+    fail(
+      `${causa}. Faca o login primeiro e rode de novo:\n` +
+        `  node "${join(resolvePluginDir(), "server.mjs")}" login`,
+    );
   }
   log("      Sem credencial. Abrindo o navegador para login...");
   await auth.loginFlow();
+  progress("credencial", true);
 }
 
 /** Passo 4: baixa o scaffolding e escreve so o que nao existe localmente. */
@@ -598,6 +685,15 @@ function checkPecaGenerators(failures) {
 }
 
 async function main() {
+  const flags = parseFlags(process.argv.slice(2));
+
+  // --print-plugins: so imprime a lista canonica e sai. Antes de qualquer
+  // resolucao de diretorio ou I/O — este modo nao pode ter efeito colateral.
+  if (flags.printPlugins) {
+    for (const ref of pluginRefs()) log(ref);
+    return;
+  }
+
   log("=== Setup do Claude Code juridico (aidvlabs) ===");
   const pluginDir = resolvePluginDir();
   const apiBase = process.env.CASE_KNOWLEDGE_API_BASE || defaultApiBase();
@@ -611,43 +707,71 @@ async function main() {
   //    do proprio auth.mjs, entao importamos o do pluginDir.
   const auth = await import(pathToFileURL(join(pluginDir, "auth.mjs")).href);
   try {
-    await ensureCredential(auth);
+    await ensureCredential(auth, flags.skipLogin);
   } catch (err) {
-    fail(`login falhou: ${err && err.message ? err.message : String(err)}`);
+    const causa = err && err.message ? err.message : String(err);
+    progress("credencial", false, causa);
+    fail(`login falhou: ${causa}`);
   }
 
   // 3. Pasta de casos.
   log(`[3/6] Pasta de casos (${casesBase})`);
-  if (existsSync(casesBase)) {
-    log("      Ja existe — mantida.");
-  } else {
-    mkdirSync(casesBase, { recursive: true });
-    log("      Criada.");
+  try {
+    if (existsSync(casesBase)) {
+      log("      Ja existe — mantida.");
+    } else {
+      mkdirSync(casesBase, { recursive: true });
+      log("      Criada.");
+    }
+    progress("pasta-casos", true);
+  } catch (err) {
+    const causa = err && err.message ? err.message : String(err);
+    progress("pasta-casos", false, causa);
+    fail(`nao consegui criar a pasta de casos ${casesBase}: ${causa}`);
   }
 
   // 4. Scaffolding (nunca sobrescreve arquivo local).
   try {
     await applyScaffolding(auth, apiBase, casesBase);
+    progress("scaffolding", true);
   } catch (err) {
-    fail(`scaffolding falhou: ${err && err.message ? err.message : String(err)}`);
+    const causa = err && err.message ? err.message : String(err);
+    progress("scaffolding", false, causa);
+    fail(`scaffolding falhou: ${causa}`);
   }
 
-  // 5, 6 e extra sao best-effort: falha vira pendencia listada no resumo.
+  // 5, 6 e extra sao best-effort: falha vira pendencia listada no resumo (e
+  // linha `[setup] <etapa> fail` para quem acompanha o progresso).
   const failures = [];
+  let antes = failures.length;
   applyEnvVars(failures);
+  progressDeFailures("env-vars", failures, antes);
+
+  antes = failures.length;
   installSyncTask(pluginDir, failures);
+  progressDeFailures("sync-task", failures, antes);
+
+  antes = failures.length;
   applyGlobalOutputStyle(failures);
+  progressDeFailures("output-style", failures, antes);
+
+  antes = failures.length;
   applyMarketplaceAutoUpdate(failures);
+  progressDeFailures("marketplace-auto-update", failures, antes);
 
   log("[extra] Feedback do escritorio (@import no CLAUDE.md global)");
   const fb = ensureFeedbackImport();
   if (fb.error) {
     failures.push(`${fb.error} — adicione a linha "${FEEDBACK_IMPORT_LINE}" ao seu ~/.claude/CLAUDE.md.`);
+    progress("feedback-import", false, fb.error);
   } else {
     log(fb.changed ? "      Linha de @import garantida." : "      Ja presente — sem alteracao.");
+    progress("feedback-import", true);
   }
 
+  antes = failures.length;
   checkPecaGenerators(failures);
+  progressDeFailures("geradores-peca", failures, antes);
 
   log("");
   log("=== Resumo ===");

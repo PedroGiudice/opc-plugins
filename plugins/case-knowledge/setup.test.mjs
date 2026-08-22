@@ -5,6 +5,11 @@ import {
   defaultApiBase,
   defaultCasesBase,
   SETUP_ENV_VARS,
+  MARKETPLACE_NAME,
+  SETUP_PLUGINS,
+  pluginRefs,
+  parseFlags,
+  progressLine,
   resolvePluginDir,
   isSafeScaffoldingPath,
   planScaffoldingWrites,
@@ -61,6 +66,83 @@ test("SETUP_ENV_VARS: as 3 APIs publicas com Bearer", () => {
     ["STJ_VEC_API_BASE", "https://stj.aidvlabs.com/api"],
     ["LEGAL_VEC_API_BASE", "https://legalvec.aidvlabs.com/api"],
   ]);
+});
+
+// --- lista canonica de plugins (fonte unica; o wizard AiDV le via --print-plugins) ---
+
+test("SETUP_PLUGINS: os 4 plugins do pacote juridico, na ordem do onboarding", () => {
+  assert.deepEqual(SETUP_PLUGINS, [
+    "case-knowledge",
+    "stj-vec-tools",
+    "legal-vec-tools",
+    "legal-team",
+  ]);
+  assert.equal(MARKETPLACE_NAME, "opc-plugins");
+});
+
+test("pluginRefs: uma referencia <plugin>@<marketplace> por plugin", () => {
+  assert.deepEqual(pluginRefs(), [
+    "case-knowledge@opc-plugins",
+    "stj-vec-tools@opc-plugins",
+    "legal-vec-tools@opc-plugins",
+    "legal-team@opc-plugins",
+  ]);
+});
+
+// --- flags de linha de comando ---
+
+test("parseFlags: sem flags -> comportamento atual (login interativo, setup completo)", () => {
+  assert.deepEqual(parseFlags([]), { skipLogin: false, printPlugins: false });
+});
+
+test("parseFlags: reconhece --skip-login e --print-plugins, em qualquer ordem", () => {
+  assert.deepEqual(parseFlags(["--skip-login"]), { skipLogin: true, printPlugins: false });
+  assert.deepEqual(parseFlags(["--print-plugins"]), { skipLogin: false, printPlugins: true });
+  assert.deepEqual(parseFlags(["--print-plugins", "--skip-login"]), {
+    skipLogin: true,
+    printPlugins: true,
+  });
+});
+
+test("parseFlags: argumento desconhecido nao liga flag alguma", () => {
+  assert.deepEqual(parseFlags(["--outro", "-x"]), { skipLogin: false, printPlugins: false });
+});
+
+// --- protocolo de progresso [setup] (parseado pelo runner do app AiDV) ---
+
+test("progressLine: forma exata `[setup] <etapa> ok`", () => {
+  assert.equal(progressLine("npm-install", true), "[setup] npm-install ok");
+});
+
+test("progressLine: falha carrega a causa em UMA linha", () => {
+  assert.equal(
+    progressLine("sync-task", false, "permissao negada"),
+    "[setup] sync-task fail permissao negada",
+  );
+  // causa multi-linha viraria varias linhas e quebraria o parser: colapsa.
+  assert.equal(
+    progressLine("scaffolding", false, "HTTP 500\n  corpo do erro\n"),
+    "[setup] scaffolding fail HTTP 500 corpo do erro",
+  );
+  // sem causa: linha ainda valida (o parser aceita causa vazia)
+  assert.equal(progressLine("env-vars", false), "[setup] env-vars fail");
+});
+
+test("progressLine: nomes de etapa sao kebab-case estaveis (sem espaco)", () => {
+  for (const etapa of [
+    "npm-install",
+    "credencial",
+    "pasta-casos",
+    "scaffolding",
+    "env-vars",
+    "sync-task",
+    "output-style",
+    "marketplace-auto-update",
+    "feedback-import",
+    "geradores-peca",
+  ]) {
+    assert.match(progressLine(etapa, true), /^\[setup\] [a-z0-9-]+ ok$/);
+  }
 });
 
 test("resolvePluginDir: sem marketplace clone cai no diretorio do proprio arquivo", () => {
