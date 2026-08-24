@@ -406,6 +406,10 @@ server.tool(
       .describe("Janela temporal em dias (default 30)"),
     threshold: z.number().min(0).max(1).optional()
       .describe("Score minimo (default do daemon)"),
+    role: z.enum(["user", "assistant"]).optional()
+      .describe("Filtra por quem falou: 'user' = pedidos, decisoes e correcoes do " +
+        "advogado (ex.: 'o que o cliente prefere', 'que estrategia foi ditada'); " +
+        "'assistant' = so respostas do Claude. Sem filtro, os dois lados."),
   },
   async (params) => {
     try {

@@ -69,6 +69,22 @@ test("memoriaSearch monta o request e formata resultados", async (t) => {
   assert.ok(out.includes("0.80"));
 });
 
+test("memoriaSearch: role vira filters.role no corpo (CMR-155)", async (t) => {
+  credFixture(t);
+  let captured;
+  const fakeFetch = async (url, opts) => {
+    captured = { url, body: JSON.parse(opts.body) };
+    return { ok: true, json: async () => ({ status: "ok", chunks: [] }) };
+  };
+  const caso = { dir: "C:\\Users\\pedro\\cases\\caso-x", name: "caso-x" };
+  await memoriaSearch({ query: "o que eu pedi", role: "user" }, caso, fakeFetch);
+  assert.deepEqual(captured.body.filters, { role: "user" });
+
+  // Sem role: nenhum filtro no corpo (contrato anterior preservado).
+  await memoriaSearch({ query: "o que decidimos" }, caso, fakeFetch);
+  assert.equal(captured.body.filters, undefined);
+});
+
 test("memoriaSearch: sem resultados -> mensagem amigavel", async (t) => {
   credFixture(t);
   const fakeFetch = async () => ({ ok: true, json: async () => ({ status: "ok", chunks: [] }) });

@@ -65,6 +65,9 @@ export async function memoriaSearch(params, caseInfo, fetchImpl = fetch) {
     days: params.days ?? 30,
   };
   if (params.threshold !== undefined) body.threshold = params.threshold;
+  // `role` (CMR-155): "user" = so o que o advogado pediu/decidiu/corrigiu;
+  // "assistant" = so as respostas. Sem role, os dois lados entram no ranking.
+  if (params.role) body.filters = { role: params.role };
   try {
     // requestWithAuth injeta o Bearer quando ha credencial (mesmo login dos
     // demais MCPs, keychain aidvlabs-mcp), refresca proativo (<60s) e reativo
