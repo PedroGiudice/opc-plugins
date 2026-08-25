@@ -989,6 +989,27 @@ server.tool(
       const data = segmento
         ? await apiGet(`/cases/${CASE.name}/segmento/${encodeURIComponent(segmento)}`)
         : await apiGet(`/cases/${CASE.name}/document/${encodeURIComponent(documento)}`);
+      // Segmento sem chunk proprio (CMR-205): o classifier viu o documento,
+      // mas suas paginas foram absorvidas por um chunk vizinho. Explicar e
+      // apontar o caminho de leitura -- nunca "Nenhum chunk", que soa a vazio.
+      if (segmento && data.sem_texto_indexado) {
+        const fls = Array.isArray(data.fls) ? `fls. ${data.fls[0]}-${data.fls[1]}` : "fls. ?";
+        return {
+          content: [{
+            type: "text",
+            text:
+              `Segmento: ${segmento}\n` +
+              `Arquivo: ${data.documento ?? "?"}\n` +
+              (data.peca ? `Peca: ${data.peca}${data.subtipo ? `/${data.subtipo}` : ""}\n` : "") +
+              (data.titulo ? `Titulo: ${data.titulo}\n` : "") +
+              (data.data_juntada ? `Data de juntada: ${data.data_juntada}\n` : "") +
+              `\nEste documento logico (${fls}) nao tem chunk proprio: suas paginas foram absorvidas ` +
+              `por um chunk vizinho no arquivo. Para ler o texto, chame ` +
+              `document(documento: ${JSON.stringify(data.documento ?? "")}) e localize as ${fls} ` +
+              `pelos campos page_start/page_end dos chunks.`,
+          }],
+        };
+      }
       const out = renderDocumentChunks(data.chunks || [], {
         fromChunk: from_chunk,
         globalCap: OUTPUT_CAP_CHARS,

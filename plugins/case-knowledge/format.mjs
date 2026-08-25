@@ -631,9 +631,14 @@ function linhaDoc(d, indent) {
   const sub = d.subtipo ? `/${d.subtipo}` : "";
   const tit = d.titulo ? `  "${d.titulo}"` : "";
   const data = d.data_juntada ? `  ${dataISO(d.data_juntada)}` : "";
-  const chunks = d.chunks != null
-    ? `  [${d.chunks} ${Number(d.chunks) === 1 ? "chunk" : "chunks"}]`
-    : "";
+  // Segmento sem chunk proprio (CMR-205): existe na cronologia, texto se le
+  // pelo arquivo. O marcador substitui a contagem para ninguem ler "0 chunks"
+  // como "documento vazio".
+  const chunks = d.sem_texto_indexado
+    ? "  [sem texto indexado]"
+    : d.chunks != null
+      ? `  [${d.chunks} ${Number(d.chunks) === 1 ? "chunk" : "chunks"}]`
+      : "";
   // O id e o endereco de leitura do segmento (tool document, parametro
   // `segmento`). Sem segmentacao, o endereco continua sendo o arquivo.
   const id = d.segmento_id ? `  <${d.segmento_id}>` : "";

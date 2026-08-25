@@ -695,3 +695,18 @@ test("chunk no singular nao vira plural", () => {
   assert.match(out, /\[2 chunks\]/);
   assert.doesNotMatch(out, /\[1 chunks\]/);
 });
+
+test("renderManifesto: segmento sem texto indexado mostra o marcador em vez de 0 chunks", () => {
+  const out = renderManifesto({
+    caso: "x",
+    total_documentos: 2,
+    documentos: [
+      { ordem: 1, nome: "a.json", segmento_id: "a.json#p0123", peso: "ato", peca: "despacho",
+        fls: [123, 125], data_juntada: "2026-03-16T00:00:00Z", chunks: 1 },
+      { ordem: 1, nome: "a.json", segmento_id: "a.json#p0126", peso: "ato", peca: "certidao",
+        fls: [126, 127], data_juntada: "2026-08-15T00:00:00Z", chunks: 0, sem_texto_indexado: true },
+    ],
+  }, { expandirExpediente: true });
+  assert.match(out, /certidao\s+fls\. 126-127\s+2026-08-15\s+\[sem texto indexado\]\s+<a\.json#p0126>/);
+  assert.doesNotMatch(out, /\[0 chunks\]/);
+});
