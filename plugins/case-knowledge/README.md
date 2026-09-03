@@ -101,6 +101,27 @@ existir/pertencer, o 2xx desbloqueia o dir todo. 401, 413 e 5xx sao
 transitorios e NUNCA bloqueiam. Para forcar um retry antes das 6h, apague a
 entrada de `__blocked`.
 
+## Sessao com mais de um caso (0.26.0, CMR-234)
+
+O conjunto de casos da sessao vem dos **roots** que o Claude Code informa ao
+MCP server: a pasta de abertura (cwd) mais as pastas adicionadas pelo botao
+**Add folder** do app desktop (ou `/add-dir` / `--add-dir` no CLI). Exige
+Claude Code >= 2.1.203 no cliente; abaixo disso o server fica so no cwd.
+
+- `info` lista o caso principal, os adicionados e os relacionados
+  (`casos_relacionados` do `case.yaml`).
+- `search` busca em TODOS os casos ativos por padrao; cada hit traz `caso`.
+  `casos: [...]` restringe a um subconjunto dos permitidos; `"relacionados"`
+  expande o `case.yaml`.
+- As tools de leitura (`document`, `contexto`, `reconstruir`, `facet`,
+  `manifesto`, ...) aceitam `caso`. Nome fora do conjunto permitido e erro:
+  o escopo e ampliado pelo usuario, nunca pelo modelo.
+- `memoria_search` e os hooks seguem no caso principal.
+
+Seguranca: o perimetro continua sendo o tenant do Bearer. Roots so governam
+a higiene do lado do cliente. Regra pura em `casos.mjs` (testes em
+`casos.test.mjs`, incluindo guards estruturais sobre o `server.mjs`).
+
 ## Variaveis de ambiente
 
 | Var | Default | Funcao |
