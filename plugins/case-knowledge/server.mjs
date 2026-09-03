@@ -130,9 +130,10 @@ function erroDaApi(res, text, path) {
  * ausente (caso casca do CMR-146), ou `null` quando o erro e outra coisa.
  * NAO marca `isError`: a casca e um estado legitimo do caso, nao uma falha.
  */
-function respostaSemBase(err) {
-  if (!CASE || !detectaCollectionAusente(err.status, err.body, err.path)) return null;
-  return { content: [{ type: "text", text: renderCaseSemBase(CASE.name) }] };
+function respostaSemBase(err, nome) {
+  const caso = nome ?? (CASE ? CASE.name : null);
+  if (!caso || !detectaCollectionAusente(err.status, err.body, err.path)) return null;
+  return { content: [{ type: "text", text: renderCaseSemBase(caso) }] };
 }
 
 /**
@@ -245,6 +246,15 @@ async function refreshRoots() {
     process.stderr.write(`case-knowledge: roots indisponiveis (${err && err.message ? err.message : err})\n`);
   }
 }
+
+/**
+ * Descricao unica do parametro `caso` das tools de leitura (CMR-234). O valor
+ * so pode ser um dos casos PERMITIDOS da sessao (ativos + relacionados): o
+ * escopo e ampliado pelo usuario ("Add folder"), nunca pelo modelo.
+ */
+const DESC_CASO =
+  "Caso alvo quando a sessao tem mais de um (campo 'caso' dos resultados de search; " +
+  "veja info). Default: caso principal.";
 
 /** Sessao atual, esperando a resposta inicial de roots por ate 3 s. */
 async function sessao() {
@@ -414,10 +424,13 @@ server.tool(
   },
   async (params) => {
     try {
-      if (!CASE) {
+      // A memoria e do caso PRINCIPAL da sessao (nao cruza casos): o hook de
+      // captura tambem grava sempre no principal.
+      const S = await sessao();
+      if (!S.primary) {
         throw new Error("Sessao nao esta dentro de um caso. Navegue para cases/<nome> antes.");
       }
-      const text = await memoriaSearch(params, CASE);
+      const text = await memoriaSearch(params, S.primary);
       return { content: [{ type: "text", text }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Erro na busca de memoria: ${err.message}` }], isError: true };
@@ -440,13 +453,13 @@ server.tool(
       .describe("Indice do chunk central (campo 'chunk_index' do resultado de busca)"),
     janela: z.number().int().min(1).max(10).default(3)
       .describe("Numero de chunks antes e depois do central (default 3, max 10)"),
+    caso: z.string().optional().describe(DESC_CASO),
   },
-  async ({ documento, chunk_index, janela }) => {
+  async ({ documento, chunk_index, janela, caso }) => {
+    let alvo = null;
     try {
-      if (!CASE) {
-        throw new Error("Sessao nao esta dentro de um caso.");
-      }
-      const data = await apiPost(`/cases/${CASE.name}/contexto`, {
+      alvo = (await sessao()).resolve(caso);
+      const data = await apiPost(`/cases/${alvo.name}/contexto`, {
         documento,
         chunk_index,
         janela,
@@ -476,7 +489,7 @@ server.tool(
       const header = `Documento: ${documento}\nChunks ${from}-${to} (central: ${chunk_index})\n\n`;
       return { content: [{ type: "text", text: notice + header + formatted }] };
     } catch (err) {
-      return respostaSemBase(err)
+      return respostaSemBase(err, alvo ? alvo.name : null)
         ?? { content: [{ type: "text", text: `Erro ao expandir contexto: ${err.message}` }], isError: true };
     }
   }
@@ -505,14 +518,16 @@ server.tool(
     fase: z.string().optional().describe("Filtrar por fase."),
     documento: z.string().optional().describe("Restringir a um documento (nome exato)."),
     numero_processo: z.string().optional().describe("Filtrar por numero CNJ."),
+    caso: z.string().optional().describe(DESC_CASO),
   },
-  async ({ query, modo, janela, max_documentos, peca, fase, documento, numero_processo }) => {
+  async ({ query, modo, janela, max_documentos, peca, fase, documento, numero_processo, caso }) => {
+    let alvo = null;
     try {
-      if (!CASE) throw new Error("Sessao nao esta dentro de um caso. Navegue para cases/<nome>.");
+      alvo = (await sessao()).resolve(caso);
       // Com `documento` explicito o pedido e "este arquivo", e num monolitico
       // cada peca dentro dele consome uma unidade do cap.
       const maxDocs = max_documentos ?? (documento ? 12 : 3);
-      const data = await apiPost(`/cases/${CASE.name}/reconstruir`, {
+      const data = await apiPost(`/cases/${alvo.name}/reconstruir`, {
         query, modo, janela, max_documentos: maxDocs,
         recall_limit: 80, max_chunks_por_doc: 24, max_chunks_global: 48,
         peca, fase, documento, numero_processo,
@@ -520,7 +535,7 @@ server.tool(
       const { text } = renderReconstrucao(data, { globalCap: OUTPUT_CAP_CHARS });
       return { content: [{ type: "text", text }] };
     } catch (err) {
-      return respostaSemBase(err)
+      return respostaSemBase(err, alvo ? alvo.name : null)
         ?? { content: [{ type: "text", text: `Erro na reconstrucao: ${err.message}` }], isError: true };
     }
   }
@@ -530,13 +545,14 @@ server.tool(
 server.tool(
   "stats",
   "Mostra estatisticas do caso atual (pontos no Qdrant, distribuicao por peca).",
-  {},
-  async () => {
+  {
+    caso: z.string().optional().describe(DESC_CASO),
+  },
+  async ({ caso }) => {
+    let alvo = null;
     try {
-      if (!CASE) {
-        throw new Error("Sessao nao esta dentro de um caso.");
-      }
-      const data = await apiGet(`/cases/${CASE.name}/stats`);
+      alvo = (await sessao()).resolve(caso);
+      const data = await apiGet(`/cases/${alvo.name}/stats`);
       const lines = [
         `=== ${data.case_name} (${data.collection}) ===`,
         `Pontos total: ${data.total_points}`,
@@ -546,7 +562,7 @@ server.tool(
       ];
       return { content: [{ type: "text", text: lines.join("\n") }] };
     } catch (err) {
-      return respostaSemBase(err)
+      return respostaSemBase(err, alvo ? alvo.name : null)
         ?? { content: [{ type: "text", text: `Erro ao obter stats: ${err.message}` }], isError: true };
     }
   }
@@ -566,15 +582,16 @@ server.tool(
         return { content: [{ type: "text", text: "Nenhum caso encontrado." }] };
       }
 
+      const ativo = (await sessao()).primary;
       const formatted = cases
         .map((c) => {
-          const isCurrent = CASE && CASE.name === c.name;
+          const isCurrent = ativo && ativo.name === c.name;
           return `${isCurrent ? "* " : "  "}${c.name}`;
         })
         .join("\n");
 
-      const header = CASE
-        ? `Caso ativo: ${CASE.name}\n\nCasos disponiveis:\n`
+      const header = ativo
+        ? `Caso ativo: ${ativo.name}\n\nCasos disponiveis:\n`
         : "Nenhum caso ativo (sessao fora de cases/). Casos disponiveis:\n";
 
       return { content: [{ type: "text", text: header + formatted }] };
@@ -632,16 +649,12 @@ server.tool(
   {
     expandir_expediente: z.boolean().default(false)
       .describe("Lista o expediente de serventia item a item em vez da linha agregada."),
+    caso: z.string().optional().describe(DESC_CASO),
   },
-  async ({ expandir_expediente }) => {
+  async ({ expandir_expediente, caso }) => {
     try {
-      if (!CASE) {
-        return {
-          content: [{ type: "text", text: "Nenhum caso ativo." }],
-          isError: true,
-        };
-      }
-      const yamlPath = join(CASE.dir, "documentos.yaml");
+      const alvo = (await sessao()).resolve(caso);
+      const yamlPath = join(alvo.dir, "documentos.yaml");
       if (!existsSync(yamlPath)) {
         return {
           content: [{ type: "text", text: "Manifesto nao encontrado. Rode 'case-ingest enrich && case-ingest manifesto' primeiro." }],
@@ -668,13 +681,13 @@ server.tool(
     "numero do processo, tipo de acao, valor da causa, contratos, pedido principal, " +
     "dispositivos de decisoes e ultimos andamentos. " +
     "Use no inicio da sessao para entender o caso.",
-  {},
-  async () => {
+  {
+    caso: z.string().optional().describe(DESC_CASO),
+  },
+  async ({ caso }) => {
     try {
-      if (!CASE) {
-        throw new Error("Sessao nao esta dentro de um caso.");
-      }
-      const data = await apiGet(`/cases/${CASE.name}/metadata`);
+      const alvo = (await sessao()).resolve(caso);
+      const data = await apiGet(`/cases/${alvo.name}/metadata`);
       return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Erro ao obter metadata: ${err.message}` }], isError: true };
@@ -705,12 +718,11 @@ server.tool(
       .describe("Filtrar por peca processual"),
     limit: z.number().int().min(1).max(20).default(5)
       .describe("Numero maximo de resultados por query (default 5, max 20)"),
+    caso: z.string().optional().describe(DESC_CASO),
   },
-  async ({ positive, negative, queries, peca, limit }) => {
+  async ({ positive, negative, queries, peca, limit, caso }) => {
     try {
-      if (!CASE) {
-        throw new Error("Sessao nao esta dentro de um caso.");
-      }
+      const alvo = (await sessao()).resolve(caso);
       const isBatch = Array.isArray(queries) && queries.length > 0;
       if (!isBatch && (!positive || positive.length === 0)) {
         throw new Error("Forneca 'positive' (single) ou 'queries' (batch).");
@@ -726,7 +738,7 @@ server.tool(
       }
 
       const res = await requestWithAuth((authHeaders) =>
-        fetchWithRetry(`${API_BASE}/cases/${CASE.name}/recommend`, {
+        fetchWithRetry(`${API_BASE}/cases/${alvo.name}/recommend`, {
           method: "POST",
           headers: { "Content-Type": "application/json", ...authHeaders },
           body: JSON.stringify(body),
@@ -773,11 +785,12 @@ server.tool(
     limit: z.number().int().min(1).max(200).default(50)
       .describe("Numero maximo de valores distintos retornados"),
     peca: z.string().optional().describe("Filtrar por peca antes de contar"),
+    caso: z.string().optional().describe(DESC_CASO),
   },
-  async ({ key, limit, peca }) => {
+  async ({ key, limit, peca, caso }) => {
     try {
-      if (!CASE) throw new Error("Sessao nao esta dentro de um caso.");
-      const data = await apiPost(`/cases/${CASE.name}/facet`, { key, limit, peca });
+      const alvo = (await sessao()).resolve(caso);
+      const data = await apiPost(`/cases/${alvo.name}/facet`, { key, limit, peca });
       const lines = data.hits.map((h) => `${h.value}: ${h.count}`);
       return { content: [{ type: "text", text: lines.join("\n") || "Nenhum valor encontrado." }] };
     } catch (err) {
@@ -800,11 +813,12 @@ server.tool(
       .describe("Numero de pares mais similares a retornar"),
     peca: z.string().optional().describe("Restringir comparacao a uma peca"),
     documento: z.string().optional().describe("Restringir comparacao a um documento"),
+    caso: z.string().optional().describe(DESC_CASO),
   },
-  async ({ sample, limit, peca, documento }) => {
+  async ({ sample, limit, peca, documento, caso }) => {
     try {
-      if (!CASE) throw new Error("Sessao nao esta dentro de um caso.");
-      const data = await apiPost(`/cases/${CASE.name}/comparar`, { sample, limit, peca, documento });
+      const alvo = (await sessao()).resolve(caso);
+      const data = await apiPost(`/cases/${alvo.name}/comparar`, { sample, limit, peca, documento });
       const lines = data.pairs.map((p) => `[${p.score.toFixed(3)}] ${p.a} <-> ${p.b}`);
       return { content: [{ type: "text", text: lines.join("\n") || "Nenhum par encontrado." }] };
     } catch (err) {
@@ -830,16 +844,17 @@ server.tool(
         "Cada par define uma direcao: o positivo eh o que voce quer, o negativo o que evita."),
     peca: z.string().optional().describe("Filtrar resultados por peca"),
     limit: z.number().int().min(1).max(20).default(5),
+    caso: z.string().optional().describe(DESC_CASO),
   },
-  async ({ target, target_chunk_id, context_pairs, peca, limit }) => {
+  async ({ target, target_chunk_id, context_pairs, peca, limit, caso }) => {
     try {
-      if (!CASE) throw new Error("Sessao nao esta dentro de um caso.");
+      const alvo = (await sessao()).resolve(caso);
       const body = { context_pairs, limit };
       if (peca) body.peca = peca;
       if (target_chunk_id) body.target_chunk_id = target_chunk_id;
       else if (target) body.target_query = target;
 
-      const data = await apiPost(`/cases/${CASE.name}/discover`, body);
+      const data = await apiPost(`/cases/${alvo.name}/discover`, body);
       const lines = data.map(
         (r) => `[${r.score.toFixed(3)}] ci:${r.chunk_index} peca=${r.peca || "?"} | ${r.content.slice(0, 200)}...`
       );
@@ -873,11 +888,12 @@ server.tool(
         "Nao aceita data_juntada (indexada como Keyword)."),
     ascending: z.boolean().default(false)
       .describe("Ordem crescente (default false = mais recentes primeiro)"),
+    caso: z.string().optional().describe(DESC_CASO),
   },
-  async ({ query, recall_limit, limit, peca, order_field, ascending }) => {
+  async ({ query, recall_limit, limit, peca, order_field, ascending, caso }) => {
     try {
-      if (!CASE) throw new Error("Sessao nao esta dentro de um caso.");
-      const data = await apiPost(`/cases/${CASE.name}/buscar_cronologico`, {
+      const alvo = (await sessao()).resolve(caso);
+      const data = await apiPost(`/cases/${alvo.name}/buscar_cronologico`, {
         query, recall_limit, limit, peca, order_field, ascending,
       });
       return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
@@ -905,11 +921,12 @@ server.tool(
     limit: z.number().int().min(1).max(50).default(10)
       .describe("Numero final de resultados"),
     peca: z.string().optional(),
+    caso: z.string().optional().describe(DESC_CASO),
   },
-  async ({ query_a, query_b, recall_limit, limit, peca }) => {
+  async ({ query_a, query_b, recall_limit, limit, peca, caso }) => {
     try {
-      if (!CASE) throw new Error("Sessao nao esta dentro de um caso.");
-      const data = await apiPost(`/cases/${CASE.name}/buscar_interseccao`, {
+      const alvo = (await sessao()).resolve(caso);
+      const data = await apiPost(`/cases/${alvo.name}/buscar_interseccao`, {
         query_a, query_b, recall_limit, limit, peca,
       });
       return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
@@ -939,11 +956,12 @@ server.tool(
     group_by: z.enum(["documento", "peca"]).default("documento")
       .describe("Campo de agrupamento (default documento)"),
     peca: z.string().optional(),
+    caso: z.string().optional().describe(DESC_CASO),
   },
-  async ({ query, recall_limit, groups, chunks_per_group, group_by, peca }) => {
+  async ({ query, recall_limit, groups, chunks_per_group, group_by, peca, caso }) => {
     try {
-      if (!CASE) throw new Error("Sessao nao esta dentro de um caso.");
-      const data = await apiPost(`/cases/${CASE.name}/buscar_diversificado`, {
+      const alvo = (await sessao()).resolve(caso);
+      const data = await apiPost(`/cases/${alvo.name}/buscar_diversificado`, {
         query, recall_limit, groups, chunks_per_group, group_by, peca,
       });
       return { content: [{ type: "text", text: JSON.stringify(data.groups, null, 2) }] };
@@ -975,12 +993,12 @@ server.tool(
         "Formato <arquivo>#pNNNN. Use no lugar de 'documento', nunca junto."),
     from_chunk: z.number().int().min(0).default(0)
       .describe("chunk_index inicial (default 0). Use o next_from do aviso de truncamento para continuar a leitura."),
+    caso: z.string().optional().describe(DESC_CASO),
   },
-  async ({ documento, segmento, from_chunk }) => {
+  async ({ documento, segmento, from_chunk, caso }) => {
+    let alvo = null;
     try {
-      if (!CASE) {
-        throw new Error("Sessao nao esta dentro de um caso.");
-      }
+      alvo = (await sessao()).resolve(caso);
       if (documento && segmento) {
         throw new Error("Informe 'documento' OU 'segmento', nunca os dois.");
       }
@@ -990,8 +1008,8 @@ server.tool(
       // O segmento_id carrega '#' e espacos: sem encode o '#' viraria
       // fragmento de URL e nunca chegaria ao servidor.
       const data = segmento
-        ? await apiGet(`/cases/${CASE.name}/segmento/${encodeURIComponent(segmento)}`)
-        : await apiGet(`/cases/${CASE.name}/document/${encodeURIComponent(documento)}`);
+        ? await apiGet(`/cases/${alvo.name}/segmento/${encodeURIComponent(segmento)}`)
+        : await apiGet(`/cases/${alvo.name}/document/${encodeURIComponent(documento)}`);
       // Segmento sem chunk proprio (CMR-205): o classifier viu o documento,
       // mas suas paginas foram absorvidas por um chunk vizinho. Explicar e
       // apontar o caminho de leitura -- nunca "Nenhum chunk", que soa a vazio.
@@ -1043,7 +1061,7 @@ server.tool(
         `Chunks ${out.delivered_from}-${out.delivered_to} de ${out.total} (ordem sequencial)\n\n`;
       return { content: [{ type: "text", text: notice + header + out.text }] };
     } catch (err) {
-      return respostaSemBase(err)
+      return respostaSemBase(err, alvo ? alvo.name : null)
         ?? { content: [{ type: "text", text: `Erro no document: ${err.message}` }], isError: true };
     }
   }
@@ -1068,15 +1086,14 @@ server.tool(
       .describe("Documento de origem a excluir do resultado (ex: o proprio doc onde voce achou a citacao)"),
     limit: z.number().int().min(1).max(200).default(50)
       .describe("Maximo de chunks retornados (default 50)"),
+    caso: z.string().optional().describe(DESC_CASO),
   },
-  async ({ kind, value, exclude_documento, limit }) => {
+  async ({ kind, value, exclude_documento, limit, caso }) => {
     try {
-      if (!CASE) {
-        throw new Error("Sessao nao esta dentro de um caso.");
-      }
+      const alvo = (await sessao()).resolve(caso);
       const params = new URLSearchParams({ kind, value, limit: String(limit) });
       if (exclude_documento) params.set("exclude_documento", exclude_documento);
-      const data = await apiGet(`/cases/${CASE.name}/cross_ref?${params}`);
+      const data = await apiGet(`/cases/${alvo.name}/cross_ref?${params}`);
       const groups = data.by_documento || [];
       if (groups.length === 0) {
         return {

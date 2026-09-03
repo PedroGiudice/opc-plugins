@@ -99,3 +99,31 @@ test("escopo: lista vazia equivale a omitida", () => {
   const s = sessao();
   assert.deepEqual(s.escopo([]).map((c) => c.name), ["bento", "francisco"]);
 });
+
+// --- Guards estruturais sobre o server.mjs (CMR-234) ---
+
+import { readFileSync } from "node:fs";
+
+test("guard: nenhuma tool monta URL ou path com CASE direto (tudo passa por sessao().resolve)", () => {
+  const src = readFileSync(new URL("./server.mjs", import.meta.url), "utf-8");
+  const urls = src.match(/\/cases\/\$\{CASE\.name\}/g) || [];
+  assert.deepEqual(urls, [], `URLs com CASE.name: ${urls.length}`);
+  const dirs = src.match(/join\(CASE\.dir/g) || [];
+  assert.deepEqual(dirs, [], `paths com CASE.dir: ${dirs.length}`);
+  const gates = src.match(/if \(!CASE\)/g) || [];
+  assert.deepEqual(gates, [], `gates antigos if (!CASE): ${gates.length}`);
+});
+
+test("guard: toda tool de leitura declara o parametro caso", () => {
+  const src = readFileSync(new URL("./server.mjs", import.meta.url), "utf-8");
+  const tools = ["contexto", "reconstruir", "stats", "manifesto", "metadata", "recommend", "facet",
+    "comparar", "discover", "buscar_cronologico", "buscar_interseccao", "buscar_diversificado",
+    "document", "cross_ref"];
+  for (const t of tools) {
+    const inicio = src.indexOf(`server.tool(\n  "${t}",`);
+    assert.ok(inicio >= 0, `tool ${t} nao encontrada`);
+    const fim = src.indexOf("server.tool(", inicio + 10);
+    const corpo = src.slice(inicio, fim < 0 ? undefined : fim);
+    assert.match(corpo, /caso: z\.string\(\)\.optional\(\)/, `tool ${t} sem parametro caso`);
+  }
+});
