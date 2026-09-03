@@ -112,6 +112,15 @@ export function buildSessionCases({ cwdCase = null, rootCases = [], relacionados
       const lote = item === "relacionados" ? rel : [resolve(item)];
       for (const c of lote) if (!out.some((o) => o.name === c.name)) out.push(c);
     }
+    // 'relacionados' num caso sem relacionados expande para nada: erro
+    // explicito em vez de lista vazia (que estouraria em quem le alvo[0]).
+    if (out.length === 0) {
+      throw new Error(
+        `Nenhum caso no escopo pedido: ${casos.join(", ")}. ` +
+          `Este caso nao tem relacionados no case.yaml. ` +
+          `Permitidos: ${permitidos().map((c) => c.name).join(", ")}`
+      );
+    }
     return out;
   }
 

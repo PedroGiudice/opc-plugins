@@ -265,8 +265,10 @@ async function sessao() {
 // Tool: search
 server.tool(
   "search",
-  "Busca semantica (dense) nos documentos do caso atual via Qdrant. " +
-    "O caso e determinado automaticamente pelo diretorio da sessao. " +
+  "Busca semantica (dense) nos documentos dos casos ATIVOS da sessao via Qdrant " +
+    "(pasta de abertura + pastas adicionadas pelo usuario). Por padrao busca em " +
+    "todos eles de uma vez; cada resultado vem marcado com o campo 'caso'. " +
+    "Use o parametro 'casos' para restringir o escopo. " +
     "Suporta filtros por peca processual (inicial, contestacao, acordao, etc.), " +
     "fase (conhecimento, instrucao, recursal), documento especifico e " +
     "categoria (para docs nao-processuais: pesquisa, contrato, parecer, relatorio, etc.). " +
@@ -284,8 +286,7 @@ server.tool(
     "content_truncated=true e content_len indicam truncamento). " +
     "Para ler um chunk na INTEGRA (ex: transcrever ementa completa), use a tool " +
     "contexto(documento, chunk_index) — ela retorna o texto completo — ou repita a " +
-    "busca com content_chars=0 e limit baixo. " +
-    "NAO usar cross-reference a menos que o usuario peca explicitamente.",
+    "busca com content_chars=0 e limit baixo.",
   {
     query: z.union([z.string(), z.array(z.string()).min(1).max(20)])
       .describe("Texto para busca em linguagem natural. " +
@@ -329,10 +330,12 @@ server.tool(
         "estourar o limite de output. Para leitura pontual na integra prefira a tool contexto."),
   },
   async ({ query, limit, peca, subtipo, parte_peticionante, fase, documento, numero_processo, categoria, agrupar, casos, content_chars }) => {
+    let principalNome = null;
     try {
       const S = await sessao();
       const alvo = S.escopo(casos);
       const principal = alvo[0];
+      principalNome = principal.name;
       const extras = alvo.slice(1).map((c) => c.name);
       const isBatch = Array.isArray(query);
       const body = {
@@ -396,7 +399,7 @@ server.tool(
       });
       return { content: [{ type: "text", text: degradeNotice(degraded, content_chars) + prefixo + text }] };
     } catch (err) {
-      return respostaSemBase(err)
+      return respostaSemBase(err, principalNome)
         ?? { content: [{ type: "text", text: `Erro na busca: ${err.message}` }], isError: true };
     }
   }
@@ -544,7 +547,8 @@ server.tool(
 // Tool: stats
 server.tool(
   "stats",
-  "Mostra estatisticas do caso atual (pontos no Qdrant, distribuicao por peca).",
+  "Mostra estatisticas de um caso da sessao (pontos no Qdrant, distribuicao por peca). " +
+    "Default: caso principal; use 'caso' para outro caso permitido.",
   {
     caso: z.string().optional().describe(DESC_CASO),
   },
@@ -637,7 +641,8 @@ server.tool(
 // Tool: manifesto (local — reads YAML file)
 server.tool(
   "manifesto",
-  "Retorna o indice do caso atual em ARVORE: cada ato processual em ordem, " +
+  "Retorna o indice de um caso da sessao em ARVORE (default: caso principal): " +
+    "cada ato processual em ordem, " +
     "com os documentos que o acompanham aninhados sob ele, mais fls., titulo " +
     "literal, data de juntada e numero de chunks. Num arquivo monolitico (um " +
     "PDF com os autos inteiros) cada peca aparece como uma linha propria, com " +
@@ -677,7 +682,8 @@ server.tool(
 // Tool: metadata
 server.tool(
   "metadata",
-  "Retorna metadados extraidos do caso atual: partes (autor/reu), advogados, " +
+  "Retorna metadados extraidos de um caso da sessao (default: caso principal): " +
+    "partes (autor/reu), advogados, " +
     "numero do processo, tipo de acao, valor da causa, contratos, pedido principal, " +
     "dispositivos de decisoes e ultimos andamentos. " +
     "Use no inicio da sessao para entender o caso.",

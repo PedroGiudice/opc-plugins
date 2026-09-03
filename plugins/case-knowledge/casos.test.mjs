@@ -100,6 +100,14 @@ test("escopo: lista vazia equivale a omitida", () => {
   assert.deepEqual(s.escopo([]).map((c) => c.name), ["bento", "francisco"]);
 });
 
+test("escopo: 'relacionados' sem relacionados lanca erro explicito (nunca lista vazia)", () => {
+  const s = sessao({ rootCases: [], relacionados: [] });
+  assert.throws(
+    () => s.escopo(["relacionados"]),
+    /Nenhum caso no escopo pedido: relacionados\..*nao tem relacionados no case\.yaml.*Permitidos: bento/s
+  );
+});
+
 // --- Guards estruturais sobre o server.mjs (CMR-234) ---
 
 import { readFileSync } from "node:fs";
