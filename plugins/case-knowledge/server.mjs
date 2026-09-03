@@ -170,26 +170,6 @@ function loadCaseConfig(caseDir) {
   }
 }
 
-/**
- * Casos extras de uma busca (formato antigo, nome livre). Le os relacionados
- * do conjunto da sessao. Removido na Task 7, quando o `search` passa a usar
- * `SESSION.escopo`.
- */
-// removido na Task 7
-function resolveCasos(casos) {
-  if (!casos || casos.length === 0) return [];
-  const resolved = new Set();
-  for (const c of casos) {
-    if (c === "relacionados") {
-      for (const r of SESSION.relacionados) resolved.add(r.name);
-    } else {
-      resolved.add(c);
-    }
-  }
-  if (SESSION.primary) resolved.delete(SESSION.primary.name);
-  return [...resolved];
-}
-
 // --- MCP Server ---
 
 /** Versao unica: lida do plugin.json (a fonte do bump de release). */
@@ -328,10 +308,11 @@ server.tool(
         "Quando true, retorna top N documentos distintos com ate 3 chunks cada, " +
         "evitando que documentos grandes monopolizem os resultados."),
     casos: z.array(z.string()).optional()
-      .describe("Cross-reference: buscar tambem em outros casos. " +
-        "Usar SOMENTE quando o usuario pedir explicitamente (ex: 'busca nos relacionados', " +
-        "'veja no caso X'). Valor 'relacionados' expande para os casos listados no case.yaml. " +
-        "Nomes especificos buscam naquela collection. NUNCA usar espontaneamente."),
+      .describe("Restringe a busca a um subconjunto dos casos PERMITIDOS nesta sessao " +
+        "(os ativos — pasta de abertura + pastas adicionadas — e os relacionados do case.yaml; " +
+        "veja a tool info). Omitido = todos os casos ativos. O valor 'relacionados' expande os " +
+        "relacionados do case.yaml. Nome fora do conjunto e erro: o escopo e ampliado pelo usuario " +
+        "(Add folder), nunca por aqui."),
     content_chars: z.number().int().min(0).max(20000).default(1200)
       .describe("Tamanho do preview de content por resultado, em chars (default 1200). " +
         "0 = retorna content integral SEM truncar — use com limit baixo (<=3) para nao " +
@@ -339,22 +320,28 @@ server.tool(
   },
   async ({ query, limit, peca, subtipo, parte_peticionante, fase, documento, numero_processo, categoria, agrupar, casos, content_chars }) => {
     try {
-      if (!CASE) {
-        throw new Error("Sessao nao esta dentro de um caso. Navegue para cases/<nome> antes.");
-      }
-
+      const S = await sessao();
+      const alvo = S.escopo(casos);
+      const principal = alvo[0];
+      const extras = alvo.slice(1).map((c) => c.name);
       const isBatch = Array.isArray(query);
-      const body = { query, limit, peca, subtipo, parte_peticionante, fase, documento, numero_processo, categoria, agrupar };
+      const body = {
+        query, limit, peca, subtipo, parte_peticionante, fase, documento, numero_processo, categoria, agrupar,
+        ...(extras.length > 0 ? { casos: extras } : {}),
+      };
+      const data = await apiPost(`/cases/${principal.name}/search`, body);
 
-      // Batch mode: 1 chamada na API com array de queries (Qdrant search_batch nativo).
-      // Cross-reference em batch nao e suportado.
+      const header = (data.casos && data.casos.length > 1)
+        ? `Casos: ${data.casos.join(" + ")}\n`
+        : "";
+      const semBase = (data.casos_sem_base && data.casos_sem_base.length > 0)
+        ? `Sem base embedada (ignorados): ${data.casos_sem_base.join(", ")}\n`
+        : "";
+      const prefixo = header || semBase ? header + semBase + "\n" : "";
+
       if (isBatch) {
-        if (casos && casos.length > 0) {
-          throw new Error("Cross-reference (casos) nao e suportado em batch. Use uma query por vez.");
-        }
-        const data = await apiPost(`/cases/${CASE.name}/search`, body);
         if (!data.batch || data.batch.length === 0) {
-          return { content: [{ type: "text", text: "Nenhum resultado encontrado." }] };
+          return { content: [{ type: "text", text: prefixo + "Nenhum resultado encontrado." }] };
         }
         const lists = data.batch.map((b) => b.results || []);
         const { text, degraded } = buildCappedPayload({
@@ -366,59 +353,38 @@ server.tool(
           contentChars: content_chars,
           globalCap: OUTPUT_CAP_CHARS,
         });
-        return { content: [{ type: "text", text: degradeNotice(degraded, content_chars) + text }] };
+        return { content: [{ type: "text", text: degradeNotice(degraded, content_chars) + prefixo + text }] };
       }
-
-      // Single mode (mantem cross-reference)
-      const searches = [apiPost(`/cases/${CASE.name}/search`, body)];
-      const extraCasos = resolveCasos(casos);
-      for (const caseName of extraCasos) {
-        searches.push(
-          apiPost(`/cases/${caseName}/search`, body).catch(() => ({ results: [], groups: [] }))
-        );
-      }
-
-      const allResults = await Promise.all(searches);
 
       if (agrupar) {
-        const groups = allResults.flatMap((r) => r.groups || []);
+        const groups = data.groups || [];
         if (groups.length === 0) {
-          return { content: [{ type: "text", text: "Nenhum resultado encontrado." }] };
+          return { content: [{ type: "text", text: prefixo + "Nenhum resultado encontrado." }] };
         }
         const lists = groups.map((g) => g.hits || []);
         const { text, degraded } = buildCappedPayload({
           lists,
           render: (pls) =>
             groups
-              .map((g, i) => `=== documento: ${g.group_id} ===\n${renderLines(pls[i])}`)
+              .map((g, i) => `=== documento: ${g.group_id}${g.caso ? ` (caso ${g.caso})` : ""} ===\n${renderLines(pls[i])}`)
               .join("\n\n"),
           contentChars: content_chars,
           globalCap: OUTPUT_CAP_CHARS,
         });
-        const header = extraCasos.length > 0
-          ? `Cross-reference: caso atual + [${extraCasos.join(", ")}]\n\n`
-          : "";
-        return { content: [{ type: "text", text: degradeNotice(degraded, content_chars) + header + text }] };
+        return { content: [{ type: "text", text: degradeNotice(degraded, content_chars) + prefixo + text }] };
       }
 
-      const merged = allResults.flatMap((r) => r.results || []).sort((a, b) => b.score - a.score);
-      const results = merged.slice(0, limit);
-
+      const results = data.results || [];
       if (results.length === 0) {
-        return { content: [{ type: "text", text: "Nenhum resultado encontrado." }] };
+        return { content: [{ type: "text", text: prefixo + "Nenhum resultado encontrado." }] };
       }
-
       const { text, degraded } = buildCappedPayload({
         lists: [results],
         render: (pls) => renderLines(pls[0]),
         contentChars: content_chars,
         globalCap: OUTPUT_CAP_CHARS,
       });
-
-      const header = extraCasos.length > 0
-        ? `Cross-reference: caso atual + [${extraCasos.join(", ")}]\n\n`
-        : "";
-      return { content: [{ type: "text", text: degradeNotice(degraded, content_chars) + header + text }] };
+      return { content: [{ type: "text", text: degradeNotice(degraded, content_chars) + prefixo + text }] };
     } catch (err) {
       return respostaSemBase(err)
         ?? { content: [{ type: "text", text: `Erro na busca: ${err.message}` }], isError: true };
