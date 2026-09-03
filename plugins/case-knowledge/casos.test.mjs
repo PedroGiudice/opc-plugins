@@ -73,6 +73,17 @@ test("buildSessionCases: relacionado que tambem e ativo nao duplica", () => {
   assert.deepEqual(s.permitidos().map((c) => c.name), ["bento", "francisco", "carlos"]);
 });
 
+test("buildSessionCases: base Windows monta o dir dos relacionados com separador win32", () => {
+  const winBase = "C:\\Users\\pedro\\cases";
+  const s = buildSessionCases({
+    cwdCase: { name: "bento", dir: `${winBase}\\bento` },
+    rootCases: [],
+    relacionados: ["carlos"],
+    base: winBase,
+  });
+  assert.equal(s.relacionados[0].dir, "C:\\Users\\pedro\\cases\\carlos");
+});
+
 test("resolve: sem nome devolve o principal; nome permitido devolve o caso; fora lanca", () => {
   const s = sessao();
   assert.equal(s.resolve().name, "bento");
@@ -133,5 +144,9 @@ test("guard: toda tool de leitura declara o parametro caso", () => {
     const fim = src.indexOf("server.tool(", inicio + 10);
     const corpo = src.slice(inicio, fim < 0 ? undefined : fim);
     assert.match(corpo, /caso: z\.string\(\)\.optional\(\)/, `tool ${t} sem parametro caso`);
+    // Nao basta declarar o parametro: a tool precisa efetivamente resolve-lo
+    // via sessao() — senao uma tool que declara `caso` e ignora o valor
+    // passaria o guard sem restringir o caso de fato.
+    assert.match(corpo, /\(await sessao\(\)\)\.resolve\(caso\)/, `tool ${t} nao chama sessao().resolve(caso)`);
   }
 });

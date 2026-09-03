@@ -256,9 +256,22 @@ const DESC_CASO =
   "Caso alvo quando a sessao tem mais de um (campo 'caso' dos resultados de search; " +
   "veja info). Default: caso principal.";
 
-/** Sessao atual, esperando a resposta inicial de roots por ate 3 s. */
+/**
+ * Sessao atual, esperando a resposta inicial de roots por ate 3 s.
+ *
+ * O timer e `unref()`ado e cancelado assim que `rootsReady` resolve primeiro:
+ * sem isso, cada chamada deixava um timer ativo por 3 s inteiros, atrasando
+ * o encerramento do processo apos o fim do stdin.
+ */
 async function sessao() {
-  await Promise.race([rootsReady, new Promise((r) => setTimeout(r, 3000))]);
+  await new Promise((resolveSessao) => {
+    const timer = setTimeout(resolveSessao, 3000);
+    timer.unref();
+    rootsReady.finally(() => {
+      clearTimeout(timer);
+      resolveSessao();
+    });
+  });
   return SESSION;
 }
 

@@ -14,8 +14,6 @@
 import * as nodePath from "node:path";
 import { fileURLToPath } from "node:url";
 
-const { resolve, join, sep } = nodePath;
-
 /** Path com drive letter Windows (separador nativo ou `/`). */
 const WIN_DRIVE = /^[a-z]:(\\|\/|$)/i;
 
@@ -82,10 +80,15 @@ export function buildSessionCases({ cwdCase = null, rootCases = [], relacionados
   const primary = cwdCase ?? rootCases[0] ?? null;
   const adicionados = rootCases.filter((c) => !primary || c.name !== primary.name);
   const ativosNomes = new Set((primary ? [primary] : []).concat(adicionados).map((c) => c.name));
+  // Mesmo modulo de path que `caseFromPath` escolheria para `base` (win32 com
+  // drive letter, senao o nativo do processo) — sem isso, um `base` Windows
+  // (cliente com roots) gerava `dir` com separador `/` para os relacionados,
+  // divergindo do `dir` dos casos ativos (sempre montado com `mod.join`).
+  const modBase = base ? pathModuloPara(base, base) : nodePath;
   const rel = [];
   for (const nome of relacionados || []) {
     if (typeof nome !== "string" || !nome || ativosNomes.has(nome) || rel.some((c) => c.name === nome)) continue;
-    rel.push({ name: nome, dir: base ? join(base, nome) : nome });
+    rel.push({ name: nome, dir: base ? modBase.join(base, nome) : nome });
   }
 
   const ativos = () => (primary ? [primary, ...adicionados] : []);
