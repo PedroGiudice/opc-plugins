@@ -12,7 +12,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { join } from "node:path";
 import yaml from "js-yaml";
 import { memoriaSearch } from "./memoria.mjs";
 import {
@@ -26,6 +26,8 @@ import {
   renderCaseSemBase,
 } from "./format.mjs";
 import { requestWithAuth, APP_BASE, loginFlow } from "./auth.mjs";
+import { RootsListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
+import { caseFromPath, casesFromRoots, buildSessionCases } from "./casos.mjs";
 
 // Default por plataforma: no Windows (maquina cliente) a API publica com
 // Bearer obrigatorio (api.aidvlabs.com, Cloudflare) — funciona SEM tailnet.
@@ -133,21 +135,17 @@ function respostaSemBase(err) {
   return { content: [{ type: "text", text: renderCaseSemBase(CASE.name) }] };
 }
 
-/** Path com drive letter Windows (separador nativo ou `/`). */
-const WIN_DRIVE = /^[a-z]:(\\|\/|$)/i;
-
 /**
- * Derive case context from cwd.
- * Relaxed: does NOT require base/ to exist locally (API validates collection).
- * NTFS e case-insensitive: com drive letter nos dois paths, a comparacao e
- * em lowercase (CMR-99 item 1, mesma regra do caseSlugFromCwd do hook).
- * O nome do caso preserva o casing original do path.
- */
-/** Canonicaliza symlinks: process.cwd() retorna path FISICO, e na VM
+ * Caso do cwd. A regra (realpath nos dois lados, comparacao sem caixa em
+ * drive Windows, nome = primeiro componente relativo) vive em `casos.mjs`,
+ * compartilhada com a leitura dos roots MCP (CMR-234).
+ *
+ * Canonicaliza symlinks: process.cwd() retorna path FISICO, e na VM
  * cases/ e symlink pra tenants/1/cases (migracao SaaS 18/06) — sem
  * realpath nos DOIS lados, cwd fisico nunca casa com base logica e
  * detectCase falha em toda sessao de caso na VM. Path inexistente
- * (tests, race) cai no proprio input. */
+ * (tests, race) cai no proprio input.
+ */
 function physicalPath(p) {
   try {
     return realpathSync(p);
@@ -157,25 +155,7 @@ function physicalPath(p) {
 }
 
 function detectCase() {
-  const cwd = physicalPath(resolve(process.cwd()));
-  const base = physicalPath(resolve(CASES_BASE));
-
-  const insensitive = WIN_DRIVE.test(cwd) && WIN_DRIVE.test(base);
-  const cwdF = insensitive ? cwd.toLowerCase() : cwd;
-  const baseF = insensitive ? base.toLowerCase() : base;
-
-  if (!cwdF.startsWith(baseF + sep) && cwdF !== baseF) {
-    return null;
-  }
-
-  const relative = cwd.slice(base.length + 1);
-  const caseName = relative.split(sep)[0];
-
-  if (!caseName) {
-    return null;
-  }
-
-  return { name: caseName, dir: join(base, caseName) };
+  return caseFromPath(process.cwd(), CASES_BASE, { realpath: physicalPath });
 }
 
 const CASE = detectCase();
@@ -190,22 +170,23 @@ function loadCaseConfig(caseDir) {
   }
 }
 
-const CASE_CONFIG = CASE ? loadCaseConfig(CASE.dir) : null;
-
+/**
+ * Casos extras de uma busca (formato antigo, nome livre). Le os relacionados
+ * do conjunto da sessao. Removido na Task 7, quando o `search` passa a usar
+ * `SESSION.escopo`.
+ */
+// removido na Task 7
 function resolveCasos(casos) {
   if (!casos || casos.length === 0) return [];
   const resolved = new Set();
   for (const c of casos) {
     if (c === "relacionados") {
-      // casos_relacionados e o nome atual; processos_relacionados e o nome
-      // antigo (enganoso: contem nomes de pasta, nao numeros de processo).
-      const related = CASE_CONFIG?.casos_relacionados || CASE_CONFIG?.processos_relacionados || [];
-      for (const r of related) resolved.add(r);
+      for (const r of SESSION.relacionados) resolved.add(r.name);
     } else {
       resolved.add(c);
     }
   }
-  if (CASE) resolved.delete(CASE.name);
+  if (SESSION.primary) resolved.delete(SESSION.primary.name);
   return [...resolved];
 }
 
@@ -236,6 +217,60 @@ const server = new McpServer(
     ].join("\n"),
   }
 );
+
+/** Nomes de casos relacionados do case.yaml de um caso (nome atual e legado). */
+function relacionadosDoCaso(caso) {
+  if (!caso) return [];
+  const cfg = loadCaseConfig(caso.dir);
+  const lista = cfg?.casos_relacionados || cfg?.processos_relacionados || [];
+  return Array.isArray(lista) ? lista : [];
+}
+
+/**
+ * Conjunto de casos da sessao (CMR-234). Nasce do cwd (fallback para cliente
+ * sem roots) e e recalculado quando o cliente responde `roots/list` ou envia
+ * `notifications/roots/list_changed` (botao "Add folder" do desktop /
+ * `/add-dir`). Cliente sem capability `roots` fica no cwd.
+ */
+let SESSION = buildSessionCases({
+  cwdCase: CASE,
+  rootCases: [],
+  relacionados: relacionadosDoCaso(CASE),
+  base: CASES_BASE,
+});
+let ROOTS_SUPORTADOS = false;
+let rootsReady = Promise.resolve();
+
+function montarSessao(rootCases) {
+  const primary = CASE ?? rootCases[0] ?? null;
+  return buildSessionCases({
+    cwdCase: CASE,
+    rootCases,
+    relacionados: relacionadosDoCaso(primary),
+    base: CASES_BASE,
+  });
+}
+
+async function refreshRoots() {
+  try {
+    const caps = server.server.getClientCapabilities();
+    if (!caps || !caps.roots) return;
+    ROOTS_SUPORTADOS = true;
+    const { roots } = await server.server.listRoots();
+    SESSION = montarSessao(casesFromRoots(roots, CASES_BASE, { realpath: physicalPath }));
+    process.stderr.write(
+      `case-knowledge: casos da sessao = ${SESSION.ativos().map((c) => c.name).join(", ") || "(nenhum)"}\n`
+    );
+  } catch (err) {
+    process.stderr.write(`case-knowledge: roots indisponiveis (${err && err.message ? err.message : err})\n`);
+  }
+}
+
+/** Sessao atual, esperando a resposta inicial de roots por ate 3 s. */
+async function sessao() {
+  await Promise.race([rootsReady, new Promise((r) => setTimeout(r, 3000))]);
+  return SESSION;
+}
 
 // Tool: search
 server.tool(
@@ -583,32 +618,34 @@ server.tool(
   }
 );
 
-// Tool: info (local — reads cwd and yaml)
+// Tool: info (local — cwd, roots e case.yaml)
 server.tool(
   "info",
-  "Mostra qual caso esta ativo nesta sessao.",
+  "Mostra os casos desta sessao: principal, pastas adicionadas (Add folder / add-dir) e relacionados do case.yaml.",
   {},
   async () => {
-    if (!CASE) {
+    const S = await sessao();
+    if (!S.primary) {
       return {
         content: [{
           type: "text",
-          text: "Nenhum caso ativo. A sessao nao foi lancada dentro de cases/<nome>/.",
+          text: "Nenhum caso ativo. Abra a sessao dentro de cases/<nome>/ ou adicione a pasta de um caso a sessao.",
         }],
       };
     }
+    const origem = CASE ? "pasta de abertura (cwd)" : "pasta adicionada";
     const lines = [
-      `Caso ativo: ${CASE.name}`,
-      `Collection Qdrant: case-${CASE.name}`,
-      `Diretorio: ${CASE.dir}`,
+      `Caso principal: ${S.primary.name} (${origem})`,
+      `Collection Qdrant: case-${S.primary.name}`,
+      `Diretorio: ${S.primary.dir}`,
+      `Casos adicionados a sessao: ${S.adicionados.length ? S.adicionados.map((c) => c.name).join(", ") : "nenhum"}`,
+      `Casos relacionados (case.yaml): ${S.relacionados.length ? S.relacionados.map((c) => c.name).join(", ") : "nenhum"}`,
+      `Busca cruzada por padrao: ${S.ativos().length > 1 ? "sim (" + S.ativos().map((c) => c.name).join(" + ") + ")" : "nao (um caso ativo)"}`,
+      `Cliente informa roots: ${ROOTS_SUPORTADOS ? "sim" : "nao (so o cwd)"}`,
       `API: ${API_BASE}`,
       `App (login/token): ${APP_BASE}`,
     ];
-    const relacionados = CASE_CONFIG?.casos_relacionados || CASE_CONFIG?.processos_relacionados;
-    if (relacionados?.length) {
-      lines.push(`Processos relacionados: ${relacionados.join(", ")}`);
-    }
-    const manifestoExists = existsSync(join(CASE.dir, "documentos.yaml"));
+    const manifestoExists = existsSync(join(S.primary.dir, "documentos.yaml"));
     lines.push(`Cronologia enriquecida: ${manifestoExists ? "sim (manifesto disponivel)" : "nao"}`);
     return { content: [{ type: "text", text: lines.join("\n") }] };
   }
@@ -1122,6 +1159,13 @@ if (process.argv[2] === "login") {
   const r = spawnSync(process.execPath, [setupPath], { stdio: "inherit" });
   process.exit(r.status ?? 1);
 } else {
+  server.server.oninitialized = () => {
+    rootsReady = refreshRoots();
+  };
+  server.server.setNotificationHandler(RootsListChangedNotificationSchema, async () => {
+    rootsReady = refreshRoots();
+    await rootsReady;
+  });
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
