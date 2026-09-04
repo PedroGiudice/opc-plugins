@@ -25,7 +25,7 @@ buscar informação jurídica.
 
 | Base | Conteúdo | Plugin MCP |
 |------|----------|------------|
-| case-knowledge | Documentos do caso ativo (resolvido pelo cwd) | `case-knowledge` |
+| case-knowledge | Documentos dos casos da sessão (principal pelo cwd + pastas adicionadas) | `case-knowledge` |
 | stj-vec | Acórdãos do STJ | `stj-vec-tools` |
 | legal-knowledge-base | Legislação brasileira | `legal-vec-tools` |
 | cogmem | Memória de sessões | `cogmem-tools` |
@@ -35,8 +35,13 @@ buscar informação jurídica.
 
 ### 1. Case Knowledge (documentos do caso ativo)
 
-Plugin `case-knowledge`. Resolve o caso pelo **cwd** (a sessão precisa estar
-dentro de `cases/<slug>/`). Faz proxy para a `case-knowledge-api`
+Plugin `case-knowledge`. O caso PRINCIPAL é o do **cwd** (a sessão precisa
+estar dentro de `cases/<slug>/`); pastas de caso adicionadas à sessão (botão
+"Add folder" do desktop ou `/add-dir`) entram como casos ATIVOS. `info` lista
+o conjunto. `search` cruza todos os ativos por padrão e marca cada hit com
+`caso`; as tools de leitura aceitam `caso` (valor do campo do resultado) só
+para casos ativos ou relacionados (`casos_relacionados` do case.yaml). Outro
+nome de caso é recusado: peça ao usuário para adicionar a pasta. Faz proxy para a `case-knowledge-api`
 (`127.0.0.1:8422` na VM; `100.123.73.128:8422` via Tailscale na cmr-002), sobre
 as collections `case-{slug}` no Qdrant.
 
@@ -60,7 +65,7 @@ Citação/transcrição exigem íntegra lida por uma dessas duas.
 
 **Memória do caso:** `memoria_search` — sessões anteriores DESTE caso
 (legal-cogmem). A memória também é injetada automaticamente a cada prompt
-(hook). Fora de um caso, só `list_cases` opera; as demais retornam erro.
+(hook); cobre só o caso principal. Fora de um caso, só `list_cases` opera; as demais retornam erro.
 
 **Quando usar:** fatos do caso, peças processuais, provas, perícias.
 Protocolo completo de leitura: skill `leitura-autos`.
