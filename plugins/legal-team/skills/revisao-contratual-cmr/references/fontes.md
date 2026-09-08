@@ -8,10 +8,13 @@ localizados na base — verificar antes de citar".
 
 - Buscar em lote por tema, 2 a 3 rodadas (8 a 16 queries numa revisão
   típica), não uma query por cláusula.
-- **Quando o artigo é conhecido, buscar também pelo número** ("art. 1.078
-  aprovação das contas", "CC 1.057 cessão de quota"). A busca é densa e o
-  chunk é o artigo inteiro: parágrafo com conteúdo diferente do caput (ex. CC
-  1.078 §3º) não sobe pelo tema sozinho.
+- **Quando o artigo é conhecido, NÃO buscar: ler direto** com
+  `legal-vec-tools:document`, `doc_id` = `<fonte>_art_<número>` (ex.
+  `codigo_civil_art_1078`, `lsa_art_118`, `clt_art_468`, `cpc_art_784`,
+  `in_81_2020_art_9`). A busca é densa e o chunk é o artigo inteiro:
+  parágrafo com conteúdo diferente do caput (CC 1.078 §3º) não sobe nem com
+  o número na query (medido em 08/09/2026). Se o `document` devolver vazio,
+  aí sim buscar pelo tema e listar como não localizado se nada vier.
 - Filtros úteis: `fonte` (`planalto/codigo_civil`, `planalto/lsa`,
   `planalto/clt`, `planalto/cpc`, `planalto/defesa_concorrencia`,
   `planalto/representacao_comercial`, `planalto/locacoes`, `planalto/lgpd`,
