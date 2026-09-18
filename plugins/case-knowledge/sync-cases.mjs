@@ -1713,9 +1713,10 @@ export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
       // Arquivo aberto no Word: o rename falha com EBUSY/EPERM. NÃO é erro do
       // ciclo — o baseline não avança (o `return null` já garante isso) e o
       // próximo tick tenta de novo. Sem este ramo, o Word veria o arquivo
-      // trocar por baixo ou o log acusaria falha a cada 5 minutos.
+      // trocar por baixo ou o log acusaria falha a cada 5 minutos. O código vai
+      // na linha: EPERM também vem de ACL/permissão (já visto na cmr-002).
       if (err.code === "EBUSY" || err.code === "EPERM") {
-        appendLog(casesBase, `workdocs ${caso}: ${relDestino} em uso, adiado`);
+        appendLog(casesBase, `workdocs ${caso}: ${relDestino} em uso (${err.code}), adiado`);
         return null;
       }
       erros++;

@@ -3144,7 +3144,7 @@ test("syncWorkdocs: arquivo travado no Word adia sem avançar o baseline", async
   const estado = JSON.parse(readFileSync(join(base, ".workdocs-state.json"), "utf-8"));
   assert.equal(estado["caso-a"]?.["minuta.docx"], undefined, "baseline não pode avançar");
   const log = readFileSync(join(base, ".sync.log"), "utf-8");
-  assert.match(log, /minuta\.docx em uso, adiado/);
+  assert.match(log, /workdocs caso-a: minuta\.docx em uso \(EBUSY\), adiado/);
   rmSync(base, { recursive: true, force: true });
 });
 
@@ -3187,7 +3187,8 @@ test("syncWorkdocs: rename recusado pelo Word (EPERM) adia, preserva o local e n
     const estado = JSON.parse(readFileSync(join(base, ".workdocs-state.json"), "utf-8"));
     assert.equal(estado["caso-a"]?.["minuta.docx"], md5hex(local), "baseline não pode avançar");
     const log = readFileSync(join(base, ".sync.log"), "utf-8");
-    assert.match(log, /minuta\.docx em uso, adiado/);
+    // O código vai na linha: EPERM também vem de ACL/permissão, não só do Word.
+    assert.match(log, /workdocs caso-a: minuta\.docx em uso \(EPERM\), adiado/);
     assert.doesNotMatch(log, /erro baixando/);
     assert.doesNotMatch(log, /workdocs: erro/, "arquivo em uso não é erro do ciclo");
   } finally {
