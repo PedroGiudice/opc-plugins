@@ -74,7 +74,7 @@ test("isWorkdocPath: rejeita opt-out *.local.md / *.local.py", () => {
 });
 
 test("isWorkdocPath: rejeita extensão fora da allowlist", () => {
-  assert.equal(isWorkdocPath("peca.docx"), false);
+  assert.equal(isWorkdocPath("peca.docm"), false);
   assert.equal(isWorkdocPath("planilha.xlsx"), false);
   assert.equal(isWorkdocPath("notas/relatorio.pdf"), false);
   assert.equal(isWorkdocPath("sem-extensao"), false);
@@ -93,6 +93,32 @@ test("isWorkdocPath: rejeita traversal, absoluto e separador não-canônico", ()
   assert.equal(isWorkdocPath(""), false);
   assert.equal(isWorkdocPath(null), false);
   assert.equal(isWorkdocPath(42), false);
+});
+
+test("isWorkdocPath: aceita .docx e rejeita o lock do Word", () => {
+  assert.equal(isWorkdocPath("minuta-contestacao.docx"), true);
+  assert.equal(isWorkdocPath("pecas/2026/apelacao.DOCX"), true);
+  assert.equal(isWorkdocPath("~$minuta-contestacao.docx"), false);
+  assert.equal(isWorkdocPath("pecas/~$apelacao.docx"), false);
+  assert.equal(isWorkdocPath("minuta.docm"), false);
+  assert.equal(isWorkdocPath("planilha.xlsx"), false);
+  assert.equal(isWorkdocPath("rascunho.local.docx"), false);
+});
+
+test("paridade da allowlist com o servidor (api.rs)", () => {
+  // O servidor é a autoridade; divergir aqui faz o cliente pedir o que será
+  // recusado (ou deixar de subir o que seria aceito). Espelho path a path.
+  const aceitos = ["a.md", "a.py", "a.docx", "d/b.MD", "d/e/c.DocX"];
+  const recusados = [
+    "CLAUDE.md", "case.yaml", "documentos.yaml",
+    "base/x.md", "base_classifier/x.md", "_archive/x.md",
+    "venv/x.py", "node_modules/x.md", "__pycache__/x.py", "site-packages/x.py",
+    ".memoria/a/x.md", "a/.claude/x.md",
+    "x.local.md", "x.conflito-ana.md", "~$x.docx",
+    "x.docm", "x.pdf", "x.xlsx", "", "../x.md", "/x.md", "a//b.md", "a\\b.md", "C:/x.md",
+  ];
+  for (const p of aceitos) assert.equal(isWorkdocPath(p), true, `deveria aceitar ${p}`);
+  for (const p of recusados) assert.equal(isWorkdocPath(p), false, `deveria recusar ${p}`);
 });
 
 // ---------- nome do arquivo de conflito ----------

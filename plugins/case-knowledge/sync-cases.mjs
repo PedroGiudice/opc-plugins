@@ -863,11 +863,34 @@ export function readFeedbackState(casesBase) {
   return state;
 }
 
-/** Escrita atomica: tmp + rename (rename sobrescreve no Windows via MoveFileEx). */
-function writeAtomic(path, content) {
+/**
+ * Escrita atômica: tmp + rename (rename sobrescreve no Windows via MoveFileEx).
+ *
+ * O encoding só é passado quando o conteúdo é STRING. Com Buffer o Node ignora
+ * o encoding — funcionava, mas a assinatura mentia, e agora o canal transporta
+ * `.docx` (bytes que não são UTF-8 válido).
+ *
+ * Se o rename falha (destino aberto no Word: EBUSY/EPERM no Windows), o tmp é
+ * removido antes de relançar — senão `<nome>.sync-tmp` ficaria na pasta do
+ * caso a cada tick em que o arquivo seguisse aberto.
+ */
+export function writeAtomic(path, content) {
   const tmp = `${path}.sync-tmp`;
-  writeFileSync(tmp, content, "utf-8");
-  renameSync(tmp, path);
+  if (Buffer.isBuffer(content)) {
+    writeFileSync(tmp, content);
+  } else {
+    writeFileSync(tmp, content, "utf-8");
+  }
+  try {
+    renameSync(tmp, path);
+  } catch (err) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // limpeza é best-effort; o erro que importa é o do rename
+    }
+    throw err;
+  }
 }
 
 const STATE_FILE = ".sync-state.json";
@@ -1439,7 +1462,7 @@ export async function syncMemoria(apiBase, casesBase, selfAuthor, deps = {}) {
   appendLog(casesBase, `memoria: ok baixados=${downloaded} uploads=${uploadedCount}`);
 }
 
-// ---------- CMR-161: sync de workdocs do caso (pool comum de .md/.py) ----------
+// ---------- CMR-161: sync de workdocs do caso (pool comum de .md/.py/.docx) ----------
 //
 // Espelha os documentos de trabalho da pasta do caso (pesquisas .md, scripts de
 // geração .py) entre as máquinas do escritório. Pool COMUM: mesmo path em todas,
@@ -1687,6 +1710,14 @@ export async function syncWorkdocs(apiBase, casesBase, selfAuthor, deps = {}) {
       writeAtomic(alvo.path, buf);
       return md5hex(buf);
     } catch (err) {
+      // Arquivo aberto no Word: o rename falha com EBUSY/EPERM. NÃO é erro do
+      // ciclo — o baseline não avança (o `return null` já garante isso) e o
+      // próximo tick tenta de novo. Sem este ramo, o Word veria o arquivo
+      // trocar por baixo ou o log acusaria falha a cada 5 minutos.
+      if (err.code === "EBUSY" || err.code === "EPERM") {
+        appendLog(casesBase, `workdocs ${caso}: ${relDestino} em uso, adiado`);
+        return null;
+      }
       erros++;
       appendLog(casesBase, `workdocs ${caso}: erro baixando ${relOrigem}: ${err.message}`);
       return null;
@@ -2835,7 +2866,7 @@ async function main() {
     appendLog(casesBase, `transcripts: erro inesperado: ${err.message}`);
   }
 
-  // CMR-161: espelha os workdocs (.md/.py) da pasta do caso — pool comum do
+  // CMR-161: espelha os workdocs (.md/.py/.docx) da pasta do caso — pool comum do
   // escritório. Roda POR ÚLTIMO de propósito: é a fase nova e não pode roubar
   // o orçamento de tempo do ciclo (a tarefa do Windows tem ExecutionTimeLimit
   // de 5 min) das fases já estabelecidas. Estado e log PRÓPRIOS

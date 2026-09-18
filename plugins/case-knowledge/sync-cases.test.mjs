@@ -1,8 +1,10 @@
-import { test } from "node:test";
+import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import {
   planActions,
   computeBaseline,
@@ -25,6 +27,7 @@ import {
   buildFeedbackIndex,
   syncMemoria,
   syncWorkdocs,
+  writeAtomic,
   postJson,
   provisionCaseSettings,
   migrateAuthorDirs,
@@ -2498,7 +2501,8 @@ test("syncWorkdocs: nunca sobe briefing, dot-dir, base/ nem *.local.md", async (
     writeFileSync(join(caso, "CLAUDE.md"), "briefing");
     writeFileSync(join(caso, "case.yaml"), "tipo: processo");
     writeFileSync(join(caso, "rascunho.local.md"), "pessoal");
-    writeFileSync(join(caso, "peca.docx"), "binario");
+    writeFileSync(join(caso, "peca.docm"), "binario"); // macro: fora da allowlist
+    writeFileSync(join(caso, "~$peca.docx"), "lock"); // lock do Word
     writeFileSync(join(caso, "base", "autos.md"), "autos");
     writeFileSync(join(caso, "base_classifier", "x.md"), "derivado");
     writeFileSync(join(caso, ".memoria", "pedro-giudice", "mem.md"), "memoria");
@@ -3103,6 +3107,92 @@ test("syncWorkdocs: baseline de caso não processado no tick é carregado adiant
       "apagar aqui viraria bootstrap falso no tick seguinte",
     );
   } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// ---------- .docx no pool: bytes crus e arquivo aberto no Word ----------
+
+test("writeAtomic: grava Buffer não-UTF8 byte a byte", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wa-"));
+  const alvo = join(dir, "bin.docx");
+  const bytes = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0xff, 0xfe, 0x00, 0x80]);
+  writeAtomic(alvo, bytes);
+  assert.deepEqual(readFileSync(alvo), bytes);
+  // String continua gravando como UTF-8.
+  const txt = join(dir, "a.md");
+  writeAtomic(txt, "ação");
+  assert.equal(readFileSync(txt, "utf-8"), "ação");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("syncWorkdocs: arquivo travado no Word adia sem avançar o baseline", async () => {
+  const base = mkdtempSync(join(tmpdir(), "wd-busy-"));
+  mkdirSync(join(base, "caso-a"), { recursive: true });
+  const md5Remoto = md5hex(Buffer.from("versao da VM"));
+  const deps = {
+    getJson: async () => ({ cases: { "caso-a": { "minuta.docx": { md5: md5Remoto } } } }),
+    getBytes: async () => {
+      const err = new Error("resource busy or locked");
+      err.code = "EBUSY";
+      throw err;
+    },
+    postJson: async () => ({ ok: true, written: 0, failed: [] }),
+  };
+  await syncWorkdocs("http://api", base, "ana", deps);
+
+  const estado = JSON.parse(readFileSync(join(base, ".workdocs-state.json"), "utf-8"));
+  assert.equal(estado["caso-a"]?.["minuta.docx"], undefined, "baseline não pode avançar");
+  const log = readFileSync(join(base, ".sync.log"), "utf-8");
+  assert.match(log, /minuta\.docx em uso, adiado/);
+  rmSync(base, { recursive: true, force: true });
+});
+
+test("syncWorkdocs: rename recusado pelo Word (EPERM) adia, preserva o local e não deixa .sync-tmp", async () => {
+  // No Windows a falha real do arquivo aberto no Word vem da GRAVAÇÃO: o
+  // `renameSync` do `writeAtomic` sobre o destino travado. O download em si
+  // funciona. Simula isso trocando o `renameSync` do módulo `node:fs` (as
+  // importações nomeadas do sync-cases.mjs acompanham via
+  // `syncBuiltinESMExports`).
+  const base = mkdtempSync(join(tmpdir(), "wd-eperm-"));
+  const renameOriginal = fs.renameSync;
+  try {
+    const caso = join(base, "caso-a");
+    mkdirSync(caso, { recursive: true });
+    const local = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x01]); // aberto no Word
+    const remoto = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x02, 0xff]); // colega evoluiu
+    writeFileSync(join(caso, "minuta.docx"), local);
+    writeFileSync(join(base, ".workdocs-state.json"), JSON.stringify({ "caso-a": { "minuta.docx": md5hex(local) } }));
+
+    const { deps, bytes } = makeWorkdocsApi({
+      get: { "/workdocs-manifest": { cases: { "caso-a": { "minuta.docx": { md5: md5hex(remoto) } } } } },
+      bytes: { "path=minuta.docx": remoto },
+    });
+
+    mock.method(fs, "renameSync", (de, para) => {
+      if (String(para).endsWith("minuta.docx")) {
+        const err = new Error(`EPERM: operation not permitted, rename '${de}' -> '${para}'`);
+        err.code = "EPERM";
+        throw err;
+      }
+      return renameOriginal(de, para);
+    });
+    syncBuiltinESMExports();
+
+    await syncWorkdocs("http://t/api", base, "ana", deps);
+
+    assert.equal(bytes.length, 1, "o download aconteceu; a falha foi na gravação");
+    assert.deepEqual(readFileSync(join(caso, "minuta.docx")), local, "o arquivo aberto fica intacto");
+    assert.equal(existsSync(join(caso, "minuta.docx.sync-tmp")), false, "o tmp da gravação recusada é removido");
+    const estado = JSON.parse(readFileSync(join(base, ".workdocs-state.json"), "utf-8"));
+    assert.equal(estado["caso-a"]?.["minuta.docx"], md5hex(local), "baseline não pode avançar");
+    const log = readFileSync(join(base, ".sync.log"), "utf-8");
+    assert.match(log, /minuta\.docx em uso, adiado/);
+    assert.doesNotMatch(log, /erro baixando/);
+    assert.doesNotMatch(log, /workdocs: erro/, "arquivo em uso não é erro do ciclo");
+  } finally {
+    mock.restoreAll();
+    syncBuiltinESMExports();
     rmSync(base, { recursive: true, force: true });
   }
 });

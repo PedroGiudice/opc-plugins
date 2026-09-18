@@ -1,7 +1,7 @@
 /**
  * Sync de documentos de trabalho do caso (workdocs) — lógica PURA.
  *
- * Canal que espelha os `.md`/`.py` da pasta do caso entre as máquinas do
+ * Canal que espelha os `.md`/`.py`/`.docx` da pasta do caso entre as máquinas do
  * escritório (pool comum: mesmo path em todas, qualquer um evolui o arquivo do
  * outro). Extensão do trilho CMR-138 (memória sincronizável) — nenhum serviço
  * novo; o storage é a própria pasta do caso na VM.
@@ -15,8 +15,13 @@
 // Allowlist de extensão (sem ponto, comparada em MINÚSCULAS — espelha
 // `WORKDOC_EXTENSIONS` do servidor). O SERVIDOR é a autoridade; o cliente
 // filtra por economia (não pedir/subir o que seria recusado) e por segurança
-// de path.
-const WORKDOC_EXTENSIONS = ["md", "py"];
+// de path. `.docx` entrou em 2026-09-18: a peça editada no Word vira a fonte.
+// `.docm`/`.pdf`/`.xlsx` seguem fora.
+const WORKDOC_EXTENSIONS = ["md", "py", "docx"];
+
+// Lock efêmero que o Word cria enquanto o documento está aberto
+// (`~$minuta.docx`). Espelha `WORKDOC_LOCK_PREFIX` do servidor.
+const WORKDOC_LOCK_PREFIX = "~$";
 
 // Opt-out pessoal: stem terminado em `.local` (`rascunho.local.md`). Espelha
 // `WORKDOC_OPT_OUT_SUFFIX` do servidor.
@@ -150,9 +155,11 @@ function asciiLower(s) {
  * Espelho client-side do `is_workdoc_path` do servidor: decide pelo PATH
  * RELATIVO canônico (separador `/`, sem prefixo do caso).
  *
- * Aceita: `.md`/`.py` (extensão case-insensitive) em qualquer profundidade.
+ * Aceita: `.md`/`.py`/`.docx` (extensão case-insensitive) em qualquer
+ * profundidade.
  * Rejeita: extensão fora da allowlist; stem terminado em `.local`; os 3
- * arquivos de briefing por BASENAME em qualquer profundidade; `_archive/`,
+ * arquivos de briefing por BASENAME em qualquer profundidade; o lock do Word
+ * (`~$*`, por basename); `_archive/`,
  * `base/`, `base_classifier/` e árvores de dependência em QUALQUER segmento de
  * diretório; dotfile/dot-dir em qualquer segmento; cópia de conflito; path
  * absoluto, `..`, segmento vazio, `\`, `:` e caractere de controle.
@@ -171,6 +178,7 @@ export function isWorkdocPath(relPath) {
     if (isExcludedDirName(segs[i])) return false;
   }
   if (BRIEFING_FILES_LOWER.has(lower)) return false;
+  if (name.startsWith(WORKDOC_LOCK_PREFIX)) return false;
   if (lower.includes(CONFLICT_MARKER)) return false;
 
   const dot = lower.lastIndexOf(".");
