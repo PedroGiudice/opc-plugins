@@ -24,13 +24,13 @@ import { requestWithAuth, loginFlow } from "./auth.mjs";
 // O servico stj-vec-search roda SO na VM (extractlab). Default por plataforma:
 // no Windows (maquina cliente), a API publica com Bearer obrigatorio
 // (stj.aidvlabs.com, Cloudflare) — funciona SEM tailnet; na VM/tailnet Linux,
-// o FQDN MagicDNS. Env STJ_VEC_API_BASE e soberana (override tailnet da
+// o loopback (127.0.0.1). Env STJ_VEC_API_BASE e soberana (override tailnet da
 // cmr-002 no $PROFILE segue valendo).
 const API_BASE =
   process.env.STJ_VEC_API_BASE ||
   (process.platform === "win32"
     ? "https://stj.aidvlabs.com/api"
-    : "http://extractlab.cormorant-alpha.ts.net:8421/api");
+    : "http://127.0.0.1:8421/api");
 const REQUEST_TIMEOUT_MS = 60_000;
 const MAX_RETRIES = 3;
 const RETRY_DELAYS = [500, 1500, 3000]; // ms

@@ -28,7 +28,7 @@ import { readCredential } from "../auth.mjs";
  */
 export function defaultMemApiBase(platform = process.platform) {
   if (platform === "win32") return "https://cogmem.aidvlabs.com/api";
-  return "http://100.123.73.128:3940/api";
+  return "http://127.0.0.1:3940/api";
 }
 
 const MEM_API_BASE =

@@ -3,7 +3,7 @@
  * MCP server for legal-knowledge-base vector search.
  *
  * Proxy for the Rust search API (legal-vec-api) on the VM, reachable over the
- * tailnet at 100.123.73.128:8423.
+ * loopback at 127.0.0.1:8423.
  * Tools: search (hybrid + filters), document (by doc_id), recommend (similar articles),
  *        sources (collection stats).
  *
@@ -24,7 +24,7 @@ const API_BASE =
   process.env.LEGAL_VEC_API_BASE ||
   (process.platform === "win32"
     ? "https://legalvec.aidvlabs.com/api"
-    : "http://100.123.73.128:8423/api");
+    : "http://127.0.0.1:8423/api");
 const REQUEST_TIMEOUT_MS = 60_000;
 const MAX_RETRIES = 3;
 const RETRY_DELAYS = [500, 1500, 3000]; // ms

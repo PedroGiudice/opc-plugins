@@ -42,7 +42,7 @@ o conjunto. `search` cruza todos os ativos por padrão e marca cada hit com
 `caso`; as tools de leitura aceitam `caso` (valor do campo do resultado) só
 para casos ativos ou relacionados (`casos_relacionados` do case.yaml). Outro
 nome de caso é recusado: peça ao usuário para adicionar a pasta. Faz proxy para a `case-knowledge-api`
-(`127.0.0.1:8422` na VM; `100.123.73.128:8422` via Tailscale na cmr-002), sobre
+(`127.0.0.1:8422` no servidor; `https://api.aidvlabs.com` nas máquinas cliente), sobre
 as collections `case-{slug}` no Qdrant.
 
 **Orientação do caso:** `metadata` (partes, valores, andamentos), `manifesto`
