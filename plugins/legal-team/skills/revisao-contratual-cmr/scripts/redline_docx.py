@@ -564,6 +564,7 @@ def _cli(argv=None) -> int:
     d = sub.add_parser("texto", help="texto por parágrafo")
     d.add_argument("docx")
     d.add_argument("--modo", choices=["vivo", "aceito", "rejeitado"], default="vivo")
+    d.add_argument("--json", action="store_true", help="lista JSON (tabela = null)")
     args = ap.parse_args(argv)
 
     if args.cmd == "radiografia":
@@ -610,7 +611,11 @@ def _cli(argv=None) -> int:
         print("OK: rejeitar tudo devolve o original" if not div else f"{len(div)} divergência(s)")
         return 0 if not div else 3
     if args.cmd == "texto":
-        for i, t in enumerate(_textos(args.docx, args.modo)):
+        textos = _textos(args.docx, args.modo)
+        if args.json:
+            print(json.dumps(textos, ensure_ascii=False))
+            return 0
+        for i, t in enumerate(textos):
             print(f"#{i} {'[TABELA]' if t is None else t}")
         return 0
     return 1

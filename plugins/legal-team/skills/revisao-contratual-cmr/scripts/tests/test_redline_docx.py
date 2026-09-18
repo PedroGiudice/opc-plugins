@@ -5,6 +5,7 @@ Fixtures construídas com python-docx e XML injetado (marcas de terceiro,
 numeração), para reproduzir o que as minutas reais trazem.
 """
 import copy
+import json
 import sys
 import zipfile
 from pathlib import Path
@@ -259,3 +260,14 @@ def test_cli_aplica_operacoes_de_json(minuta, tmp_path):
     assert verificar(minuta, saida) == []
     est = Redline(saida, autor="x").estatisticas()
     assert est["autores"]["Carlos Magno"] >= 4
+
+
+def test_cli_texto_json_devolve_lista_de_paragrafos(minuta, capsys):
+    from redline_docx import _cli
+
+    assert _cli(["texto", str(minuta), "--modo", "aceito", "--json"]) == 0
+    saida = json.loads(capsys.readouterr().out)
+    assert isinstance(saida, list)
+    # A tabela do fixture entra como null; os parágrafos, como string.
+    assert None in saida
+    assert any(isinstance(t, str) and "CLÁUSULA 1" in t for t in saida)
