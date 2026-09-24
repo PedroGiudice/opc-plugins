@@ -311,9 +311,9 @@ server.tool(
       .describe("Filtrar por peca processual: inicial, contestacao, replica, peticao_diversa, " +
         "embargos_declaracao, agravo, apelacao, recurso_ordinario, contrarrazoes, sentenca, acordao, " +
         "decisao_interlocutoria, despacho, ato_ordinatorio, certidao, mandado, ata_audiencia, " +
-        "procuracao, guia_custas, contrato, documento_pessoal, comprovante, laudo, outros_anexos"),
+        "procuracao, guia_custas, contrato, documento_pessoal, comprovante, laudo, certidao_extrajudicial, outros_anexos"),
     subtipo: z.string().optional()
-      .describe("Refinamento da classe da peca (ex: 'order_form' dentro de contrato). " +
+      .describe("Refinamento da classe da peca (ex: 'order_form' dentro de contrato; 'matricula_imovel', 'registro_civil', 'negativa_debitos' dentro de certidao_extrajudicial). " +
         "Use facet('subtipo') para ver os valores existentes no caso."),
     parte_peticionante: z.enum(["autor", "reu", "terceiro", "mp", "juizo"]).optional()
       .describe("Quem protocolou o documento logico. Vale para QUALQUER classe — " +
