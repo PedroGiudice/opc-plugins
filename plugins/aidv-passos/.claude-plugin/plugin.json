@@ -1,0 +1,7 @@
+{
+  "name": "aidv-passos",
+  "version": "0.1.0",
+  "description": "Render das ferramentas de bastidor (Bash, Read, Write, Edit, Glob, Grep, Agent, Skill) no transcript do Claude Code em frases em português; documento .docx gerado como evento de primeira classe; erro nunca escondido (protótipo AiDV).",
+  "author": { "name": "CMR Advogados" },
+  "types": "./types/index.d.ts"
+}
