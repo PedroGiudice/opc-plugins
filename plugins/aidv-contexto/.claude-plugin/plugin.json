@@ -1,0 +1,7 @@
+{
+  "name": "aidv-contexto",
+  "version": "0.4.1",
+  "description": "Indicador de contexto e de limites de uso da sessão, em português, acima do prompt (protótipo AiDV).",
+  "author": { "name": "CMR Advogados" },
+  "types": "./types/index.d.ts"
+}
