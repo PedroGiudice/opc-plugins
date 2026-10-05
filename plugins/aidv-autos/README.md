@@ -1,9 +1,18 @@
 # aidv-autos
 
-Mod do Claude Code (plugin de hooks de função) que desenha as buscas nos
-autos do caso, feitas pela tool `search` do plugin `case-knowledge`, na
-linguagem do AiDV em vez do JSON cru. Item 2 do roteiro "AiDV dentro do
-Claude" (ver `case-docs/docs/contexto/05102026-mods-claude-code-aidv-contexto.md`).
+Mod do Claude Code (plugin de hooks de função) que desenha as pesquisas
+jurídicas na linguagem do AiDV em vez do JSON cru, nas três fontes:
+
+| Fonte | Tools | Glifo | Lista | Leitura no painel |
+|---|---|---|---|---|
+| Autos do caso | `case-knowledge` `search` | ■ azul (marcador de família por peça) | peça, fls., data, parte, título | "Peça inteira" (`document`) e "Contexto" (`contexto`) |
+| Jurisprudência do STJ | `stj-vec-tools` `search` e `search_formula` | ◈ lavanda | processo, órgão, Min., data, seção | "Inteiro teor" (`document`, acórdão por seção) |
+| Legislação | `legal-vec-tools` `search` | § verde | "CC, art. 206", "Súmula 547 do STJ"... + texto | "Dispositivo inteiro" (`document`) |
+
+Item 2 do roteiro "AiDV dentro do Claude" (ver
+`case-docs/docs/contexto/05102026-mods-claude-code-aidv-contexto.md`).
+Desde a v0.2 (05/10/2026) cobre as três fontes; o nome `aidv-autos` ficou
+pelo id do painel e das chaves de estado (renomear é decisão do empacotamento).
 
 ## O que desenha
 
@@ -15,11 +24,15 @@ Claude" (ver `case-docs/docs/contexto/05102026-mods-claude-code-aidv-contexto.md
   roda: "Buscando nos autos: …". Erro e interrupção têm linha própria.
 - **Bloco de resultado** (`ToolResult`): nunca desenha o JSON. A lista vive
   na linha, porque dentro de um grupo de tools o motor não desenha esse site.
-- **Painel "Autos do caso"** (`Pane`, id `aidv-autos`): buscas da sessão no
-  topo (alternam a selecionada), trechos da busca selecionada com preview
-  limpo e os botões "Peça inteira" e "Contexto", que chamam as tools
-  `document`/`contexto` pelo próprio mod (`$.mcp.call`) e mostram a peça no
-  painel, SEM o modelo no loop e sem gastar contexto. A leitura usa as mesmas
+- **Painel** (`Pane`, id `aidv-autos`, título pela fonte selecionada):
+  pesquisas da sessão no topo (com o glifo da fonte; alternam a selecionada),
+  itens da pesquisa selecionada com preview limpo e os botões de leitura
+  ("Peça inteira"/"Contexto" nos autos, "Inteiro teor" no STJ, "Dispositivo
+  inteiro" na legislação), que chamam as tools `document`/`contexto` do
+  server da fonte pelo próprio mod (`$.mcp.call`) e mostram o texto no
+  painel, SEM o modelo no loop e sem gastar contexto. Julgado sai por seção
+  (acórdão, ementa, relatório, voto, ementa citada); dispositivo sai sem o
+  caminho hierárquico ("Código Civil, PARTE GERAL, ...") que precede o texto. A leitura usa as mesmas
   regras de exibição do app (`lib/leituraContent.ts` do extractor-lab:
   `parseContent`, `reflow`, `splitList`, portadas sem alteração): título em
   negrito, lista em itens, tabela como bloco, nota de rodapé discreta, timbre
@@ -31,6 +44,14 @@ O JSON que o modelo recebe NÃO muda: o mod lê uma cópia do `text` em
 `leitura`).
 
 ## Gotchas medidos no Desktop (05/10/2026)
+
+- Os hooks são registrados em laço sobre a tabela `FONTES`, então o
+  `claude plugin validate` mostra `tool=?` nos matchers (não lê valores
+  dinâmicos). Em runtime o matcher é por valor e funciona; se o
+  empacotamento exigir nomes estáticos no validate, desenrolar o laço.
+- Fontes da base de legislação com nome cru no `doc_id` (`marco_seguros`)
+  são traduzidas em `CODIGOS`; prefixo desconhecido usa o nome do código que
+  vem no próprio texto.
 
 - Em grupo de tools ("Used N tools") só a linha `ToolUse` existe; o site
   `ToolResult` não é desenhado. Qualquer detalhe tem de estar na linha.
