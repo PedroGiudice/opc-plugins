@@ -1,0 +1,7 @@
+{
+  "name": "aidv-autos",
+  "version": "0.1.0",
+  "description": "Render das buscas nos autos (case-knowledge) no transcript do Claude Code: linha mínima dobrada e painel lateral com as peças encontradas (protótipo AiDV).",
+  "author": { "name": "CMR Advogados" },
+  "types": "./types/index.d.ts"
+}

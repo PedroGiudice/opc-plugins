@@ -19,7 +19,7 @@ const COR = {
 
 // Rótulos em português para as categorias que o motor nomeia em inglês.
 const ROTULOS: [RegExp, string, string][] = [
-  [/system prompt/i, 'Instruções', COR.instrucoes],
+  [/system prompt|instructions/i, 'Instruções', COR.instrucoes],
   [/memory/i, 'Memória do caso', COR.memoria],
   [/tool|agent|skill|command/i, 'Ferramentas', COR.ferramentas],
 ]
