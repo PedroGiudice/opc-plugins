@@ -71,6 +71,9 @@ export const SETUP_PLUGINS = [
   "stj-vec-tools",
   "legal-vec-tools",
   "legal-team",
+  // Mods (function hooks, CC >= 2.1.287): UI do AiDV dentro do Claude Code.
+  "aidv-contexto",
+  "aidv-autos",
 ];
 
 /** `<plugin>@<marketplace>` de cada plugin canonico — argumento do `claude plugin install`. */

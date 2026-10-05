@@ -3335,6 +3335,40 @@ test("updatePluginCaches: update falha -> linha de falha, nao lanca, segue os de
   assert.equal(lines[1], "plugin-update: bbb 1.0.0 -> 1.1.0");
 });
 
+test("planPluginUpdates: plugin canonico ausente da maquina -> install (nunca o nao-canonico)", () => {
+  const plan = planPluginUpdates(
+    INSTALLED_RAW,
+    { "legal-team": "0.6.1", "case-knowledge": "0.20.0", "aidv-contexto": "0.4.1", "aidv-autos": "0.2.1", "experimental": "0.0.1" },
+    "opc-plugins",
+    ["case-knowledge", "aidv-contexto", "aidv-autos"],
+  );
+  assert.deepEqual(plan, [
+    { name: "aidv-autos", from: null, to: "0.2.1", install: true },
+    { name: "aidv-contexto", from: null, to: "0.4.1", install: true },
+  ]);
+});
+
+test("planPluginUpdates: canonico fora do catalogo do clone -> nao instala", () => {
+  const plan = planPluginUpdates(INSTALLED_RAW, { "legal-team": "0.6.1" }, "opc-plugins", ["aidv-contexto"]);
+  assert.deepEqual(plan, []);
+});
+
+test("updatePluginCaches: canonico ausente -> roda claude plugin install e loga a versao", () => {
+  const { deps, calls } = fakePluginEnv({
+    catalog: { "legal-team": "0.6.1", "case-knowledge": "0.20.0", "aidv-contexto": "0.4.1" },
+    installedRaw: INSTALLED_RAW,
+    spawnResults: {
+      version: { status: 0, stdout: "2.1.289\n", stderr: "" },
+      "aidv-contexto@opc-plugins": { status: 0, stdout: "installed\n", stderr: "" },
+    },
+  });
+  deps.canonical = ["case-knowledge", "aidv-contexto"];
+  const lines = updatePluginCaches("/fake/clone/plugins/case-knowledge", deps);
+  assert.deepEqual(lines, ["plugin-install: aidv-contexto 0.4.1"]);
+  const install = calls.find((c) => c.args[0] === "plugin");
+  assert.deepEqual(install.args, ["plugin", "install", "aidv-contexto@opc-plugins"]);
+});
+
 test("updatePluginCaches: claude CLI ausente em todos os candidatos -> linha de pulo", () => {
   const { deps } = fakePluginEnv({
     catalog: { "legal-team": "0.7.1" },

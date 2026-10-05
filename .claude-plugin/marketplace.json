@@ -50,6 +50,24 @@
       },
       "source": "./plugins/case-knowledge",
       "category": "productivity"
+    },
+    {
+      "name": "aidv-contexto",
+      "description": "Mod (function hooks): indicador de contexto e de limites de uso da sessao, em portugues, acima do prompt. Exige Claude Code >= 2.1.287.",
+      "author": {
+        "name": "opc"
+      },
+      "source": "./plugins/aidv-contexto",
+      "category": "productivity"
+    },
+    {
+      "name": "aidv-autos",
+      "description": "Mod (function hooks): pesquisas nos autos, jurisprudencia do STJ e legislacao desenhadas na linguagem do AiDV (linha dobrada + painel com leitura), em vez do JSON cru. Exige Claude Code >= 2.1.287.",
+      "author": {
+        "name": "opc"
+      },
+      "source": "./plugins/aidv-autos",
+      "category": "productivity"
     }
   ]
 }

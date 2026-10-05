@@ -24,7 +24,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { requestWithAuth, readCredential, decodeJwtAuthorDir } from "./auth.mjs";
 import { defaultMemApiBase } from "./memoria.mjs";
-import { isSafeScaffoldingPath } from "./setup.mjs";
+import { isSafeScaffoldingPath, SETUP_PLUGINS } from "./setup.mjs";
 import {
   isWorkdocPath,
   isSafeRelPath,
@@ -2603,7 +2603,7 @@ const PLUGIN_NAME_SAFE = /^[a-z0-9][a-z0-9_-]*$/;
  * So promove o que JA esta instalado — nunca instala novo nem remove.
  * Pura; raw invalido ou vazio -> [].
  */
-export function planPluginUpdates(installedRaw, catalogVersions, marketplaceName = "opc-plugins") {
+export function planPluginUpdates(installedRaw, catalogVersions, marketplaceName = "opc-plugins", canonical = []) {
   if (!installedRaw) return [];
   let installed;
   try {
@@ -2613,9 +2613,9 @@ export function planPluginUpdates(installedRaw, catalogVersions, marketplaceName
   }
   const plugins = installed && typeof installed === "object" ? installed.plugins : null;
   if (!plugins || typeof plugins !== "object") return [];
+  const suffix = `@${marketplaceName}`;
   const updates = [];
   for (const [key, entries] of Object.entries(plugins)) {
-    const suffix = `@${marketplaceName}`;
     if (!key.endsWith(suffix)) continue;
     const name = key.slice(0, -suffix.length);
     if (!PLUGIN_NAME_SAFE.test(name)) continue;
@@ -2625,6 +2625,17 @@ export function planPluginUpdates(installedRaw, catalogVersions, marketplaceName
     const from = entries[0] && entries[0].version;
     if (!from || entries.every((e) => e && e.version === to)) continue;
     updates.push({ name, from, to });
+  }
+  // Plugin da lista CANONICA (setup.mjs) que o catalogo do clone traz e a
+  // maquina nao tem: instala. E o que faz um plugin novo do pacote juridico
+  // (ex.: os mods aidv-*) chegar a uma maquina ja onboardada sem acao do
+  // usuario. Nunca instala o que nao esta na lista canonica.
+  for (const name of canonical) {
+    if (!PLUGIN_NAME_SAFE.test(name)) continue;
+    const to = catalogVersions[name];
+    if (!to) continue;
+    if (`${name}${suffix}` in plugins) continue;
+    updates.push({ name, from: null, to, install: true });
   }
   updates.sort((a, b) => a.name.localeCompare(b.name));
   return updates;
@@ -2673,7 +2684,8 @@ export function updatePluginCaches(scriptDir, deps = {}) {
   } catch {
     return [];
   }
-  const plan = planPluginUpdates(installedRaw, catalogVersions);
+  const canonical = deps.canonical || SETUP_PLUGINS;
+  const plan = planPluginUpdates(installedRaw, catalogVersions, "opc-plugins", canonical);
   if (plan.length === 0) return [];
 
   // Resolve o CLI uma vez, so quando ha trabalho. No Windows a scheduled
@@ -2692,8 +2704,9 @@ export function updatePluginCaches(scriptDir, deps = {}) {
   // Sequencial de proposito: cada update reescreve installed_plugins.json;
   // paralelo corromperia o JSON e disputaria o cache npm.
   const lines = [];
-  for (const { name, from, to } of plan) {
-    const r = spawn(cli, ["plugin", "update", `${name}@opc-plugins`], {
+  for (const { name, from, to, install } of plan) {
+    const verbo = install ? "install" : "update";
+    const r = spawn(cli, ["plugin", verbo, `${name}@opc-plugins`], {
       encoding: "utf-8",
       timeout: 180_000,
     });
@@ -2701,10 +2714,10 @@ export function updatePluginCaches(scriptDir, deps = {}) {
       const motivo = r.error
         ? r.error.message
         : String(r.stderr || r.stdout || "").trim().split("\n")[0] || `exit ${r.status}`;
-      lines.push(`plugin-update: ${name} falhou (${motivo})`);
+      lines.push(`plugin-${verbo}: ${name} falhou (${motivo})`);
       continue;
     }
-    lines.push(`plugin-update: ${name} ${from} -> ${to}`);
+    lines.push(install ? `plugin-install: ${name} ${to}` : `plugin-update: ${name} ${from} -> ${to}`);
   }
   return lines;
 }
