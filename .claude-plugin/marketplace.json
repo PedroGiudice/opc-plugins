@@ -68,6 +68,15 @@
       },
       "source": "./plugins/aidv-autos",
       "category": "productivity"
+    },
+    {
+      "name": "aidv-passos",
+      "description": "Mod (function hooks): as ferramentas de bastidor (Bash, leitura/escrita de arquivos, buscas, subagentes, ToolSearch, web) e as tools juridicas fora da busca viram uma frase em portugues no transcript; .docx gerado como evento; erro nunca escondido. Exige Claude Code >= 2.1.287.",
+      "author": {
+        "name": "opc"
+      },
+      "source": "./plugins/aidv-passos",
+      "category": "productivity"
     }
   ]
 }
