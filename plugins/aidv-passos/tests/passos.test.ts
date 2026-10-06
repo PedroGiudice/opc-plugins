@@ -152,7 +152,7 @@ for (const surface of SURFACES) {
       },
     })
     const t = await textos(ui)
-    expect(t).toContain('3 passos de bastidor')
+    expect(t).toContain('3 operações')
     expect(t).toContain('2 leituras, 1 documento')
     await ui.press({ key: 'grupo-g1' })
   })
@@ -194,3 +194,27 @@ test('prompt.compose acrescenta a seção das descrições em português', async
   expect(secao?.text).toContain('português do Brasil')
   expect(r.sections[0]?.id).toBe('core')
 })
+
+for (const surface of SURFACES) {
+  test(`${surface}: tool jurídica leva o glifo e a cor da fonte (§ verde da legislação)`, async $ => {
+    const ui = await $.ui.mount({
+      plugin: PLUGIN,
+      surface,
+      component: 'ToolUse',
+      props: { ...base, tool_use_id: 'c1', tool: 'mcp__plugin_legal-vec-tools_legal-vec-tools__sources', input: {}, output: '{}' },
+    })
+    const glifo = await ui.find({ type: 'Text', text: '§' })
+    expect(glifo?.props.color).toBe('#22603a')
+  })
+
+  test(`${surface}: comando de bastidor leva a cor da categoria`, async $ => {
+    const ui = await $.ui.mount({
+      plugin: PLUGIN,
+      surface,
+      component: 'ToolUse',
+      props: { ...base, tool_use_id: 'c2', tool: 'Bash', input: { command: 'ls', description: 'Listar' }, output: { stdout: '', stderr: '' } },
+    })
+    const glifo = await ui.find({ type: 'Text', text: '›' })
+    expect(glifo?.props.color).toBe('#8a4a0b')
+  })
+}

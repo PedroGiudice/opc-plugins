@@ -22,8 +22,15 @@ const SECAO_PROMPT = {
   ].join(' '),
 } as const
 
+// Paleta da identidade AiDV, a mesma do aidv-autos (7 tons do preset claro).
 const COR_DANGER = '#a3321f'
-const COR_DOC = '#1f4f86'
+const COR_INFO = '#1f4f86'
+const COR_LAVENDER = '#5b3fa6'
+const COR_OK = '#22603a'
+const COR_WARN = '#8a4a0b'
+const COR_PEACH = '#9a4312'
+const COR_NEUTRAL = '#8a857d'
+const COR_DOC = COR_INFO
 const MAX_CAUDA = 12
 
 const aberto = atom({ plugin: 'aidv-passos', key: 'aberto' } as const, {})
@@ -136,12 +143,37 @@ function nomeDoRoteiro(skill: string): string {
 
 type Docx = { nome: string; caminho: string; aoLado: boolean }
 
+type FonteJuridica = 'autos' | 'stj' | 'lei'
+
 type Passo = {
   feito: string
   rodando: string
   tecnico: string[]
   docx: Docx | null
   categoria: Categoria
+  fonte: FonteJuridica | null
+}
+
+// Glifo e cor da linha: fonte jurídica herda o vocabulário do aidv-autos
+// (■ autos, ◈ STJ, § legislação); bastidor tem cor por categoria.
+function marcaDe(p: Passo): { glifo: string; cor: string } {
+  if (p.fonte === 'autos') return { glifo: '■', cor: COR_INFO }
+  if (p.fonte === 'stj') return { glifo: '◈', cor: COR_LAVENDER }
+  if (p.fonte === 'lei') return { glifo: '§', cor: COR_OK }
+  switch (p.categoria) {
+    case 'documentos':
+      return { glifo: '■', cor: COR_DOC }
+    case 'escritas':
+      return { glifo: '›', cor: COR_PEACH }
+    case 'comandos':
+      return { glifo: '›', cor: COR_WARN }
+    case 'tarefas delegadas':
+      return { glifo: '›', cor: COR_LAVENDER }
+    case 'pesquisas':
+      return { glifo: '›', cor: COR_OK }
+    default:
+      return { glifo: '›', cor: COR_NEUTRAL }
+  }
 }
 
 type Categoria =
@@ -246,7 +278,18 @@ function inputCompacto(input: unknown): string[] {
   return pares.length ? [corta(pares.join(' · '), 300)] : []
 }
 
+function fonteDe(tool: string): FonteJuridica | null {
+  if (tool.startsWith(CK)) return 'autos'
+  if (tool.startsWith(STJ)) return 'stj'
+  if (tool.startsWith(LEI)) return 'lei'
+  return null
+}
+
 function passoDe(tool: string, input: unknown, output: unknown): Passo {
+  return { ...passoBase(tool, input, output), fonte: fonteDe(tool) }
+}
+
+function passoBase(tool: string, input: unknown, output: unknown): Omit<Passo, 'fonte'> {
   const cmd = campo(input, 'command')
   switch (tool) {
     case 'Bash': {
@@ -456,11 +499,12 @@ export const register: Register = on => {
       const id = e.props.tool_use_id
       const passo = passoDe(e.props.tool, e.props.input, e.props.output)
       const largura = Math.max(40, (e.viewport?.columns ?? 100) - 12)
+      const marca = marcaDe(passo)
 
       if (e.props.isRunning) {
         return (
           <Box columnGap={1}>
-            <Text dimColor>›</Text>
+            <Text color={marca.cor}>{marca.glifo}</Text>
             <Text>{corta(passo.rodando, largura)}</Text>
           </Box>
         )
@@ -469,7 +513,7 @@ export const register: Register = on => {
       if (e.props.isInterrupted) {
         return (
           <Box columnGap={1}>
-            <Text dimColor>›</Text>
+            <Text dimColor>{marca.glifo}</Text>
             <Text dimColor>Interrompido: {corta(passo.feito, largura - 14)}</Text>
           </Box>
         )
@@ -497,7 +541,7 @@ export const register: Register = on => {
       } else if (passo.docx) {
         linha = (
           <Box columnGap={1}>
-            <Text color={COR_DOC}>■</Text>
+            <Text color={marca.cor}>{marca.glifo}</Text>
             <Text bold>{corta(passo.feito, largura - 4)}</Text>
             <Text dimColor>{corta(passo.docx.caminho, Math.max(16, largura - passo.feito.length - 6))}</Text>
             {botao}
@@ -506,7 +550,7 @@ export const register: Register = on => {
       } else {
         linha = (
           <Box columnGap={1}>
-            <Text dimColor>›</Text>
+            <Text color={marca.cor}>{marca.glifo}</Text>
             <Text>{corta(passo.feito, largura)}</Text>
             {botao}
           </Box>
@@ -543,7 +587,7 @@ export const register: Register = on => {
     })
   }
 
-  // Grupo dobrado: "N passos de bastidor: 3 leituras, 1 documento, 2 comandos".
+  // Grupo dobrado (só onde o host dobra): "N operações: 3 leituras, 1 documento, 2 comandos".
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const calls = e.props.calls
@@ -559,13 +603,13 @@ export const register: Register = on => {
       <Box columnGap={1}>
         <Text dimColor>›</Text>
         <Text>
-          {plural(calls.length, 'passo de bastidor', 'passos de bastidor')}
+          {plural(calls.length, 'operação', 'operações')}
           {emCurso ? ' (em andamento)' : ''}:
         </Text>
         <Text dimColor>{resumoDoGrupo(calls)}</Text>
         {falhas > 0 ? <Text color={COR_DANGER}>{plural(falhas, 'falha', 'falhas')}</Text> : null}
         <Button key={`grupo-${chave}`} plain dimColor onPress={() => update($, grupos, g => ({ ...g, [chave]: true }))}>
-          Mostrar passos
+          Mostrar
         </Button>
       </Box>
     )
