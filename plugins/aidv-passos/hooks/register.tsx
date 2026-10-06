@@ -586,14 +586,14 @@ export const register: Register = on => {
     })
   }
 
-  // Cabeçalho do grupo enquanto o host o mostra dobrado/vivo: só informa.
-  // NUNCA reescrever `isExpanded` por botão: no Desktop o grupo reescrito
-  // desenha vazio (as linhas somem) — medido em 06/10/2026. Grupo já
-  // expandido fica com o desenho nativo.
+  // Cabeçalho do grupo dobrado, SÓ no terminal (ali a árvore substitui a linha
+  // de contagem). No Desktop o cabeçalho nativo é desenhado SEMPRE e a árvore
+  // própria entra como linha extra, duplicada (medido 06/10/2026); e reescrever
+  // `isExpanded` por botão apaga as linhas. Lá o grupo fica inteiro nativo.
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
     const { Box, Text } = $.ui.resolve(e)
     const calls = e.props.calls
-    if (calls.length === 0 || e.props.isExpanded) return next(e)
+    if (e.surface !== 'terminal' || calls.length === 0 || e.props.isExpanded) return next(e)
 
     const falhas = calls.filter(c => c.isErrored).length
     const emCurso = e.props.isActive && calls.some(c => c.isRunning)

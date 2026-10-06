@@ -26,11 +26,12 @@ Estados: em curso (gerúndio, sem botão); interrompido (apagado); erro
 trecho antigo/novo, input compacto) e a cauda da saída (12 linhas). O bloco
 `ToolResult` é desenhado vazio: o conteúdo técnico vive em "Detalhes".
 
-Grupo: enquanto o host o mostra dobrado ou vivo, o cabeçalho vira
-"N operações: 3 leituras, 1 documento, 2 comandos", SEM botão. Grupo já
-expandido fica com o desenho nativo. Nunca reescrever `isExpanded` por botão:
-no Desktop o grupo reescrito desenha vazio e as linhas somem (medido
-06/10/2026, v0.1.0 tinha "Mostrar" e foi removido na 0.1.1).
+Grupo: SÓ no terminal o cabeçalho dobrado vira "N operações: 3 leituras,
+1 documento, 2 comandos" (sem botão). No Desktop o grupo fica inteiro
+nativo: lá o cabeçalho nativo é desenhado sempre e a árvore própria entrava
+como linha extra duplicada (0.1.1), e reescrever `isExpanded` por botão
+apagava as linhas (0.1.0). Medido em 06/10/2026; as linhas internas seguem
+humanizadas em qualquer superfície.
 
 `prompt.compose` acrescenta uma seção de sessão (`aidv-passos:descricoes`)
 pedindo ao modelo a `description` do Bash/Agent em português, para leigo,

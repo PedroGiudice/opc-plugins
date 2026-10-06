@@ -1,5 +1,8 @@
 import { expect, test } from 'claude-code/testing'
 import type { Mounted } from 'claude-code/testing'
+import type { RenderElement } from 'claude-code'
+
+declare const h: (type: unknown, props: unknown, ...children: unknown[]) => RenderElement
 
 const PLUGIN = 'aidv-passos'
 const SURFACES = ['terminal', 'desktop'] as const
@@ -129,7 +132,12 @@ for (const surface of SURFACES) {
     expect(await ui.find({ key: 'det-t7' })).toBeUndefined()
   })
 
-  test(`${surface}: grupo dobrado conta por categoria, sem botão de reescrita`, async $ => {
+  test(`${surface}: grupo dobrado — cabeçalho próprio só no terminal; no desktop fica nativo`, async ($, on) => {
+    // O que está abaixo do mod é o engine: no teste, este hook faz as vezes dele.
+    on('ui.render', { component: 'ToolGroup' }, ($, e) => {
+      const { Text } = $.ui.resolve(e)
+      return h(Text, null, 'cabeçalho nativo')
+    })
     const call = (id: string, tool: string, input: unknown, output?: unknown) => ({
       ...base,
       tool_use_id: id,
@@ -152,8 +160,13 @@ for (const surface of SURFACES) {
       },
     })
     const t = await textos(ui)
-    expect(t).toContain('3 operações')
-    expect(t).toContain('2 leituras, 1 documento')
+    if (surface === 'terminal') {
+      expect(t).toContain('3 operações')
+      expect(t).toContain('2 leituras, 1 documento')
+    } else {
+      expect(t).toContain('cabeçalho nativo')
+      expect(t).not.toContain('operações')
+    }
     expect(await ui.findAll({ type: 'Button' })).toHaveLength(0)
   })
 }
