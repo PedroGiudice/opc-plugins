@@ -7,7 +7,20 @@ import type { Register, RenderElement } from 'claude-code'
 // recebe NÃO muda: o mod só desenha, lendo `props.input` e `props.output`.
 // ---------------------------------------------------------------------------
 
-const TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep', 'Agent', 'Skill'] as const
+const TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep', 'Agent', 'Skill', 'ToolSearch', 'WebFetch', 'WebSearch'] as const
+
+// Seção acrescentada ao system prompt: a frase do Bash vem do `description`
+// que o modelo escreve; sem isto ele tende a escrevê-la em inglês.
+const SECAO_PROMPT = {
+  id: 'aidv-passos:descricoes',
+  scope: 'session',
+  text: [
+    'Ao chamar as ferramentas Bash e Agent, escreva o campo `description` em português do Brasil,',
+    'numa frase curta que um advogado sem formação técnica entenda, dizendo o que a operação faz',
+    'pelo trabalho dele (ex.: "Gerar a contestação em .docx", "Listar os documentos do caso").',
+    'Nunca em inglês e nunca repetindo o comando. Essa frase é mostrada ao usuário no lugar do comando.',
+  ].join(' '),
+} as const
 
 const COR_DANGER = '#a3321f'
 const COR_DOC = '#1f4f86'
@@ -56,6 +69,8 @@ function textoDaSaida(output: unknown): string {
   for (const k of ['stdout', 'stderr', 'text', 'content', 'message', 'error']) {
     const v = o[k]
     if (typeof v === 'string' && v.trim()) partes.push(v)
+    // Resultado MCP: `content: [{ type: 'text', text }]`.
+    if (Array.isArray(v)) for (const item of v) if (typeof obj(item).text === 'string') partes.push(obj(item).text as string)
   }
   if (partes.length) return partes.join('\n')
   const file = obj(o.file)
@@ -154,6 +169,81 @@ function docxDaSaida(output: unknown): Docx | null {
   const salvo = /^\s*Salvo:\s*(.+?\.docx)\s*$/im.exec(texto)?.[1]
   if (salvo) return { nome: basename(salvo), caminho: salvo, aoLado: false }
   return null
+}
+
+// ---------------------------------------------------------------------------
+// Tools jurídicas que o aidv-autos NÃO desenha (ele cobre só `search`): aqui
+// ganham uma frase cada. Nome da tool = server na grafia do Claude Code.
+// ---------------------------------------------------------------------------
+
+const CK = 'mcp__plugin_case-knowledge_case-knowledge__'
+const STJ = 'mcp__plugin_stj-vec-tools_stj-vec-tools__'
+const LEI = 'mcp__plugin_legal-vec-tools_legal-vec-tools__'
+
+type Frase = { feito: string; rodando: string; categoria: Categoria }
+type FraseDe = (input: unknown) => Frase
+
+function texto(input: unknown, ...nomes: string[]): string | null {
+  for (const n of nomes) {
+    const v = campo(input, n)
+    if (v) return v
+  }
+  return null
+}
+
+function aspas(q: string | null, max = 90): string {
+  return q ? `: «${corta(q, max)}»` : ''
+}
+
+function fixa(feito: string, rodando: string, categoria: Categoria): FraseDe {
+  return () => ({ feito, rodando, categoria })
+}
+
+function comQuery(feito: string, rodando: string, categoria: Categoria): FraseDe {
+  return input => {
+    const q = texto(input, 'query', 'q', 'texto', 'pergunta', 'tema')
+    return { feito: `${feito}${aspas(q)}`, rodando: `${rodando}${aspas(q)}…`, categoria }
+  }
+}
+
+function comObjeto(feito: string, rodando: string, categoria: Categoria, ...nomes: string[]): FraseDe {
+  return input => {
+    const o = texto(input, ...nomes)
+    return { feito: o ? `${feito}: ${corta(o, 90)}` : feito, rodando: o ? `${rodando}: ${corta(o, 90)}…` : `${rodando}…`, categoria }
+  }
+}
+
+const JURIDICAS: Record<string, FraseDe> = {
+  [`${CK}memoria_search`]: comQuery('Consultou a memória do caso', 'Consultando a memória do caso', 'pesquisas'),
+  [`${CK}metadata`]: fixa('Leu a ficha do caso', 'Lendo a ficha do caso…', 'leituras'),
+  [`${CK}manifesto`]: fixa('Leu o índice dos autos', 'Lendo o índice dos autos…', 'leituras'),
+  [`${CK}stats`]: fixa('Contou as peças dos autos', 'Contando as peças dos autos…', 'leituras'),
+  [`${CK}info`]: fixa('Conferiu qual é o caso ativo', 'Conferindo o caso ativo…', 'leituras'),
+  [`${CK}list_cases`]: fixa('Listou os casos', 'Listando os casos…', 'leituras'),
+  [`${CK}document`]: comObjeto('Leu a peça inteira', 'Lendo a peça inteira', 'leituras', 'segmento', 'documento', 'segmento_id'),
+  [`${CK}contexto`]: comObjeto('Leu o contexto de um trecho', 'Lendo o contexto de um trecho', 'leituras', 'documento'),
+  [`${CK}facet`]: comObjeto('Mapeou os valores de', 'Mapeando os valores de', 'leituras', 'field', 'campo'),
+  [`${CK}reconstruir`]: comQuery('Reconstruiu os autos sobre', 'Reconstruindo os autos sobre', 'leituras'),
+  [`${CK}buscar_cronologico`]: comQuery('Pesquisou nos autos em ordem cronológica', 'Pesquisando nos autos em ordem cronológica', 'pesquisas'),
+  [`${CK}buscar_diversificado`]: comQuery('Pesquisou nos autos por documento', 'Pesquisando nos autos por documento', 'pesquisas'),
+  [`${CK}buscar_interseccao`]: comQuery('Pesquisou nos autos dois temas juntos', 'Pesquisando nos autos dois temas juntos', 'pesquisas'),
+  [`${CK}comparar`]: fixa('Comparou peças dos autos', 'Comparando peças dos autos…', 'leituras'),
+  [`${CK}cross_ref`]: comObjeto('Procurou onde os autos citam', 'Procurando onde os autos citam', 'pesquisas', 'valor', 'item', 'query'),
+  [`${CK}discover`]: comQuery('Explorou os autos', 'Explorando os autos', 'pesquisas'),
+  [`${CK}recommend`]: fixa('Buscou trechos parecidos nos autos', 'Buscando trechos parecidos nos autos…', 'pesquisas'),
+  [`${STJ}document`]: comObjeto('Leu o inteiro teor', 'Lendo o inteiro teor', 'leituras', 'doc_id', 'processo'),
+  [`${STJ}filters`]: fixa('Listou os filtros do STJ', 'Listando os filtros do STJ…', 'leituras'),
+  [`${LEI}document`]: comObjeto('Leu o dispositivo', 'Lendo o dispositivo', 'leituras', 'doc_id'),
+  [`${LEI}sources`]: fixa('Listou as fontes da legislação', 'Listando as fontes da legislação…', 'leituras'),
+  [`${LEI}recommend`]: fixa('Buscou dispositivos parecidos', 'Buscando dispositivos parecidos…', 'pesquisas'),
+}
+
+function inputCompacto(input: unknown): string[] {
+  const o = obj(input)
+  const pares = Object.entries(o)
+    .filter(([k]) => k !== 'tool' && k !== 'tool_use_id')
+    .map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`)
+  return pares.length ? [corta(pares.join(' · '), 300)] : []
 }
 
 function passoDe(tool: string, input: unknown, output: unknown): Passo {
@@ -264,14 +354,49 @@ function passoDe(tool: string, input: unknown, output: unknown): Passo {
         categoria: 'roteiros',
       }
     }
-    default:
+    case 'ToolSearch':
+      return {
+        feito: 'Carregou ferramentas',
+        rodando: 'Carregando ferramentas…',
+        tecnico: inputCompacto(input),
+        docx: null,
+        categoria: 'outros',
+      }
+    case 'WebFetch': {
+      const url = campo(input, 'url') ?? ''
+      const host = url.replace(/^https?:\/\//, '').split('/')[0] ?? url
+      return {
+        feito: `Consultou a página: ${corta(host, 60)}`,
+        rodando: `Consultando a página: ${corta(host, 60)}…`,
+        tecnico: [url],
+        docx: null,
+        categoria: 'pesquisas',
+      }
+    }
+    case 'WebSearch': {
+      const q = campo(input, 'query') ?? ''
+      return {
+        feito: `Pesquisou na internet${aspas(q)}`,
+        rodando: `Pesquisando na internet${aspas(q)}…`,
+        tecnico: inputCompacto(input),
+        docx: null,
+        categoria: 'pesquisas',
+      }
+    }
+    default: {
+      const juridica = JURIDICAS[tool]
+      if (juridica) {
+        const f = juridica(input)
+        return { ...f, tecnico: inputCompacto(input), docx: null }
+      }
       return {
         feito: `Usou ${tool}`,
         rodando: `Usando ${tool}…`,
-        tecnico: [],
+        tecnico: inputCompacto(input),
         docx: null,
         categoria: PESQUISAS.has(tool) ? 'pesquisas' : 'outros',
       }
+    }
   }
 }
 
@@ -319,7 +444,13 @@ function resumoDoGrupo(calls: ReadonlyArray<{ tool: string; input: unknown; outp
 // ---------------------------------------------------------------------------
 
 export const register: Register = on => {
-  for (const TOOL of TOOLS) {
+  // A descrição do Bash/Agent é a frase da linha: pede ao modelo que a escreva em português.
+  on('prompt.compose', async ($, e, next) => {
+    const r = await next(e)
+    return { sections: [...r.sections, SECAO_PROMPT] }
+  })
+
+  for (const TOOL of [...TOOLS, ...Object.keys(JURIDICAS)]) {
     on('ui.render', { component: 'ToolUse', props: { tool: TOOL } }, async ($, e) => {
       const { Box, Text, Button } = $.ui.resolve(e)
       const id = e.props.tool_use_id

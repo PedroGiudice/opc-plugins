@@ -157,3 +157,40 @@ for (const surface of SURFACES) {
     await ui.press({ key: 'grupo-g1' })
   })
 }
+
+for (const surface of SURFACES) {
+  test(`${surface}: tool jurídica fora da busca ganha frase própria`, async $ => {
+    const ui = await $.ui.mount({
+      plugin: PLUGIN,
+      surface,
+      component: 'ToolUse',
+      props: {
+        ...base,
+        tool_use_id: 'm1',
+        tool: 'mcp__plugin_case-knowledge_case-knowledge__memoria_search',
+        input: { query: 'notificação do Francisco' },
+        output: { content: [{ type: 'text', text: '{"results":[]}' }] },
+      },
+    })
+    expect(await textos(ui)).toContain('Consultou a memória do caso: «notificação do Francisco»')
+  })
+
+  test(`${surface}: ToolSearch vira "Carregou ferramentas"`, async $ => {
+    const ui = await $.ui.mount({
+      plugin: PLUGIN,
+      surface,
+      component: 'ToolUse',
+      props: { ...base, tool_use_id: 'm2', tool: 'ToolSearch', input: { query: 'select:WebFetch' }, output: 'ok' },
+    })
+    expect(await textos(ui)).toContain('Carregou ferramentas')
+  })
+}
+
+test('prompt.compose acrescenta a seção das descrições em português', async ($, on) => {
+  on('prompt.compose', () => ({ sections: [{ id: 'core', text: 'base', scope: 'shared' as const }] }))
+  const r = await $.prompt.compose({ model: 'claude-fable-5-1', promptModel: 'claude-fable-5-1', surfaces: ['desktop'], tools: ['Bash'], outputStyle: null, traits: [] })
+  const secao = r.sections.find(s => s.id === 'aidv-passos:descricoes')
+  expect(secao?.scope).toBe('session')
+  expect(secao?.text).toContain('português do Brasil')
+  expect(r.sections[0]?.id).toBe('core')
+})
