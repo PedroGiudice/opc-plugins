@@ -34,7 +34,6 @@ const COR_DOC = COR_INFO
 const MAX_CAUDA = 12
 
 const aberto = atom({ plugin: 'aidv-passos', key: 'aberto' } as const, {})
-const grupos = atom({ plugin: 'aidv-passos', key: 'grupos' } as const, {})
 
 // ---------------------------------------------------------------------------
 // Utilitários sem Node: o módulo roda num ambiente próprio.
@@ -587,15 +586,14 @@ export const register: Register = on => {
     })
   }
 
-  // Grupo dobrado (só onde o host dobra): "N operações: 3 leituras, 1 documento, 2 comandos".
+  // Cabeçalho do grupo enquanto o host o mostra dobrado/vivo: só informa.
+  // NUNCA reescrever `isExpanded` por botão: no Desktop o grupo reescrito
+  // desenha vazio (as linhas somem) — medido em 06/10/2026. Grupo já
+  // expandido fica com o desenho nativo.
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const { Box, Text } = $.ui.resolve(e)
     const calls = e.props.calls
-    const primeiro = calls[0]
-    if (!primeiro || e.props.isExpanded) return next(e)
-    const chave = primeiro.tool_use_id ?? `g-${calls.length}`
-    const abertos = await read($, grupos)
-    if (abertos[chave] === true) return next({ ...e, props: { ...e.props, isExpanded: true } })
+    if (calls.length === 0 || e.props.isExpanded) return next(e)
 
     const falhas = calls.filter(c => c.isErrored).length
     const emCurso = e.props.isActive && calls.some(c => c.isRunning)
@@ -608,9 +606,6 @@ export const register: Register = on => {
         </Text>
         <Text dimColor>{resumoDoGrupo(calls)}</Text>
         {falhas > 0 ? <Text color={COR_DANGER}>{plural(falhas, 'falha', 'falhas')}</Text> : null}
-        <Button key={`grupo-${chave}`} plain dimColor onPress={() => update($, grupos, g => ({ ...g, [chave]: true }))}>
-          Mostrar
-        </Button>
       </Box>
     )
   })

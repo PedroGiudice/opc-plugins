@@ -129,7 +129,7 @@ for (const surface of SURFACES) {
     expect(await ui.find({ key: 'det-t7' })).toBeUndefined()
   })
 
-  test(`${surface}: grupo dobrado conta por categoria e abre a pedido`, async $ => {
+  test(`${surface}: grupo dobrado conta por categoria, sem botão de reescrita`, async $ => {
     const call = (id: string, tool: string, input: unknown, output?: unknown) => ({
       ...base,
       tool_use_id: id,
@@ -154,7 +154,7 @@ for (const surface of SURFACES) {
     const t = await textos(ui)
     expect(t).toContain('3 operações')
     expect(t).toContain('2 leituras, 1 documento')
-    await ui.press({ key: 'grupo-g1' })
+    expect(await ui.findAll({ type: 'Button' })).toHaveLength(0)
   })
 }
 
