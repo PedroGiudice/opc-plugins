@@ -11,10 +11,17 @@ import type { Busca, Fonte, FonteLeitura, Leitura, Trecho } from '../types'
 const PANE = 'aidv-autos'
 const MAX_BUSCAS = 15
 
+// Nomes literais: o matcher de `tool.call` não aceita `string` solto.
+type ToolDeBusca =
+  | 'mcp__plugin_case-knowledge_case-knowledge__search'
+  | 'mcp__plugin_stj-vec-tools_stj-vec-tools__search'
+  | 'mcp__plugin_stj-vec-tools_stj-vec-tools__search_formula'
+  | 'mcp__plugin_legal-vec-tools_legal-vec-tools__search'
+
 type Meta = {
   fonte: Fonte
   server: string
-  tools: string[]
+  tools: ToolDeBusca[]
   glifo: string
   cor: string
   titulo: string
@@ -25,10 +32,19 @@ type Meta = {
   vazio: string
 }
 
-const COR_INFO = '#1f4f86'
-const COR_LAVENDER = '#5b3fa6'
-const COR_OK = '#22603a'
-const COR_DANGER = '#a3321f'
+// Paleta da identidade AiDV, idêntica no aidv-passos: tons intermediários entre
+// os presets claro e escuro do AiDV (~4,3:1 tanto no fundo claro quanto no
+// escuro do Desktop; o neutro, 5,0:1 no escuro e 3,7:1 no claro). Cor SÓ em
+// glifo; o texto fica na cor do tema e o erro usa a chave de tema `error`.
+const COR_INFO = '#517db0'
+const COR_LAVENDER = '#836cc3'
+const COR_OK = '#478761'
+const COR_WARN = '#ab6c2f'
+const COR_PEACH = '#b66536'
+const COR_DANGER = '#c05d4d'
+const COR_NEUTRAL = '#8a857d'
+// Erro: chave de tema do Claude Code (não hex), legível em qualquer tema.
+const COR_ERRO = 'error'
 
 const FONTES: Record<Fonte, Meta> = {
   autos: {
@@ -89,12 +105,12 @@ type Tom = 'info' | 'warn' | 'peach' | 'danger' | 'lavender' | 'ok' | 'neutral'
 
 const COR: Record<Tom, string> = {
   info: COR_INFO,
-  warn: '#8a4a0b',
-  peach: '#9a4312',
+  warn: COR_WARN,
+  peach: COR_PEACH,
   danger: COR_DANGER,
   lavender: COR_LAVENDER,
   ok: COR_OK,
-  neutral: '#8a857d',
+  neutral: COR_NEUTRAL,
 }
 
 const PECAS: Record<string, [string, Tom]> = {
@@ -474,7 +490,7 @@ function listaDeResultados(b: Busca, largura: number, ui: { Box: any; Text: any 
       linhas.push(
         <Box key={`t-${li}-${ti}`} columnGap={1}>
           <Text color={c.cor}>{c.marca}</Text>
-          <Text color={c.cor} bold>{c.titulo}</Text>
+          <Text bold>{c.titulo}</Text>
           {c.meta ? <Text dimColor>{c.meta}</Text> : null}
           {cauda ? <Text dimColor wrap="truncate-end">{corta(cauda, Math.max(16, largura - 48))}</Text> : null}
         </Box>,
@@ -615,7 +631,7 @@ function paragrafosSimples(texto: string, ui: { Box: any; Text: any }): RenderEl
     const k = `s-${i}`
     const sec = /^§§ (.*)$/.exec(linha)
     if (sec) {
-      out.push(<Box key={k} marginTop={1}><Text color={COR_LAVENDER} italic>{sec[1]}</Text></Box>)
+      out.push(<Box key={k} marginTop={1}><Text italic>{sec[1]}</Text></Box>)
       return
     }
     const titulo = linha.length <= 80 && linha === linha.toUpperCase() && /[A-ZÁÉÍÓÚÂÊÔÃÕÇ]/.test(linha)
@@ -740,7 +756,7 @@ export const register: Register = on => {
         if (b.erro || e.props.isErrored) {
           return (
             <Box columnGap={1}>
-              <Text color={COR_DANGER}>{meta.glifo}</Text>
+              <Text color={COR_ERRO}>{meta.glifo}</Text>
               <Text bold>{meta.falhou}</Text>
               <Text>{q}</Text>
               <Text dimColor>{corta(b.erro ?? '', 80)}</Text>
@@ -908,7 +924,7 @@ export const register: Register = on => {
           {lendo.meta ? <Text dimColor>{lendo.meta}</Text> : null}
           <Box marginTop={1} flexDirection="column">
             {lendo.carregando && !lendo.texto ? <Text dimColor>{f.kind === 'autos' ? 'Lendo a peça…' : f.kind === 'stj' ? 'Lendo o inteiro teor…' : 'Lendo o dispositivo…'}</Text> : null}
-            {lendo.erro ? <Text color={COR_DANGER}>{lendo.erro}</Text> : null}
+            {lendo.erro ? <Text color={COR_ERRO}>{lendo.erro}</Text> : null}
             {lendo.texto ? corpo : null}
           </Box>
           {lendo.proximo !== null && !lendo.carregando ? (
@@ -953,7 +969,7 @@ export const register: Register = on => {
             <Box columnGap={1}>
               <Text dimColor>{String(n).padStart(2, ' ')}</Text>
               <Text color={c.cor}>{c.marca}</Text>
-              <Text color={c.cor} bold>{c.titulo}</Text>
+              <Text bold>{c.titulo}</Text>
               {c.nome && b.fonte === 'stj' ? <Text dimColor>{c.nome}</Text> : null}
             </Box>
             {c.meta ? (

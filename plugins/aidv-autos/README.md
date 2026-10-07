@@ -19,8 +19,9 @@ pelo id do painel e das chaves de estado (renomear é decisão do empacotamento)
 - **Linha da busca no transcript** (`ui.render` em `ToolUse`): "Buscou nos
   autos: «query» (filtros) · N trechos em M peças", dobrada por padrão, com os
   botões "Detalhes" (lista de peças na própria linha: marcador de família
-  ■ ato / ○ expediente / ◆ anexo, rótulo da peça em português na cor do tom
-  AiDV, fls., data de juntada, parte e título) e "Ver no painel". Enquanto
+  ■ ato / ○ expediente / ◆ anexo na cor do tom AiDV, rótulo da peça em
+  português em negrito na cor do tema, fls., data de juntada, parte e título)
+  e "Ver no painel". Enquanto
   roda: "Buscando nos autos: …". Erro e interrupção têm linha própria.
 - **Bloco de resultado** (`ToolResult`): nunca desenha o JSON. A lista vive
   na linha, porque dentro de um grupo de tools o motor não desenha esse site.
@@ -64,8 +65,16 @@ O JSON que o modelo recebe NÃO muda: o mod lê uma cópia do `text` em
   não aparece no Desktop. Diagnóstico só temporário.
 - `$.mcp.call` aceita o server na grafia do nome da tool
   (`plugin_case-knowledge_case-knowledge`), sem prompt de permissão.
-- Cores: hex dos sete tons do preset claro do app (`PECA_META`); o neutro foi
-  clareado para o tema escuro. Chave de tema fica para o item 3.
+- Cores (0.2.2): cor SÓ em glifo (marcador da fonte e da família da peça);
+  o texto (rótulo da peça, título no painel, seção do acórdão) fica na cor
+  do tema. Os sete tons são os mesmos do `aidv-passos`, intermediários entre
+  os presets claro e escuro do AiDV, ~4,3:1 tanto no fundo claro quanto no
+  escuro do Desktop: info `#517db0`, lavanda `#836cc3`, ok `#478761`, warn
+  `#ab6c2f`, peach `#b66536`, danger `#c05d4d`, neutral `#8a857d` (5,0:1 no
+  escuro, 3,7:1 no claro). Até a 0.2.1 eram os tons do preset claro do app
+  (`PECA_META`), entre 2,2:1 e 2,8:1 no escuro. Erro não usa hex: o glifo da
+  busca que falhou e o erro de leitura no painel vão na chave de tema
+  `error` do Claude Code.
 
 ## Como carregar
 
