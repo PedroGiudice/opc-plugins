@@ -335,6 +335,37 @@ for (const surface of SURFACES) {
     }
   })
 
+  test(`${surface}: interrompido sai no infinitivo, linha apagada`, async $ => {
+    const read = await linhaDe($, surface, {
+      isInterrupted: true,
+      tool_use_id: 'i1',
+      tool: 'Read',
+      input: { file_path: '/home/opc/cases/x/notas.md' },
+    })
+    const tr = await textos(read)
+    expect(tr).toContain('Interrompido | ao ler o arquivo notas.md')
+    expect(tr).not.toContain('Leu')
+    expect((await read.find({ type: 'Text', text: 'Interrompido' }))?.props.dimColor).toBe(true)
+    expect((await read.find({ type: 'Text', text: 'ao ler o arquivo notas.md' }))?.props.dimColor).toBe(true)
+
+    const bash = await linhaDe($, surface, {
+      isInterrupted: true,
+      tool_use_id: 'i2',
+      tool: 'Bash',
+      input: { command: 'ls', description: 'Listar os arquivos da pasta do caso' },
+    })
+    const tb = await textos(bash)
+    expect(tb).toContain('Interrompido | ao listar os arquivos da pasta do caso')
+
+    const outra = await linhaDe($, surface, {
+      isInterrupted: true,
+      tool_use_id: 'i3',
+      tool: 'Bash',
+      input: { command: 'ls', description: 'Arquivos da pasta do caso' },
+    })
+    expect(await textos(outra)).toContain('Interrompido: | Arquivos da pasta do caso')
+  })
+
   test(`${surface}: glifos levam os tons novos (claro e escuro)`, async $ => {
     const cores: [string, string, unknown, string, string][] = [
       ['g1', 'mcp__plugin_case-knowledge_case-knowledge__manifesto', {}, '■', '#517db0'],

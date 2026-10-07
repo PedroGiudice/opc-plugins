@@ -20,7 +20,9 @@ comando cru, do caminho de disco ou de "Used plugin x: y". Complementa o
 | stj-vec-tools `document`, `filters` | "Leu o inteiro teor: X", "Listou os filtros do STJ" | ◈ lavanda |
 | legal-vec-tools `document`, `sources`, `recommend` | "Leu o dispositivo: X", "Listou as fontes da legislação" | § verde |
 
-Estados: em curso (gerúndio, sem botão); interrompido (apagado); erro
+Estados: em curso (gerúndio, sem botão); interrompido (linha apagada, no
+infinitivo como a falha: "Interrompido ao ler o arquivo X"; Bash com
+description não conjugável: "Interrompido: <descrição>"); erro
 (`isErrored`): "× Falhou ao <infinitivo>" + a linha útil do erro (num
 traceback, a última). "Detalhes" dobra na própria linha a linha técnica
 (comando, caminho, trecho antigo/novo, input compacto) e a cauda da saída

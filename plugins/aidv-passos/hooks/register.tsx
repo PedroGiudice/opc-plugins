@@ -246,7 +246,8 @@ type Docx = { nome: string; caminho: string; aoLado: boolean }
 
 type FonteJuridica = 'autos' | 'stj' | 'lei'
 
-// `rotulo` sai na cor de erro; `resto` na cor do tema.
+// `rotulo` sai na cor de erro; `resto` na cor do tema. A linha de interrompido
+// usa o mesmo `resto` ("Interrompido ao ler…" / "Interrompido: <descrição>").
 type Falha = { rotulo: 'Falhou' | 'Falhou:'; resto: string }
 
 type Passo = {
@@ -640,11 +641,14 @@ export const register: Register = on => {
         )
       }
 
+      // Interrompido fala no infinitivo, como a falha ("Interrompido ao ler…"):
+      // "Interrompido: Leu…" se contradiz. Linha toda apagada.
       if (e.props.isInterrupted) {
         return (
           <Box columnGap={1}>
             <Text dimColor>{marca.glifo}</Text>
-            <Text dimColor>Interrompido: {corta(passo.feito, largura - 14)}</Text>
+            <Text dimColor>{passo.falha.rotulo === 'Falhou' ? 'Interrompido' : 'Interrompido:'}</Text>
+            <Text dimColor>{corta(passo.falha.resto, largura - 14)}</Text>
           </Box>
         )
       }
