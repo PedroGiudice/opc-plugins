@@ -17,20 +17,26 @@ const SECAO_PROMPT = {
   text: [
     'Ao chamar as ferramentas Bash e Agent, escreva o campo `description` em português do Brasil,',
     'numa frase curta que um advogado sem formação técnica entenda, dizendo o que a operação faz',
-    'pelo trabalho dele (ex.: "Gerar a contestação em .docx", "Listar os documentos do caso").',
+    'pelo trabalho dele. Comece pelo verbo no infinitivo',
+    '(ex.: "Gerar a contestação em .docx", "Listar os documentos do caso").',
     'Nunca em inglês e nunca repetindo o comando. Essa frase é mostrada ao usuário no lugar do comando.',
   ].join(' '),
 } as const
 
-// Paleta da identidade AiDV, a mesma do aidv-autos (7 tons do preset claro).
-const COR_DANGER = '#a3321f'
-const COR_INFO = '#1f4f86'
-const COR_LAVENDER = '#5b3fa6'
-const COR_OK = '#22603a'
-const COR_WARN = '#8a4a0b'
-const COR_PEACH = '#9a4312'
+// Paleta da identidade AiDV, idêntica no aidv-autos: tons intermediários entre
+// os presets claro e escuro do AiDV (~4,3:1 tanto no fundo claro quanto no
+// escuro do Desktop; o neutro, 5,0:1 no escuro e 3,7:1 no claro). Cor SÓ em
+// glifo; o texto fica na cor do tema e o erro usa a chave de tema `error`.
+const COR_INFO = '#517db0'
+const COR_LAVENDER = '#836cc3'
+const COR_OK = '#478761'
+const COR_WARN = '#ab6c2f'
+const COR_PEACH = '#b66536'
+const COR_DANGER = '#c05d4d'
 const COR_NEUTRAL = '#8a857d'
 const COR_DOC = COR_INFO
+// Erro: chave de tema do Claude Code (não hex), legível em qualquer tema.
+const COR_ERRO = 'error'
 const MAX_CAUDA = 12
 
 const aberto = atom({ plugin: 'aidv-passos', key: 'aberto' } as const, {})
@@ -136,7 +142,103 @@ function nomeDoRoteiro(skill: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// A frase de cada passo. `feito` no passado, `rodando` em curso; `tecnico` é a
+// Conjugação da PRIMEIRA palavra. A `description` do Bash vem no infinitivo
+// ("Listar os arquivos"); a linha concluída fala no passado ("Listou…") e a
+// em curso no gerúndio ("Listando…"). Conjuga só o verbo que o modelo
+// escreveu: palavra que não é infinitivo reconhecível sai como veio.
+// ---------------------------------------------------------------------------
+
+// Passado (3ª pessoa do singular) dos irregulares; os demais seguem a terminação.
+const PASSADO_IRREGULAR: Record<string, string> = {
+  fazer: 'fez', refazer: 'refez', desfazer: 'desfez', satisfazer: 'satisfez',
+  ver: 'viu', rever: 'reviu', prever: 'previu', antever: 'anteviu',
+  trazer: 'trouxe', dizer: 'disse', contradizer: 'contradisse', predizer: 'predisse',
+  ter: 'teve', obter: 'obteve', manter: 'manteve', conter: 'conteve', deter: 'deteve',
+  reter: 'reteve', entreter: 'entreteve', ater: 'ateve', abster: 'absteve',
+  ir: 'foi', ser: 'foi', estar: 'esteve', dar: 'deu', ler: 'leu',
+  poder: 'pôde', querer: 'quis', saber: 'soube', haver: 'houve', caber: 'coube',
+  vir: 'veio', intervir: 'interveio',
+  pôr: 'pôs',
+}
+
+// Terminam como infinitivo mas não são verbo no início de uma frase. `por` sem
+// acento é a preposição ("Por fim, …"); o verbo é `pôr`.
+const NAO_VERBOS = new Set([
+  'qualquer', 'mulher', 'lugar', 'par', 'mar', 'bar', 'lar', 'ar', 'éter', 'hangar', 'açúcar',
+  'ímpar', 'militar', 'familiar', 'popular', 'similar', 'regular', 'particular', 'singular',
+  'auxiliar', 'exemplar', 'titular', 'escolar', 'polar', 'solar', 'lunar', 'dólar', 'revólver',
+  'líder', 'por', 'vapor', 'torpor', 'estupor', 'celular', 'prazer', 'lazer', 'talher',
+])
+
+// Infinitivo não leva acento gráfico, salvo `pôr`: palavra acentuada é substantivo.
+const ACENTO = /[áàâãéêíóôõúü]/
+
+// Descrição em inglês (antes da seção do prompt o modelo escrevia assim):
+// "Clear the cache" não pode virar "Cleou the cache".
+const INGLES = /\b(the|and|of|to|for|with|from|into|all|this|that|files?)\b/i
+
+type Conjugado = { feito: string; rodando: string }
+
+function comCaixaDe(modelo: string, palavra: string): string {
+  const ini = modelo.charAt(0)
+  const maiuscula = ini !== ini.toLowerCase()
+  return (maiuscula ? palavra.charAt(0).toUpperCase() : palavra.charAt(0)) + palavra.slice(1)
+}
+
+function conjugarInfinitivo(palavra: string): Conjugado | null {
+  const p = palavra.toLowerCase()
+  if (!/^\p{L}+$/u.test(p) || NAO_VERBOS.has(p)) return null
+  if (ACENTO.test(p) && p !== 'pôr') return null
+  let feito = PASSADO_IRREGULAR[p] ?? null
+  let rodando: string
+  const por = /^(\p{L}*)p[oô]r$/u.exec(p)
+  if (por) {
+    // pôr e compostos: compor, propor, repor, dispor, expor, supor…
+    const radical = por[1] ?? ''
+    feito = feito ?? `${radical}pôs`
+    rodando = `${radical}pondo`
+  } else {
+    const m = /^(\p{L}*)([aei])r$/u.exec(p)
+    if (!m) return null
+    const radical = m[1] ?? ''
+    const vogal = m[2] ?? ''
+    if (!feito) {
+      if (radical.length < 2) return null
+      feito = radical + (vogal === 'a' ? 'ou' : vogal === 'e' ? 'eu' : 'iu')
+    }
+    rodando = `${radical}${vogal}ndo`
+  }
+  return { feito: comCaixaDe(palavra, feito), rodando: comCaixaDe(palavra, rodando) }
+}
+
+// "Listar os arquivos" -> { feito: "Listou os arquivos", rodando: "Listando os arquivos" }.
+function conjugar(descricao: string): Conjugado | null {
+  if (INGLES.test(descricao)) return null
+  const m = /^(\S+)([\s\S]*)$/.exec(descricao.trim())
+  const palavra = m?.[1]
+  const c = palavra ? conjugarInfinitivo(palavra) : null
+  if (!c) return null
+  const resto = m?.[2] ?? ''
+  return { feito: c.feito + resto, rodando: c.rodando + resto }
+}
+
+// Gerúndio -> infinitivo, para a frase de falha: "Lendo" -> "ler", "Compondo" -> "compor".
+function infinitivoDoGerundio(palavra: string): string | null {
+  const p = palavra.toLowerCase()
+  if (p === 'quando' || p === 'comando') return null
+  if (p === 'pondo') return 'pôr'
+  if (p.endsWith('pondo')) return `${p.slice(0, -5)}por`
+  const m = /^(\p{L}+)([aei])ndo$/u.exec(p)
+  return m ? `${m[1]}${m[2]}r` : null
+}
+
+function minusculaInicial(s: string): string {
+  return s.charAt(0).toLowerCase() + s.slice(1)
+}
+
+// ---------------------------------------------------------------------------
+// A frase de cada passo. `feito` no passado, `rodando` em curso; `falha` no
+// infinitivo ("Falhou ao ler…": "Falhou: Leu…" se contradiz); `tecnico` é a
 // linha crua para "Detalhes"; `docx` marca o evento de documento gerado.
 // ---------------------------------------------------------------------------
 
@@ -144,13 +246,36 @@ type Docx = { nome: string; caminho: string; aoLado: boolean }
 
 type FonteJuridica = 'autos' | 'stj' | 'lei'
 
+// `rotulo` sai na cor de erro; `resto` na cor do tema.
+type Falha = { rotulo: 'Falhou' | 'Falhou:'; resto: string }
+
 type Passo = {
   feito: string
   rodando: string
+  falha: Falha
   tecnico: string[]
   docx: Docx | null
   categoria: Categoria
   fonte: FonteJuridica | null
+}
+
+type PassoBase = Omit<Passo, 'fonte' | 'falha'> & { falha?: Falha }
+
+// Toda frase fixa em curso começa por gerúndio: "Lendo o índice dos autos…"
+// vira "Falhou ao ler o índice dos autos". Sem gerúndio reconhecível, "Falhou: <feito>".
+function falhaDoGerundio(rodando: string, feito: string): Falha {
+  const m = /^(\p{L}+)([\s\S]*)$/u.exec(rodando.replace(/…$/, ''))
+  const inf = m?.[1] ? infinitivoDoGerundio(m[1]) : null
+  return inf ? { rotulo: 'Falhou', resto: `ao ${inf}${m?.[2] ?? ''}` } : { rotulo: 'Falhou:', resto: feito }
+}
+
+// Bash: a frase é a `description`. No infinitivo, "Falhou ao <descrição>";
+// em outra forma, "Falhou: <descrição>" como veio.
+function falhaDoBash(descricao: string | null): Falha {
+  if (!descricao) return { rotulo: 'Falhou', resto: 'ao rodar um comando' }
+  return conjugar(descricao)
+    ? { rotulo: 'Falhou', resto: `ao ${minusculaInicial(descricao.trim())}` }
+    : { rotulo: 'Falhou:', resto: descricao }
 }
 
 // Glifo e cor da linha: fonte jurídica herda o vocabulário do aidv-autos
@@ -285,14 +410,18 @@ function fonteDe(tool: string): FonteJuridica | null {
 }
 
 function passoDe(tool: string, input: unknown, output: unknown): Passo {
-  return { ...passoBase(tool, input, output), fonte: fonteDe(tool) }
+  const base = passoBase(tool, input, output)
+  return { ...base, falha: base.falha ?? falhaDoGerundio(base.rodando, base.feito), fonte: fonteDe(tool) }
 }
 
-function passoBase(tool: string, input: unknown, output: unknown): Omit<Passo, 'fonte'> {
+function passoBase(tool: string, input: unknown, output: unknown): PassoBase {
   const cmd = campo(input, 'command')
   switch (tool) {
     case 'Bash': {
       const descricao = campo(input, 'description')
+      const conjugado = descricao ? conjugar(descricao) : null
+      const rodando = descricao ? `${conjugado?.rodando ?? descricao}…` : 'Rodando um comando…'
+      const falha = falhaDoBash(descricao)
       const docx = docxDaSaida(output)
       const tecnico = cmd ? [`$ ${corta(cmd, 300)}`] : []
       if (docx) {
@@ -300,15 +429,17 @@ function passoBase(tool: string, input: unknown, output: unknown): Omit<Passo, '
           feito: docx.aoLado
             ? `Gravou o documento ao lado: ${docx.nome} (o original foi preservado)`
             : `Montou o documento ${docx.nome}`,
-          rodando: descricao ? `${descricao}…` : 'Rodando um comando…',
+          rodando,
+          falha,
           tecnico: [...tecnico, docx.caminho],
           docx,
           categoria: 'documentos',
         }
       }
       return {
-        feito: descricao ?? 'Rodou um comando',
-        rodando: descricao ? `${descricao}…` : 'Rodando um comando…',
+        feito: descricao ? conjugado?.feito ?? descricao : 'Rodou um comando',
+        rodando,
+        falha,
         tecnico,
         docx: null,
         categoria: 'comandos',
@@ -530,9 +661,9 @@ export const register: Register = on => {
       if (e.props.isErrored) {
         linha = (
           <Box columnGap={1}>
-            <Text color={COR_DANGER}>×</Text>
-            <Text color={COR_DANGER} bold>Falhou:</Text>
-            <Text>{corta(passo.feito, Math.max(20, largura - 40))}</Text>
+            <Text color={COR_ERRO}>×</Text>
+            <Text color={COR_ERRO} bold>{passo.falha.rotulo}</Text>
+            <Text>{corta(passo.falha.resto, Math.max(20, largura - 40))}</Text>
             <Text dimColor>{primeiraLinhaDoErro(e.props.output)}</Text>
             {botao}
           </Box>
@@ -605,7 +736,7 @@ export const register: Register = on => {
           {emCurso ? ' (em andamento)' : ''}:
         </Text>
         <Text dimColor>{resumoDoGrupo(calls)}</Text>
-        {falhas > 0 ? <Text color={COR_DANGER}>{plural(falhas, 'falha', 'falhas')}</Text> : null}
+        {falhas > 0 ? <Text color={COR_ERRO}>{plural(falhas, 'falha', 'falhas')}</Text> : null}
       </Box>
     )
   })
