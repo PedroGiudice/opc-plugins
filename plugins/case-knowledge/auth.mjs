@@ -42,11 +42,35 @@ const LOGIN_CMD = loginCommand();
 const MSG_NO_CREDENTIAL = `Sem credencial. Rode: ${LOGIN_CMD}`;
 const MSG_SESSION_EXPIRED = `Sessao expirada ou revogada. Rode: ${LOGIN_CMD}`;
 const MSG_UNAUTHORIZED_AFTER_REFRESH = `Nao autorizado (401) apos refresh. Rode: ${LOGIN_CMD}`;
+/** Host do app, so para a mensagem de rede (APP_BASE e sempre uma URL absoluta). */
+const APP_HOST = (() => { try { return new URL(APP_BASE).host; } catch { return APP_BASE; } })();
+const MSG_REFRESH_NETWORK =
+  `Sem conexão com ${APP_HOST} para renovar o acesso. Tente de novo em instantes.`;
 
 /** Erro tipado: ausencia de credencial degrada para "sem Bearer" (compat tailnet). */
 function noCredentialError() {
   const e = new Error(MSG_NO_CREDENTIAL);
   e.code = "NO_CREDENTIAL";
+  return e;
+}
+
+/** Erro tipado: o servidor RESPONDEU nao-2xx ao refresh -> refresh revogado/expirado de fato. */
+function sessionExpiredError() {
+  const e = new Error(MSG_SESSION_EXPIRED);
+  e.code = "SESSION_EXPIRED";
+  return e;
+}
+
+/**
+ * Erro tipado: o refresh NEM CHEGOU ao servidor (fetch rejeitado — DNS, TLS,
+ * proxy cortando — ou abortado pelo timeout). A credencial continua integra;
+ * mandar o usuario relogar aqui e mentira (incidente 08/10/2026 na cmr-002: a
+ * rede do escritorio cortou *.aidvlabs.com por ~8 min bem na hora em que o
+ * access venceu, e o plugin pediu login com o refresh token valido).
+ */
+function refreshNetworkError(cause) {
+  const e = new Error(MSG_REFRESH_NETWORK, cause ? { cause } : undefined);
+  e.code = "NETWORK";
   return e;
 }
 
@@ -348,8 +372,12 @@ function releaseLock(fd, token) {
 
 /**
  * Troca o refresh por um novo par (rotacao). POST {APP_BASE}/cli/token/refresh.
- * 2xx -> grava { access_jwt, refresh } e retorna o novo access_jwt.
- * nao-2xx (ex. 401 = refresh revogado) -> lanca mensagem acionavel.
+ * Tres desfechos, distinguidos por `err.code`:
+ *   (a) fetch rejeitado/abortado -> code "NETWORK" (a credencial segue integra;
+ *       a mensagem pede para tentar de novo, NAO para relogar);
+ *   (b) resposta nao-2xx (ex. 401 = refresh revogado) -> code "SESSION_EXPIRED"
+ *       com o comando de login;
+ *   (c) 2xx -> grava { access_jwt, refresh } e retorna o novo access_jwt.
  */
 export async function refreshOnce(fetchImpl = fetch) {
   const before = readCredential();
@@ -376,15 +404,22 @@ export async function refreshOnce(fetchImpl = fetch) {
         body: JSON.stringify({ refresh }),
         signal: controller.signal,
       });
+    } catch (err) {
+      // (a) REDE: fetch rejeitado ("fetch failed", ENOTFOUND, TLS) ou abortado
+      // pelo timeout. Nao ha resposta do servidor -> nada se sabe sobre a sessao.
+      throw refreshNetworkError(err);
     } finally {
       clearTimeout(timer);
     }
 
-    if (!res.ok) throw new Error(MSG_SESSION_EXPIRED);
+    // (b) O servidor respondeu nao-2xx -> refresh revogado/expirado de fato.
+    if (!res.ok) throw sessionExpiredError();
 
+    // (c) 2xx: corpo sem access_jwt e contrato quebrado, tratado como sessao
+    // invalida (mantem o comportamento anterior).
     const data = await res.json();
     if (!data || typeof data.access_jwt !== "string" || !data.access_jwt) {
-      throw new Error(MSG_SESSION_EXPIRED);
+      throw sessionExpiredError();
     }
     // Defensivo: se a resposta omitir o refresh, preserva o atual.
     writeCredential({ access_jwt: data.access_jwt, refresh: data.refresh ?? refresh });
@@ -418,8 +453,11 @@ export async function getFreshAccessToken(fetchImpl = fetch) {
  *    so o 401 efetivo dispara o erro "rode login".
  *  - Refresh proativo que falha -> best-effort: usa o token atual e deixa o
  *    401 reativo (se houver) emitir o erro acionavel.
- *  - 401 -> refreshOnce 1x + repete; se ainda 401 (ou refresh falha) -> lanca
- *    "Nao autorizado (401) apos refresh. Rode: <login>".
+ *  - 401 -> refreshOnce 1x + repete; se ainda 401, ou se o refresh foi
+ *    RESPONDIDO com nao-2xx -> lanca "Nao autorizado (401) apos refresh. Rode:
+ *    <login>". Se o refresh falhou por REDE (fetch rejeitado/timeout) -> propaga
+ *    o erro code "NETWORK" ("Sem conexão com <app> para renovar o acesso...");
+ *    a sessao pode estar integra e relogar nao resolveria.
  *  - Outros status nao-ok: retorna a Response; o caller mantem o comportamento
  *    atual (lanca "API <status>: <body>").
  */
@@ -443,7 +481,10 @@ export async function requestWithAuth(doFetch, fetchImpl = fetch) {
     let newToken;
     try {
       newToken = await refreshOnce(fetchImpl);
-    } catch {
+    } catch (err) {
+      // Refresh que nem chegou ao servidor: e falta de rede, nao de sessao.
+      // Propaga a mensagem de rede (code NETWORK) em vez de mandar relogar.
+      if (err && err.code === "NETWORK") throw err;
       throw new Error(MSG_UNAUTHORIZED_AFTER_REFRESH);
     }
     res = await doFetch({ Authorization: `Bearer ${newToken}` });

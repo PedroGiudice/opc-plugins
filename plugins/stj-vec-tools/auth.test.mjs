@@ -408,3 +408,124 @@ test("releaseLock: nao apaga lock substituido por OUTRO detentor (posse por toke
   assert.ok(existsSync(lockPath()), "lock do novo detentor foi apagado indevidamente");
   assert.equal(readFileSync(lockPath(), "utf-8"), FOREIGN);
 });
+
+// --- Rotulagem de erro do refresh: rede != sessao expirada (incidente 08/10/2026) ---
+// Na cmr-002 a rede do escritorio cortou *.aidvlabs.com por ~8 min bem na hora em
+// que o access de 15 min venceu. O refresh falhou por REDE, o catch engoliu a
+// causa e o usuario foi mandado relogar com o refresh token integro.
+
+const MSG_REDE = /Sem conexão com app\.aidvlabs\.com para renovar o acesso\. Tente de novo em instantes\./;
+
+test("refreshOnce: fetch rejeitado (rede caiu) lanca code NETWORK e nao toca na credencial", async (t) => {
+  freshCred(t);
+  writeCredential({ access_jwt: "old", refresh: "r-old" });
+  const fakeFetch = async () => { throw new TypeError("fetch failed"); };
+  await assert.rejects(
+    () => refreshOnce(fakeFetch),
+    (err) => {
+      assert.equal(err.code, "NETWORK");
+      assert.match(err.message, MSG_REDE);
+      assert.doesNotMatch(err.message, /login/i);
+      return true;
+    },
+  );
+  assert.deepEqual(readCredential(), { access_jwt: "old", refresh: "r-old" });
+});
+
+test("refreshOnce: fetch abortado por timeout lanca code NETWORK", async (t) => {
+  freshCred(t);
+  writeCredential({ access_jwt: "old", refresh: "r-old" });
+  const fakeFetch = async () => {
+    const e = new Error("This operation was aborted");
+    e.name = "AbortError";
+    throw e;
+  };
+  await assert.rejects(
+    () => refreshOnce(fakeFetch),
+    (err) => {
+      assert.equal(err.code, "NETWORK");
+      assert.match(err.message, MSG_REDE);
+      return true;
+    },
+  );
+});
+
+test("refreshOnce: resposta 401 do /cli/token/refresh e sessao expirada de fato (code SESSION_EXPIRED, manda logar)", async (t) => {
+  freshCred(t);
+  writeCredential({ access_jwt: "old", refresh: "r-old" });
+  const fakeFetch = async () => ({ ok: false, status: 401, text: async () => "revoked" });
+  await assert.rejects(
+    () => refreshOnce(fakeFetch),
+    (err) => {
+      assert.equal(err.code, "SESSION_EXPIRED");
+      assert.match(err.message, /Sessao expirada ou revogada\. Rode: node .*server\.mjs login/);
+      assert.doesNotMatch(err.message, MSG_REDE);
+      return true;
+    },
+  );
+});
+
+test("requestWithAuth: 401 + refresh que falha por REDE propaga a mensagem de rede, nao 'rode login'", async (t) => {
+  freshCred(t);
+  writeCredential({ access_jwt: makeJwt(nowSec() + 3600), refresh: "r1" });
+  const fakeFetch = async () => { throw new TypeError("fetch failed"); };
+  const doFetch = async () => ({ ok: false, status: 401 });
+  await assert.rejects(
+    () => requestWithAuth(doFetch, fakeFetch),
+    (err) => {
+      assert.equal(err.code, "NETWORK");
+      assert.match(err.message, MSG_REDE);
+      assert.doesNotMatch(err.message, /apos refresh|login/i);
+      return true;
+    },
+  );
+});
+
+test("requestWithAuth: 401 + refresh abortado por timeout propaga a mensagem de rede", async (t) => {
+  freshCred(t);
+  writeCredential({ access_jwt: makeJwt(nowSec() + 3600), refresh: "r1" });
+  const fakeFetch = async () => {
+    const e = new Error("This operation was aborted");
+    e.name = "AbortError";
+    throw e;
+  };
+  const doFetch = async () => ({ ok: false, status: 401 });
+  await assert.rejects(
+    () => requestWithAuth(doFetch, fakeFetch),
+    (err) => {
+      assert.equal(err.code, "NETWORK");
+      assert.match(err.message, MSG_REDE);
+      return true;
+    },
+  );
+});
+
+test("requestWithAuth: 401 + refresh respondido com 401 mantem 'Nao autorizado (401) apos refresh'", async (t) => {
+  freshCred(t);
+  writeCredential({ access_jwt: makeJwt(nowSec() + 3600), refresh: "r1" });
+  const fakeFetch = async () => ({ ok: false, status: 401, text: async () => "revoked" });
+  const doFetch = async () => ({ ok: false, status: 401 });
+  await assert.rejects(
+    () => requestWithAuth(doFetch, fakeFetch),
+    (err) => {
+      assert.notEqual(err.code, "NETWORK");
+      assert.match(err.message, /Nao autorizado \(401\) apos refresh\. Rode: node .*server\.mjs login/);
+      return true;
+    },
+  );
+});
+
+test("requestWithAuth: 401 -> refresh ok -> API ainda 401 mantem 'Nao autorizado (401) apos refresh'", async (t) => {
+  freshCred(t);
+  writeCredential({ access_jwt: makeJwt(nowSec() + 3600), refresh: "r1" });
+  const fakeFetch = async () => ({ ok: true, status: 200, json: async () => ({ access_jwt: "jwt2", refresh: "r2" }) });
+  const doFetch = async () => ({ ok: false, status: 401 });
+  await assert.rejects(
+    () => requestWithAuth(doFetch, fakeFetch),
+    (err) => {
+      assert.notEqual(err.code, "NETWORK");
+      assert.match(err.message, /Nao autorizado \(401\) apos refresh/);
+      return true;
+    },
+  );
+});
