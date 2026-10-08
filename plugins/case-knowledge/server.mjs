@@ -695,11 +695,15 @@ server.tool(
 // Tool: metadata
 server.tool(
   "metadata",
-  "Retorna metadados extraidos de um caso da sessao (default: caso principal): " +
-    "partes (autor/reu), advogados, " +
-    "numero do processo, tipo de acao, valor da causa, contratos, pedido principal, " +
-    "dispositivos de decisoes e ultimos andamentos. " +
-    "Use no inicio da sessao para entender o caso.",
+  "Retorna os fatos de um caso da sessão (default: caso principal). Use no início da sessão. " +
+    "Campos: `natureza` (judicial | nao_judicial | indeterminada) — nem todo caso é processo: " +
+    "leia os demais campos conforme ela; `tipo`, `cliente`, `polo` (quem representamos), " +
+    "`subfamilia` e `output_style` do case.yaml; `briefing` = o briefing do classificador como está " +
+    "(processo: autor, réu, vara, juiz, números do processo, tipo de ação, valor da causa, advogados, " +
+    "dispositivos, resumo; caso não judicial: objeto, contratantes, contratos, documentos, vigência, resumo); " +
+    "`valores_envolvidos` = valores copiados literalmente dos contratos e documentos do briefing, cada um com " +
+    "o trecho de origem (em caso judicial, o valor da causa vem primeiro); sem soma nem conversão; " +
+    "`fontes` diz o que existia. `briefing: null` = caso sem briefing (ex.: recém-criado sem autos).",
   {
     caso: z.string().optional().describe(DESC_CASO),
   },
