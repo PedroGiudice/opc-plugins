@@ -40,8 +40,16 @@ function loginCommand() {
 }
 const LOGIN_CMD = loginCommand();
 const MSG_NO_CREDENTIAL = `Sem credencial. Rode: ${LOGIN_CMD}`;
-const MSG_SESSION_EXPIRED = `Sessao expirada ou revogada. Rode: ${LOGIN_CMD}`;
-const MSG_UNAUTHORIZED_AFTER_REFRESH = `Nao autorizado (401) apos refresh. Rode: ${LOGIN_CMD}`;
+/**
+ * Caminho de re-login: primeiro o do app (AiDV >= 0.5.2 tem "Entrar de novo na
+ * conta…" no menu AiDV e na bandeja, refaz o login CMR sem terminal); o comando
+ * fica como alternativa para quem nao usa o AiDV.
+ */
+const MSG_RELOGIN =
+  "Sua sessão no escritório expirou. No AiDV, abra o menu AiDV (ou o ícone na " +
+  `bandeja) e escolha 'Entrar de novo na conta…'. Sem o AiDV, rode: ${LOGIN_CMD}`;
+const MSG_SESSION_EXPIRED = MSG_RELOGIN;
+const MSG_UNAUTHORIZED_AFTER_REFRESH = `Não autorizado (401) após renovar o acesso. ${MSG_RELOGIN}`;
 /** Host do app, so para a mensagem de rede (APP_BASE e sempre uma URL absoluta). */
 const APP_HOST = (() => { try { return new URL(APP_BASE).host; } catch { return APP_BASE; } })();
 const MSG_REFRESH_NETWORK =
@@ -376,7 +384,7 @@ function releaseLock(fd, token) {
  *   (a) fetch rejeitado/abortado -> code "NETWORK" (a credencial segue integra;
  *       a mensagem pede para tentar de novo, NAO para relogar);
  *   (b) resposta nao-2xx (ex. 401 = refresh revogado) -> code "SESSION_EXPIRED"
- *       com o comando de login;
+ *       com o caminho de re-login (AiDV, ou o comando);
  *   (c) 2xx -> grava { access_jwt, refresh } e retorna o novo access_jwt.
  */
 export async function refreshOnce(fetchImpl = fetch) {
@@ -450,11 +458,12 @@ export async function getFreshAccessToken(fetchImpl = fetch) {
  *
  * Semantica:
  *  - Sem credencial -> segue SEM Bearer (compat tailnet require_bearer=false);
- *    so o 401 efetivo dispara o erro "rode login".
+ *    so o 401 efetivo dispara o erro de re-login.
  *  - Refresh proativo que falha -> best-effort: usa o token atual e deixa o
  *    401 reativo (se houver) emitir o erro acionavel.
  *  - 401 -> refreshOnce 1x + repete; se ainda 401, ou se o refresh foi
- *    RESPONDIDO com nao-2xx -> lanca "Nao autorizado (401) apos refresh. Rode:
+ *    RESPONDIDO com nao-2xx -> lanca "Não autorizado (401) após renovar o
+ *    acesso. Sua sessão no escritório expirou. No AiDV, ... Sem o AiDV, rode:
  *    <login>". Se o refresh falhou por REDE (fetch rejeitado/timeout) -> propaga
  *    o erro code "NETWORK" ("Sem conexão com <app> para renovar o acesso...");
  *    a sessao pode estar integra e relogar nao resolveria.

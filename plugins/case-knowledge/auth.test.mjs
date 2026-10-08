@@ -172,7 +172,7 @@ test("refreshOnce: 401 (revogado) lanca 'rode login'", async (t) => {
   freshCred(t);
   writeCredential({ access_jwt: "old", refresh: "r-old" });
   const fakeFetch = async () => ({ ok: false, status: 401, text: async () => "revoked" });
-  await assert.rejects(() => refreshOnce(fakeFetch), /Rode: node .*server\.mjs login/i);
+  await assert.rejects(() => refreshOnce(fakeFetch), /Sua sessão no escritório expirou\. No AiDV, abra o menu AiDV \(ou o ícone na bandeja\) e escolha 'Entrar de novo na conta…'\. Sem o AiDV, rode: node .*server\.mjs login/);
 });
 
 test("refreshOnce: sem credencial lanca acionavel (nao tenta rede)", async (t) => {
@@ -243,7 +243,7 @@ test("requestWithAuth: 401 -> refresh -> 401 lanca erro acionavel", async (t) =>
   const doFetch = async () => ({ ok: false, status: 401 });
   await assert.rejects(
     () => requestWithAuth(doFetch, fakeFetch),
-    /Nao autorizado \(401\) apos refresh.*login/i,
+    /Não autorizado \(401\) após renovar o acesso\. Sua sessão no escritório expirou\. No AiDV, abra o menu AiDV \(ou o ícone na bandeja\) e escolha 'Entrar de novo na conta…'\. Sem o AiDV, rode: node .*server\.mjs login/,
   );
 });
 
@@ -254,7 +254,7 @@ test("requestWithAuth: 401 + refresh revogado (401) lanca erro acionavel", async
   const doFetch = async () => ({ ok: false, status: 401 });
   await assert.rejects(
     () => requestWithAuth(doFetch, fakeFetch),
-    /Nao autorizado \(401\) apos refresh.*login/i,
+    /Não autorizado \(401\) após renovar o acesso\. Sua sessão no escritório expirou\. No AiDV, abra o menu AiDV \(ou o ícone na bandeja\) e escolha 'Entrar de novo na conta…'\. Sem o AiDV, rode: node .*server\.mjs login/,
   );
 });
 
@@ -473,7 +473,7 @@ test("refreshOnce: fetch rejeitado (rede caiu) lanca code NETWORK e nao toca na 
     (err) => {
       assert.equal(err.code, "NETWORK");
       assert.match(err.message, MSG_REDE);
-      assert.doesNotMatch(err.message, /login/i);
+      assert.doesNotMatch(err.message, /login|menu AiDV|Entrar de novo/i);
       return true;
     },
   );
@@ -506,7 +506,8 @@ test("refreshOnce: resposta 401 do /cli/token/refresh e sessao expirada de fato 
     () => refreshOnce(fakeFetch),
     (err) => {
       assert.equal(err.code, "SESSION_EXPIRED");
-      assert.match(err.message, /Sessao expirada ou revogada\. Rode: node .*server\.mjs login/);
+      assert.match(err.message, /Sua sessão no escritório expirou\. No AiDV, abra o menu AiDV \(ou o ícone na bandeja\) e escolha 'Entrar de novo na conta…'\. Sem o AiDV, rode: node .*server\.mjs login/);
+      assert.match(err.message, /^Sua sessão no escritório expirou/); // o caminho do app vem ANTES do comando
       assert.doesNotMatch(err.message, MSG_REDE);
       return true;
     },
@@ -523,7 +524,7 @@ test("requestWithAuth: 401 + refresh que falha por REDE propaga a mensagem de re
     (err) => {
       assert.equal(err.code, "NETWORK");
       assert.match(err.message, MSG_REDE);
-      assert.doesNotMatch(err.message, /apos refresh|login/i);
+      assert.doesNotMatch(err.message, /após renovar|login|menu AiDV|Entrar de novo/i); // rede nao fala em login
       return true;
     },
   );
@@ -557,7 +558,7 @@ test("requestWithAuth: 401 + refresh respondido com 401 mantem 'Nao autorizado (
     () => requestWithAuth(doFetch, fakeFetch),
     (err) => {
       assert.notEqual(err.code, "NETWORK");
-      assert.match(err.message, /Nao autorizado \(401\) apos refresh\. Rode: node .*server\.mjs login/);
+      assert.match(err.message, /Não autorizado \(401\) após renovar o acesso\. Sua sessão no escritório expirou\. No AiDV, abra o menu AiDV \(ou o ícone na bandeja\) e escolha 'Entrar de novo na conta…'\. Sem o AiDV, rode: node .*server\.mjs login/);
       return true;
     },
   );
@@ -572,7 +573,7 @@ test("requestWithAuth: 401 -> refresh ok -> API ainda 401 mantem 'Nao autorizado
     () => requestWithAuth(doFetch, fakeFetch),
     (err) => {
       assert.notEqual(err.code, "NETWORK");
-      assert.match(err.message, /Nao autorizado \(401\) apos refresh/);
+      assert.match(err.message, /Não autorizado \(401\) após renovar o acesso/);
       return true;
     },
   );
