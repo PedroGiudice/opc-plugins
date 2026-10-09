@@ -131,7 +131,16 @@ function errorContent(prefix, err) {
 
 // --- Shared schemas (1-1 com SearchFilters no Rust) ---
 
-const secaoValues = "ementa, ementa_citada, voto, dispositivo, relatorio, acordao, decisao, outros";
+const secaoValues =
+  "ementa, ementa_citada, ementa_origem, voto, voto_vencido, voto_vista, voto_vogal, dispositivo, relatorio, acordao, decisao, outros";
+
+// Leitura juridica dos rotulos do chunker v3 (repetida nas descricoes das tools).
+const avisoSecoes =
+  "Rotulos: voto_vencido = voto que FICOU VENCIDO, NAO e a posicao do colegiado e nunca deve ser citado como entendimento da turma; " +
+  "voto_vista e voto_vogal = votos de outros ministros (conferir se acompanharam o relator); " +
+  "ementa_origem = ementa do acordao recorrido transcrita (tribunal de origem, NAO do STJ); " +
+  "ementa_citada = precedente citado dentro da decisao (o processo esta em processo_cited). " +
+  "Confira sempre `secao` e `breadcrumb` antes de citar.";
 
 // Aceita string ("voto") ou array (["voto","dispositivo"]); o Rust desserializa ambos.
 const secaoField = z.union([z.string(), z.array(z.string())]);
@@ -193,7 +202,7 @@ const weightsField = z
 
 const server = new McpServer({
   name: "stj-vec-tools",
-  version: "0.4.0",
+  version: "0.5.0",
 });
 
 // Tool: search (dense)
@@ -202,7 +211,8 @@ server.tool(
   "Busca vetorial densa (BGE-M3 1024d) na base de jurisprudencia do STJ (collection dense-only). " +
     "Retorna chunks de acordaos, decisoes monocraticas e votos relevantes para a query. " +
     "Use filtros para restringir por ministro, classe, tipo, orgao julgador, secao, processo, faixa de data ou ano. " +
-    "Para reranking por relevancia juridica (boost por secao/citacao), use a tool search_formula.",
+    "Para reranking por relevancia juridica (boost por secao/citacao), use a tool search_formula. " +
+    avisoSecoes,
   {
     query: z.string().describe("Query de busca em linguagem natural"),
     limit: z
@@ -230,7 +240,8 @@ server.tool(
     "score = dense * secao_boost * chunk_index_boost * cited_boost * ano_boost. " +
     "Cada resultado traz formula_score e formula_components inspecionaveis. " +
     "Defaults ja calibrados (analise H5, Config 2); use weights apenas para experimentar. " +
-    "Mesmos filtros da tool search.",
+    "Mesmos filtros da tool search. voto_vencido tem peso 0,8 por padrao. " +
+    avisoSecoes,
   {
     query: z.string().describe("Query de busca em linguagem natural"),
     limit: z
@@ -265,7 +276,8 @@ server.tool(
 server.tool(
   "document",
   "Busca um documento especifico pelo doc_id. " +
-    "Retorna o conteudo completo do documento com todos os chunks e metadados.",
+    "Retorna o conteudo completo do documento com todos os chunks e metadados. " +
+    avisoSecoes,
   {
     doc_id: z.string().describe("ID do documento (campo doc_id dos resultados de busca)"),
   },
