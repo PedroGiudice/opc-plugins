@@ -27,3 +27,13 @@ test("document fatia pelo saida.mjs e aceita from_chunk", () => {
   assert.match(src, /from_chunk:\s*z\s*\.number\(\)/);
   assert.match(src, /paginarDocumento\([^;]*\{\s*fromChunk:\s*from_chunk,\s*rotulo:\s*"dispositivo"\s*\}/s);
 });
+
+test("search e recommend paginam pelo saida.mjs e aceitam a_partir", () => {
+  assert.match(src, /import\s*\{[^}]*\bpaginarResultados\b[^}]*\}\s*from\s*["']\.\/saida\.mjs["']/);
+  assert.match(src, /const aPartirField = z\s*\.number\(\)\s*\.int\(\)\s*\.min\(1\)\s*\.default\(1\)/);
+  for (const [tool, prox] of [["search", "document"], ["recommend", "sources"]]) {
+    const corpo = src.slice(src.indexOf(`\n  "${tool}",`), src.indexOf(`\n  "${prox}",`));
+    assert.match(corpo, /a_partir:\s*aPartirField\b/, `${tool} sem a_partir`);
+    assert.match(corpo, /paginarResultados\([^;]*\{\s*aPartir:\s*a_partir/s, `${tool} sem paginarResultados`);
+  }
+});

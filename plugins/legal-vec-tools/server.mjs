@@ -15,7 +15,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { requestWithAuth, loginFlow } from "./auth.mjs";
-import { paginarDocumento } from "./saida.mjs";
+import { paginarDocumento, paginarResultados } from "./saida.mjs";
 
 // legal-vec-api roda na VM. Default por plataforma: no Windows (maquina
 // cliente), a API publica com Bearer obrigatorio (legalvec.aidvlabs.com,
@@ -108,6 +108,18 @@ async function apiGet(path) {
   return await res.json();
 }
 
+// Continuacao das buscas no teto de saida (saida.mjs::paginarResultados).
+const aPartirField = z
+  .number()
+  .int()
+  .min(1)
+  .default(1)
+  .describe(
+    "Posicao do primeiro resultado a entregar (default 1). Os resultados vem inteiros (dispositivo nunca cortado); " +
+      "se nao couberem no limite de output, o aviso no topo traz 'Continue com a_partir=N': repita a chamada " +
+      "com os mesmos parametros e esse a_partir."
+  );
+
 // --- MCP Server ---
 
 const server = new McpServer({
@@ -120,7 +132,9 @@ server.tool(
   "search",
   "Busca hibrida (dense + sparse + RRF) na base de legislacao brasileira. " +
     "Retorna chunks relevantes de CF, CC, CPC, CDC, CLT, CP, CPP, ECA e jurisprudencia TESEMO. " +
-    "Sempre usa modo hybrid (dense + sparse + RRF).",
+    "Sempre usa modo hybrid (dense + sparse + RRF). " +
+    "Resultados INTEIROS e na ordem da busca; se nao couberem no limite de output, vem os primeiros e o aviso " +
+    "no topo traz a_partir para continuar.",
   {
     query: z.string().describe("Query de busca em linguagem natural"),
     limit: z
@@ -146,8 +160,9 @@ server.tool(
       .describe(
         "Filtrar por fonte especifica: planalto/codigo_civil, sumulas/stj, etc."
       ),
+    a_partir: aPartirField,
   },
-  async ({ query, limit, materia, tipo, fonte }) => {
+  async ({ query, limit, materia, tipo, fonte, a_partir }) => {
     try {
       const data = await apiPost("/search", {
         query,
@@ -157,7 +172,7 @@ server.tool(
         fonte,
       });
       return {
-        content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+        content: [{ type: "text", text: paginarResultados(data, { aPartir: a_partir }).text }],
       };
     } catch (err) {
       return {
@@ -223,8 +238,9 @@ server.tool(
     materia: z.string().optional().describe("Filtrar por materia"),
     tipo: z.string().optional().describe("Filtrar por tipo"),
     fonte: z.string().optional().describe("Filtrar por fonte"),
+    a_partir: aPartirField,
   },
-  async ({ doc_id, limit, materia, tipo, fonte }) => {
+  async ({ doc_id, limit, materia, tipo, fonte, a_partir }) => {
     try {
       const data = await apiPost("/recommend", {
         doc_id,
@@ -234,7 +250,9 @@ server.tool(
         fonte,
       });
       return {
-        content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+        content: [
+          { type: "text", text: paginarResultados(data, { aPartir: a_partir, rotulo: "recomendações" }).text },
+        ],
       };
     } catch (err) {
       return {

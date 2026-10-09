@@ -7,7 +7,8 @@
  * alcancavel tanto da propria VM quanto de qualquer maquina da tailnet.
  * Override por STJ_VEC_API_BASE para outros ambientes.
  * Exposes 4 tools: search, search_formula, document, filters.
- * `document` sai fatiado no teto de saida (saida.mjs) com continuacao por from_chunk.
+ * `document` sai fatiado no teto de saida (saida.mjs) com continuacao por from_chunk;
+ * `search` e `search_formula`, com resultados inteiros e continuacao por a_partir.
  *
  * Transport: stdio (required for Claude Code plugins)
  * Dependencies: @modelcontextprotocol/sdk, zod
@@ -21,7 +22,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { requestWithAuth, loginFlow } from "./auth.mjs";
-import { paginarDocumento } from "./saida.mjs";
+import { paginarDocumento, paginarResultados } from "./saida.mjs";
 
 // O servico stj-vec-search roda SO na VM (extractlab). Default por plataforma:
 // no Windows (maquina cliente), a API publica com Bearer obrigatorio
@@ -131,6 +132,22 @@ function errorContent(prefix, err) {
   };
 }
 
+// Continuacao das buscas no teto de saida (saida.mjs::paginarResultados).
+const aPartirField = z
+  .number()
+  .int()
+  .min(1)
+  .default(1)
+  .describe(
+    "Posicao do primeiro resultado a entregar (default 1). Os resultados vem inteiros (ementa nunca cortada); " +
+      "se nao couberem no limite de output, o aviso no topo traz 'Continue com a_partir=N': repita a busca " +
+      "com a mesma query, filtros e limit e esse a_partir."
+  );
+
+const avisoTeto =
+  "Resultados INTEIROS e na ordem da busca; se nao couberem no limite de output, vem os primeiros e o aviso no topo " +
+  "traz a_partir para continuar. ";
+
 // --- Shared schemas (1-1 com SearchFilters no Rust) ---
 
 const secaoValues =
@@ -222,6 +239,7 @@ server.tool(
     "Retorna chunks de acordaos, decisoes monocraticas e votos relevantes para a query. " +
     "Use filtros para restringir por ministro, classe, tipo, orgao julgador, secao, processo, faixa de data ou ano. " +
     "Para reranking por relevancia juridica (boost por secao/citacao), use a tool search_formula. " +
+    avisoTeto +
     avisoSecoes,
   {
     query: z.string().describe("Query de busca em linguagem natural"),
@@ -233,10 +251,12 @@ server.tool(
       .default(10)
       .describe("Numero maximo de resultados (default 10, max 50)"),
     filters: filtersField,
+    a_partir: aPartirField,
   },
-  async ({ query, limit, filters }) => {
+  async ({ query, limit, filters, a_partir }) => {
     try {
-      return jsonContent(await apiPost("/search", { query, limit, filters }));
+      const data = await apiPost("/search", { query, limit, filters });
+      return { content: [{ type: "text", text: paginarResultados(data, { aPartir: a_partir }).text }] };
     } catch (err) {
       return errorContent("Erro na busca", err);
     }
@@ -251,6 +271,7 @@ server.tool(
     "Cada resultado traz formula_score e formula_components inspecionaveis. " +
     "Defaults ja calibrados (analise H5, Config 2); use weights apenas para experimentar. " +
     "Mesmos filtros da tool search. voto_vencido tem peso 0,8 por padrao. " +
+    avisoTeto +
     avisoSecoes,
   {
     query: z.string().describe("Query de busca em linguagem natural"),
@@ -270,12 +291,14 @@ server.tool(
       .describe("Tamanho do candidate pool dense antes do rerank (default 100, max 200)"),
     filters: filtersField,
     weights: weightsField,
+    a_partir: aPartirField,
   },
-  async ({ query, limit, overfetch, filters, weights }) => {
+  async ({ query, limit, overfetch, filters, weights, a_partir }) => {
     try {
       const body = { query, limit, overfetch, filters };
       if (weights !== undefined) body.weights = weights;
-      return jsonContent(await apiPost("/search/formula", body));
+      const data = await apiPost("/search/formula", body);
+      return { content: [{ type: "text", text: paginarResultados(data, { aPartir: a_partir }).text }] };
     } catch (err) {
       return errorContent("Erro na busca por formula", err);
     }
