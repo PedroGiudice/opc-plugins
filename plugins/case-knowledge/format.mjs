@@ -948,3 +948,118 @@ export function renderManifesto(manifesto, { expandirExpediente = false, aPartir
   while (n > 1 && montar(partes, us.slice(0, n), -1).length > globalCap) n--;
   return montar(partes, us.slice(0, n), -1);
 }
+
+// === Ficha do caso (tool metadata) dentro do teto ===
+
+/**
+ * Listas da ficha que podem ser cortadas: arrays no topo do JSON e no
+ * `briefing` (e onde mora o volume: dispositivos, numeros de processo,
+ * contratos, valores envolvidos). Cada item e atomico e nunca e partido.
+ */
+function listasDaFicha(data) {
+  const listas = [];
+  for (const [k, v] of Object.entries(data ?? {})) {
+    if (Array.isArray(v)) listas.push({ nome: k, ler: (d) => d[k], gravar: (d, x) => { d[k] = x; } });
+  }
+  const b = data?.briefing;
+  if (b && typeof b === "object" && !Array.isArray(b)) {
+    for (const [k, v] of Object.entries(b)) {
+      if (Array.isArray(v)) {
+        listas.push({ nome: `briefing.${k}`, ler: (d) => d.briefing[k], gravar: (d, x) => { d.briefing[k] = x; } });
+      }
+    }
+  }
+  return listas;
+}
+
+/** Folga para o aviso das listas cortadas no topo da ficha. */
+const RESERVA_AVISO_FICHA = 800;
+
+/**
+ * Texto da tool `metadata` dentro do teto de saida.
+ *
+ * - Ficha que cabe sai identica ao JSON da API.
+ * - Senao (medido em 09/10/2026: falencia com 50 dispositivos e 164 numeros
+ *   de processo dava 66 mil chars), os campos simples saem intactos e cada
+ *   lista entrega os seus primeiros itens INTEIROS, em rodizio entre as listas
+ *   (toda lista mostra o comeco), ate o teto. O aviso no topo nomeia cada
+ *   lista cortada com "N de M" e a chamada que le o resto.
+ * - Com `lista` (ex.: "briefing.dispositivos"), entrega so os itens daquela
+ *   lista a partir de `aPartir` (1-based), em ordem, com a continuacao no fim.
+ *   Um item sozinho acima do teto sai inteiro.
+ */
+export function renderMetadata(data, { lista = null, aPartir = 1, globalCap = OUTPUT_CAP_CHARS } = {}) {
+  const listas = listasDaFicha(data);
+  if (lista) return renderListaDaFicha(data, listas, lista, aPartir, globalCap);
+
+  const inteiro = JSON.stringify(data, null, 2);
+  if (inteiro.length <= globalCap) return inteiro;
+
+  const cortaveis = listas.filter((l) => l.ler(data).length > 0);
+  const montar = (qtd) => {
+    const copia = structuredClone(data);
+    cortaveis.forEach((l, i) => l.gravar(copia, l.ler(data).slice(0, qtd[i])));
+    return JSON.stringify(copia, null, 2);
+  };
+  const avisoDe = (qtd) => {
+    const cortadas = cortaveis
+      .map((l, i) => ({ l, n: qtd[i], total: l.ler(data).length }))
+      .filter((x) => x.n < x.total);
+    if (!cortadas.length) return "";
+    return `[aviso: ficha do caso maior que o limite de output — listas entregues em parte ` +
+      `(os primeiros itens, inteiros); o resto de cada uma se lê com a chamada indicada: ` +
+      cortadas.map((x) => `${x.l.nome} ${x.n} de ${x.total}, metadata(lista: "${x.l.nome}", a_partir: ${x.n + 1})`).join("; ") +
+      `.]\n\n`;
+  };
+
+  let orcamento = globalCap - RESERVA_AVISO_FICHA;
+  for (let tentativa = 0; tentativa < 10; tentativa++) {
+    // Rodizio: um item por lista por volta; lista cujo proximo item nao cabe sai da volta.
+    const qtd = cortaveis.map(() => 0);
+    const ativas = new Set(cortaveis.map((_, i) => i));
+    while (ativas.size) {
+      for (const i of [...ativas]) {
+        if (qtd[i] >= cortaveis[i].ler(data).length) { ativas.delete(i); continue; }
+        qtd[i]++;
+        if (montar(qtd).length > orcamento) { qtd[i]--; ativas.delete(i); }
+      }
+    }
+    const texto = avisoDe(qtd) + montar(qtd);
+    if (texto.length <= globalCap) return texto;
+    orcamento -= texto.length - globalCap + 50;
+  }
+  // Melhor esforco: so os campos simples cabem perto do teto.
+  const zero = cortaveis.map(() => 0);
+  return avisoDe(zero) + montar(zero);
+}
+
+function renderListaDaFicha(data, listas, nome, aPartir, globalCap) {
+  const alvo = listas.find((l) => l.nome === nome);
+  if (!alvo) {
+    const nomes = listas.map((l) => `${l.nome} (${l.ler(data).length})`).join(", ");
+    return `A ficha do caso não tem a lista "${nome}". Listas da ficha: ${nomes || "nenhuma"}.`;
+  }
+  const itens = alvo.ler(data);
+  const inicio = Number.isInteger(aPartir) && aPartir > 1 ? aPartir : 1;
+  if (inicio > itens.length) {
+    return `A lista ${nome} tem ${itens.length} itens; não há o item ${inicio}.`;
+  }
+  const montar = (n) => {
+    const fim = inicio - 1 + n;
+    const cab = `Lista ${nome} da ficha do caso ${data?.caso ?? "?"}: itens ${inicio}-${fim} de ${itens.length}.\n\n`;
+    const corpo = JSON.stringify(itens.slice(inicio - 1, fim), null, 2);
+    const continua = fim < itens.length
+      ? `\n\nContinua: metadata(lista: "${nome}", a_partir: ${fim + 1}).`
+      : "\n\nFim da lista.";
+    return cab + corpo + continua;
+  };
+  // Maior prefixo que cabe (o texto cresce com n); >= 1.
+  let lo = 1;
+  let hi = itens.length - inicio + 1;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (montar(mid).length <= globalCap) lo = mid;
+    else hi = mid - 1;
+  }
+  return montar(lo);
+}

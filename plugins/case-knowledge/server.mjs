@@ -25,6 +25,7 @@ import {
   renderDocumentChunks,
   renderReconstrucao,
   renderManifesto,
+  renderMetadata,
   detectaCollectionAusente,
   renderCaseSemBase,
 } from "./format.mjs";
@@ -705,15 +706,22 @@ server.tool(
     "dispositivos, resumo; caso não judicial: objeto, contratantes, contratos, documentos, vigência, resumo); " +
     "`valores_envolvidos` = valores copiados literalmente dos contratos e documentos do briefing, cada um com " +
     "o trecho de origem (em caso judicial, o valor da causa vem primeiro); sem soma nem conversão; " +
-    "`fontes` diz o que existia. `briefing: null` = caso sem briefing (ex.: recém-criado sem autos).",
+    "`fontes` diz o que existia. `briefing: null` = caso sem briefing (ex.: recém-criado sem autos). " +
+    "Ficha grande demais para uma resposta: os campos simples vêm inteiros e cada lista longa vem com os " +
+    "primeiros itens; o aviso no topo diz quantos vieram e a chamada que lê o resto (`lista` + `a_partir`).",
   {
+    lista: z.string().optional()
+      .describe("Lê só uma lista da ficha, item a item, ex.: \"briefing.dispositivos\", \"briefing.numeros_processo\", " +
+        "\"briefing.contratos\", \"valores_envolvidos\". Use a chamada do aviso da ficha."),
+    a_partir: z.number().int().min(1).default(1)
+      .describe("Item da lista onde começar (default 1), como indicado no aviso ou na linha 'Continua'."),
     caso: z.string().optional().describe(DESC_CASO),
   },
-  async ({ caso }) => {
+  async ({ lista, a_partir, caso }) => {
     try {
       const alvo = (await sessao()).resolve(caso);
       const data = await apiGet(`/cases/${alvo.name}/metadata`);
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+      return { content: [{ type: "text", text: renderMetadata(data, { lista, aPartir: a_partir }) }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Erro ao obter metadata: ${err.message}` }], isError: true };
     }
