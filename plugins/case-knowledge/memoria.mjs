@@ -5,6 +5,7 @@
  */
 
 import { requestWithAuth } from "./auth.mjs";
+import { OUTPUT_CAP_CHARS } from "./format.mjs";
 
 /**
  * Base default do legal-cogmem por PLATAFORMA (CMR-135 Task 6b).
@@ -41,20 +42,48 @@ export function originLabel(repoPath) {
   return null;
 }
 
-export function formatMemoriaResults(chunks) {
+function blocoDeMemoria(c) {
+  const score = typeof c.score === "number" ? c.score.toFixed(2) : "?";
+  const ts = c.timestamp ?? "?";
+  const sess = c.session_id ?? "?";
+  const origem = originLabel(c.repo_path);
+  const quem = origem ? `${origem}, ` : "";
+  return `[${score}] (${quem}${ts}, sessao ${sess})\n${c.content ?? ""}`;
+}
+
+const SEPARADOR = "\n\n---\n\n";
+
+/**
+ * Trechos da memoria em ordem de score, cada um INTEIRO, dentro do teto de
+ * saida. Medido em 09/10/2026: trecho de sessao chega a 9 mil chars, e 20
+ * deles davam 114 mil (o limit 5 padrao, 29 mil). Memoria que cabe sai como
+ * antes; senao, entrega os trechos a partir de `aPartir` (1-based) que couberem,
+ * com "Continue com a_partir=N" no aviso do topo. A API nao tem offset: a
+ * continuacao repete a mesma busca e pega a fatia seguinte. Um trecho sozinho
+ * acima do teto sai inteiro.
+ */
+export function formatMemoriaResults(chunks, { aPartir = 1, globalCap = OUTPUT_CAP_CHARS } = {}) {
   if (!chunks || chunks.length === 0) {
     return "nenhuma memoria registrada neste caso ainda.";
   }
-  return chunks
-    .map((c) => {
-      const score = typeof c.score === "number" ? c.score.toFixed(2) : "?";
-      const ts = c.timestamp ?? "?";
-      const sess = c.session_id ?? "?";
-      const origem = originLabel(c.repo_path);
-      const quem = origem ? `${origem}, ` : "";
-      return `[${score}] (${quem}${ts}, sessao ${sess})\n${c.content ?? ""}`;
-    })
-    .join("\n\n---\n\n");
+  const total = chunks.length;
+  const inicio = Number.isInteger(aPartir) && aPartir > 1 ? aPartir : 1;
+  if (inicio > total) {
+    return `Nenhum trecho de memoria a partir do ${inicio} (a busca devolveu ${total}).`;
+  }
+  const blocos = chunks.slice(inicio - 1).map(blocoDeMemoria);
+  const montar = (n) => {
+    const ate = inicio + n - 1;
+    const corpo = blocos.slice(0, n).join(SEPARADOR);
+    if (ate < total) {
+      return `[aviso: memoria maior que o limite de output — entregues os trechos ${inicio}-${ate} de ${total}, ` +
+        `inteiros e na ordem da busca. Continue com a_partir=${ate + 1} (mesma query e parametros).]\n\n` + corpo;
+    }
+    return inicio > 1 ? `[trechos ${inicio}-${ate} de ${total} da busca na memoria]\n\n${corpo}` : corpo;
+  };
+  let n = blocos.length;
+  while (n > 1 && montar(n).length > globalCap) n--;
+  return montar(n);
 }
 
 export async function memoriaSearch(params, caseInfo, fetchImpl = fetch) {
@@ -89,7 +118,7 @@ export async function memoriaSearch(params, caseInfo, fetchImpl = fetch) {
     if (json.status !== "ok") {
       return `memoria indisponivel: ${json.message ?? "erro desconhecido"}`;
     }
-    return formatMemoriaResults(json.chunks);
+    return formatMemoriaResults(json.chunks, { aPartir: params.a_partir });
   } catch (err) {
     return `memoria indisponivel: ${err.message}`;
   }

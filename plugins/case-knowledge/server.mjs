@@ -434,6 +434,10 @@ server.tool(
       .describe("Filtra por quem falou: 'user' = pedidos, decisoes e correcoes do " +
         "advogado (ex.: 'o que o cliente prefere', 'que estrategia foi ditada'); " +
         "'assistant' = so respostas do Claude. Sem filtro, os dois lados."),
+    a_partir: z.number().int().min(1).optional()
+      .describe("Posicao do primeiro trecho a entregar (default 1). Os trechos vem inteiros; se nao " +
+        "couberem no limite de output, o aviso no topo traz 'Continue com a_partir=N': repita a busca " +
+        "com os mesmos parametros e esse a_partir."),
   },
   async (params) => {
     try {

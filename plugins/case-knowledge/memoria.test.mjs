@@ -184,3 +184,74 @@ test("formatMemoriaResults: sem repo_path segue funcionando (chunk antigo)", () 
   assert.match(out, /\[0\.50\]/);
   assert.match(out, /c/);
 });
+
+// === Teto de saida (medido em 09/10/2026: trechos de sessao chegam a 9 mil
+// chars; 20 deles davam 114 mil no caso Neocert e o limit 5 padrao, 29 mil) ===
+
+const OUTPUT_CAP = 20_000;
+
+function trechosGrandes(n, tamanho = 8000) {
+  return Array.from({ length: n }, (_, i) => ({
+    score: 0.9 - i / 100,
+    session_id: `s${i}`,
+    timestamp: "2026-09-01T00:00:00Z",
+    repo_path: "/home/opc/case-docs/cases/neocert",
+    content: `<T${i}>` + "resposta longa do assistente sobre a estrategia ".repeat(Math.ceil(tamanho / 49)).slice(0, tamanho) + `</T${i}>`,
+  }));
+}
+
+test("formatMemoriaResults: memoria que cabe no teto sai como antes, sem aviso", () => {
+  const out = formatMemoriaResults(trechosGrandes(2, 500));
+  assert.doesNotMatch(out, /aviso|a_partir/);
+  assert.equal(out.split("\n\n---\n\n").length, 2);
+});
+
+test("formatMemoriaResults: memoria grande cabe no teto, com trechos inteiros, na ordem, e aviso com a_partir", () => {
+  const chunks = trechosGrandes(20);
+  const out = formatMemoriaResults(chunks);
+  assert.ok(out.length <= OUTPUT_CAP, `${out.length} chars`);
+  const m = /^\[aviso: [^\]]*trechos 1-(\d+) de 20[^\]]*Continue com a_partir=(\d+)[^\]]*\]/.exec(out);
+  assert.ok(m, out.slice(0, 300));
+  const n = Number(m[1]);
+  assert.equal(Number(m[2]), n + 1);
+  for (let i = 0; i < n; i++) assert.ok(out.includes(chunks[i].content), `trecho ${i} partido ou ausente`);
+  assert.ok(!out.includes(`<T${n}>`));
+});
+
+test("formatMemoriaResults: a continuacao cobre todos os trechos, sem repetir, sempre no teto", () => {
+  const chunks = trechosGrandes(20);
+  const vistos = [];
+  let aPartir = 1;
+  for (let voltas = 0; voltas < 30 && aPartir; voltas++) {
+    const out = formatMemoriaResults(chunks, { aPartir });
+    assert.ok(out.length <= OUTPUT_CAP, `${out.length} chars`);
+    vistos.push(...[...out.matchAll(/<T(\d+)>/g)].map((x) => Number(x[1])));
+    const m = /Continue com a_partir=(\d+)/.exec(out);
+    aPartir = m ? Number(m[1]) : null;
+  }
+  assert.deepEqual(vistos, chunks.map((_, i) => i));
+});
+
+test("formatMemoriaResults: trecho sozinho acima do teto sai inteiro", () => {
+  const chunks = trechosGrandes(2, OUTPUT_CAP + 1000);
+  assert.ok(formatMemoriaResults(chunks).includes(chunks[0].content));
+});
+
+test("formatMemoriaResults: a_partir alem do fim diz quantos trechos a busca devolveu", () => {
+  assert.match(formatMemoriaResults(trechosGrandes(3, 100), { aPartir: 9 }), /a busca devolveu 3/);
+});
+
+test("memoriaSearch: a_partir chega ao render (continuacao da mesma busca)", async (t) => {
+  credFixture(t);
+  const fakeFetch = async () => ({ ok: true, json: async () => ({ status: "ok", chunks: trechosGrandes(20) }) });
+  const out = await memoriaSearch({ query: "estrategia da defesa", limit: 20, a_partir: 5 }, { dir: "/x/cases/y", name: "y" }, fakeFetch);
+  const primeiro = /<T(\d+)>/.exec(out);
+  assert.equal(primeiro[1], "4");
+});
+
+test("tool memoria_search declara a_partir", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("./server.mjs", import.meta.url), "utf-8");
+  const tool = src.slice(src.indexOf('"memoria_search",'), src.indexOf("// Tool: contexto"));
+  assert.match(tool, /a_partir:\s*z\.number\(\)\.int\(\)\.min\(1\)/);
+});
