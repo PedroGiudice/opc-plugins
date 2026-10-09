@@ -152,9 +152,9 @@ const RESERVA_AVISO = 400;
 
 /**
  * Saida das buscas que devolvem hits do caso fora do `search`
- * (buscar_cronologico, buscar_interseccao, buscar_diversificado e recommend em
- * lote): mesmo formato e mesmo teto do search, uma linha JSON por hit com o
- * content em preview. Antes essas tools devolviam o JSON da API com o content
+ * (buscar_cronologico, buscar_interseccao e buscar_diversificado): mesmo
+ * formato e mesmo teto do search, uma linha JSON por hit com o content em
+ * preview. Antes essas tools devolviam o JSON da API com o content
  * INTEGRAL de cada chunk: 10 resultados passavam de 47 mil caracteres e o
  * Claude Code gravava o resultado em arquivo.
  *

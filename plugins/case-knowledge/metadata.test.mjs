@@ -138,7 +138,7 @@ test("ficha sem briefing e pequena sai como veio", () => {
 
 test("tool metadata aceita lista e a_partir e passa pelo renderMetadata", () => {
   const src = readFileSync(new URL("./server.mjs", import.meta.url), "utf-8");
-  const tool = src.slice(src.indexOf('"metadata",'), src.indexOf("// Tool: recommend"));
+  const tool = src.slice(src.indexOf('"metadata",'), src.indexOf("// Tool: facet"));
   assert.match(tool, /lista:\s*z\.string\(\)/);
   assert.match(tool, /a_partir:\s*z\.number\(\)\.int\(\)\.min\(1\)/);
   assert.match(tool, /renderMetadata\(data,\s*\{\s*lista,\s*aPartir:\s*a_partir\s*\}\)/);

@@ -46,6 +46,6 @@ test("com os maiores parametros da tool o texto cabe no teto", () => {
 
 test("tool comparar entrega os pares pelo paresMaisSimilares", () => {
   const src = readFileSync(new URL("./server.mjs", import.meta.url), "utf-8");
-  const tool = src.slice(src.indexOf('"comparar",'), src.indexOf("// Tool: discover"));
+  const tool = src.slice(src.indexOf('"comparar",'), src.indexOf("// Tool: buscar_cronologico"));
   assert.match(tool, /paresMaisSimilares\(data\.pairs,\s*limit\)/);
 });

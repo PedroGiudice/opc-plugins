@@ -28,7 +28,7 @@ caso retornam erro ("Sessao nao esta dentro de um caso"); `list_cases` continua
 funcionando e lista os casos disponiveis.
 
 Tools de documentos: `search`, `contexto`, `stats`, `list_cases`, `info`,
-`manifesto`, `metadata`, `recommend`, `facet`, `comparar`, `discover`,
+`manifesto`, `metadata`, `facet`, `comparar`,
 `buscar_cronologico`, `buscar_interseccao`, `buscar_diversificado`.
 
 Teto de saida: nenhuma tool devolve mais que `OUTPUT_CAP_CHARS` (20.000

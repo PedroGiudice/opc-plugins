@@ -178,8 +178,8 @@ const server = new McpServer(
     instructions: [
       "Tools sobre os DOCUMENTOS do caso ativo (derivado do cwd). Guia de decisao:",
       "- Abrir sessao / entender o caso: metadata -> manifesto -> stats; memoria_search para o que ja foi feito/decidido em sessoes anteriores.",
-      "- Achar tema/argumento: search (filtros peca/fase/documento/categoria). Dois temas que precisam aparecer JUNTOS: buscar_interseccao. Os mais recentes sobre um tema: buscar_cronologico. Panorama por documentos distintos: buscar_diversificado. Mais-como-este a partir de chunks: recommend. Na direcao de X evitando Y: discover.",
-      "- Ler na INTEGRA: contexto (janela ao redor de um chunk do search) ou document (peca inteira em ordem sequencial). O content do search, das buscas buscar_* e do recommend e PREVIEW — nunca citar/transcrever a partir dele.",
+      "- Achar tema/argumento: search (filtros peca/fase/documento/categoria). Dois temas que precisam aparecer JUNTOS: buscar_interseccao. Os mais recentes sobre um tema: buscar_cronologico. Panorama por documentos distintos: buscar_diversificado.",
+      "- Ler na INTEGRA: contexto (janela ao redor de um chunk do search) ou document (peca inteira em ordem sequencial). O content do search e das buscas buscar_* e PREVIEW — nunca citar/transcrever a partir dele.",
       "- Reconstruir passagens continuas de um tema atravessando varios documentos, em ordem processual: reconstruir. Prefira document para UMA peca inteira; reconstruir para o recorte de VARIOS documentos.",
       "- Contar/mapear valores de campo: facet. Citacoes do caso: facet em processos_citados/recursos_citados/sumulas_citadas/temas_repetitivos/dispositivos_citados; onde mais os autos citam um item: cross_ref.",
       "- Repeticao/duplicata entre pecas: comparar.",
@@ -733,90 +733,6 @@ server.tool(
   }
 );
 
-// Tool: recommend
-server.tool(
-  "recommend",
-  "Dado chunk_ids de resultados relevantes (positivos) e opcionalmente irrelevantes (negativos), " +
-    "encontra chunks vetorialmente similares aos positivos e diferentes dos negativos. " +
-    "Util para expandir resultados de busca, encontrar mais do mesmo tipo de conteudo, " +
-    "ou refinar uma pesquisa a partir de exemplos. " +
-    "Aceita batch via 'queries' — multiplas combinacoes positive/negative em uma chamada (Qdrant recommend_batch). " +
-    DESC_PREVIEW,
-  {
-    positive: z.array(z.string()).optional()
-      .describe("Chunk IDs relevantes (single mode). Use isto OU 'queries', nao ambos."),
-    negative: z.array(z.string()).optional()
-      .describe("Chunk IDs irrelevantes (single mode, opcional)"),
-    queries: z.array(z.object({
-      positive: z.array(z.string()).min(1),
-      negative: z.array(z.string()).optional().default([]),
-    })).max(20).optional()
-      .describe("Batch mode: ate 20 pares positive/negative em uma chamada. " +
-        "Use quando precisar de varios recommends relacionados — paraleliza server-side."),
-    peca: z.string().optional()
-      .describe("Filtrar por peca processual"),
-    limit: z.number().int().min(1).max(20).default(5)
-      .describe("Numero maximo de resultados por query (default 5, max 20)"),
-    caso: z.string().optional().describe(DESC_CASO),
-  },
-  async ({ positive, negative, queries, peca, limit, caso }) => {
-    try {
-      const alvo = (await sessao()).resolve(caso);
-      const isBatch = Array.isArray(queries) && queries.length > 0;
-      if (!isBatch && (!positive || positive.length === 0)) {
-        throw new Error("Forneca 'positive' (single) ou 'queries' (batch).");
-      }
-
-      const body = { limit };
-      if (peca) body.peca = peca;
-      if (isBatch) {
-        body.queries = queries;
-      } else {
-        body.positive = positive;
-        if (negative && negative.length > 0) body.negative = negative;
-      }
-
-      const res = await requestWithAuth((authHeaders) =>
-        fetchWithRetry(`${API_BASE}/cases/${alvo.name}/recommend`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...authHeaders },
-          body: JSON.stringify(body),
-        })
-      );
-      if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
-      const data = await res.json();
-
-      if (isBatch) {
-        const listas = (data.batch || []).map((hits, i) => ({
-          cabecalho: `recomendacao ${i + 1} (positive: ${queries[i].positive.join(", ")})`,
-          hits: hits || [],
-        }));
-        if (listas.every((l) => l.hits.length === 0)) {
-          return { content: [{ type: "text", text: "Nenhum resultado." }] };
-        }
-        const text = renderHitsComTeto(listas, { rotuloLista: "recomendacao(oes)" });
-        return { content: [{ type: "text", text }] };
-      }
-
-      const lines = data.map(
-        (r) =>
-          `[${r.score.toFixed(3)}] chunk_id=${r.chunk_id} ci:${r.chunk_index} ` +
-          `peca=${r.peca || "?"} | ${r.content.slice(0, 200)}...`
-      );
-      return {
-        content: [
-          { type: "text", text: lines.join("\n\n") || "Nenhum resultado." },
-        ],
-      };
-    } catch (err) {
-      return {
-        content: [{ type: "text", text: `Erro no recommend: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
-);
-
 // Tool: facet — analytics nativa de payload
 server.tool(
   "facet",
@@ -868,44 +784,6 @@ server.tool(
       return { content: [{ type: "text", text: lines.join("\n") || "Nenhum par encontrado." }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Erro no comparar: ${err.message}` }], isError: true };
-    }
-  }
-);
-
-// Tool: discover — busca guiada por contexto positive/negative
-server.tool(
-  "discover",
-  "Busca guiada por pares de exemplos (positive_target, negative_target) (Qdrant discover API). " +
-    "Diferente de recommend (busca similar a positivos), o discover busca NA DIRECAO positiva, " +
-    "EVITANDO a negativa. Use para desambiguacao: ex 'argumentos da Autora, NAO da Re'. " +
-    "Cada par define uma direcao semantica; o resultado e influenciado por todos os pares.",
-  {
-    target: z.string().optional()
-      .describe("Query alvo (texto que sera embedado) OU chunk_id especifico"),
-    target_chunk_id: z.string().optional()
-      .describe("Chunk_id especifico como alvo (alternativa a target). Use se ja tem o chunk."),
-    context_pairs: z.array(z.tuple([z.string(), z.string()])).min(1).max(10)
-      .describe("Lista de pares [positive_chunk_id, negative_chunk_id]. " +
-        "Cada par define uma direcao: o positivo eh o que voce quer, o negativo o que evita."),
-    peca: z.string().optional().describe("Filtrar resultados por peca"),
-    limit: z.number().int().min(1).max(20).default(5),
-    caso: z.string().optional().describe(DESC_CASO),
-  },
-  async ({ target, target_chunk_id, context_pairs, peca, limit, caso }) => {
-    try {
-      const alvo = (await sessao()).resolve(caso);
-      const body = { context_pairs, limit };
-      if (peca) body.peca = peca;
-      if (target_chunk_id) body.target_chunk_id = target_chunk_id;
-      else if (target) body.target_query = target;
-
-      const data = await apiPost(`/cases/${alvo.name}/discover`, body);
-      const lines = data.map(
-        (r) => `[${r.score.toFixed(3)}] ci:${r.chunk_index} peca=${r.peca || "?"} | ${r.content.slice(0, 200)}...`
-      );
-      return { content: [{ type: "text", text: lines.join("\n\n") || "Nenhum resultado." }] };
-    } catch (err) {
-      return { content: [{ type: "text", text: `Erro no discover: ${err.message}` }], isError: true };
     }
   }
 );

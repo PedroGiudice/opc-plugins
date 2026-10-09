@@ -135,8 +135,8 @@ test("guard: nenhuma tool monta URL ou path com CASE direto (tudo passa por sess
 
 test("guard: toda tool de leitura declara o parametro caso", () => {
   const src = readFileSync(new URL("./server.mjs", import.meta.url), "utf-8");
-  const tools = ["contexto", "reconstruir", "stats", "manifesto", "metadata", "recommend", "facet",
-    "comparar", "discover", "buscar_cronologico", "buscar_interseccao", "buscar_diversificado",
+  const tools = ["contexto", "reconstruir", "stats", "manifesto", "metadata", "facet",
+    "comparar", "buscar_cronologico", "buscar_interseccao", "buscar_diversificado",
     "document", "cross_ref"];
   for (const t of tools) {
     const inicio = src.indexOf(`server.tool(\n  "${t}",`);
