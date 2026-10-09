@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 import type { Mounted } from 'claude-code/testing'
 
 const PLUGIN = 'aidv-autos'
@@ -124,5 +124,49 @@ for (const surface of SURFACES) {
     expect(t).toContain('Recentes')
     expect(t).toContain('documento: RedeBrasil x Salesforce - parte 2')
     expect(t).not.toContain('.json')
+  })
+
+  test(`${surface}: inteiro teor do STJ maior que o teto continua pelo from_chunk`, async ($, on) => {
+    // Saida do document do stj-vec-tools fatiado (saida.mjs): aviso + JSON.
+    const julgadoMeta = { id: '1', processo: 'REsp 1', classe: 'RESP', ministro: 'NANCY ANDRIGHI', orgao_julgador: 'TERCEIRA TURMA' }
+    const pagina1 =
+      '[aviso: julgado maior que o limite de output — entregue até o chunk 1 de 3. Continue com from_chunk=2.]\n' +
+      JSON.stringify({
+        document: julgadoMeta, total_chunks: 3, chunks_entregues: '0-1', next_from: 2,
+        chunks: [
+          { id: 'a', chunk_index: 0, content: 'EMENTA\nprimeira parte da ementa', section: 'ementa' },
+          { id: 'b', chunk_index: 1, content: 'primeira parte do voto', section: 'voto' },
+        ],
+      }, null, 2)
+    const pagina2 = JSON.stringify({
+      document: julgadoMeta, total_chunks: 3, chunks_entregues: '2-2',
+      chunks: [{ id: 'c', chunk_index: 2, content: 'segunda parte do voto', section: 'voto' }],
+    }, null, 2)
+    const pedidos: Record<string, unknown>[] = []
+    on('tool.call', { tool: STJ }, () => ({ result: stjResposta, text: stjResposta }))
+    mock.clock(on)
+    on('mcp.call', { tool: 'document' }, (_$, e) => {
+      pedidos.push(e.args)
+      const texto = e.args.from_chunk === 2 ? pagina2 : pagina1
+      return { value: { content: [{ type: 'text', text: texto }], isError: false } }
+    })
+    await $.tool.call({ tool: STJ, tool_use_id: 'j1', query: 'software empresarial CDC' })
+    const ui = await $.ui.mount({
+      plugin: PLUGIN,
+      surface,
+      component: 'Pane',
+      requestId: PANE,
+      props: { title: 'Pesquisas da sessão', isFocused: true, bodyColumns: 64, placement: 'dock', scroll: { offset: 0, bodyRows: 80 }, view: {} },
+    })
+    await ui.press({ key: 'ler-j1-0-0' })
+    let t = await textos(ui)
+    expect(t).toContain('primeira parte do voto')
+    expect(t).toContain('O julgado continua.')
+    await ui.press({ key: 'continuar' })
+    t = await textos(ui)
+    expect(t).toContain('primeira parte do voto')
+    expect(t).toContain('segunda parte do voto')
+    expect(t).not.toContain('O julgado continua.')
+    expect(pedidos).toEqual([{ doc_id: '1' }, { doc_id: '1', from_chunk: 2 }])
   })
 }

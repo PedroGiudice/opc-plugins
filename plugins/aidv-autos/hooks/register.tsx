@@ -893,10 +893,15 @@ export const register: Register = on => {
           novo = textoLegivel(bruto)
           proximo = proximoDe(bruto)
         } else {
-          const r = await $.mcp.call(server, 'document', { doc_id: fonte.docId })
+          // Julgado e dispositivo vêm fatiados no teto de saída: o aviso no topo
+          // traz o from_chunk da continuação.
+          const args: Record<string, unknown> = { doc_id: fonte.docId }
+          if (fromChunk !== null) args.from_chunk = fromChunk
+          const r = await $.mcp.call(server, 'document', args)
           bruto = textoMcp(r)
           if (r.isError) throw new Error(bruto || 'A leitura falhou.')
           novo = fonte.kind === 'stj' ? textoJulgado(bruto) : textoDispositivo(bruto)
+          proximo = proximoDe(bruto)
         }
         await update($, leitura, antes =>
           antes
@@ -944,7 +949,7 @@ export const register: Register = on => {
           </Box>
           {lendo.proximo !== null && !lendo.carregando ? (
             <Box marginTop={1} columnGap={2}>
-              <Text dimColor>A peça continua.</Text>
+              <Text dimColor>{f.kind === 'stj' ? 'O julgado continua.' : f.kind === 'lei' ? 'O dispositivo continua.' : 'A peça continua.'}</Text>
               <Button key="continuar" plain dimColor onPress={() => abrirLeitura(f, lendo.titulo, lendo.meta, lendo.proximo)}>
                 Continuar leitura
               </Button>

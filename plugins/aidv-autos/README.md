@@ -45,7 +45,8 @@ pelo id do painel e das chaves de estado (renomear é decisão do empacotamento)
   regras de exibição do app (`lib/leituraContent.ts` do extractor-lab:
   `parseContent`, `reflow`, `splitList`, portadas sem alteração): título em
   negrito, lista em itens, tabela como bloco, nota de rodapé discreta, timbre
-  de página omitido. "Continuar leitura" traz a próxima fatia (`from_chunk`).
+  de página omitido. "Continuar leitura" traz a próxima fatia (`from_chunk`) da peça, do inteiro teor
+  e do dispositivo (os três chegam fatiados no teto de saída das tools).
   "Pedir ao Claude que leia" submete um prompt (único botão que gasta turno).
 
 O JSON que o modelo recebe NÃO muda: o mod lê uma cópia do `text` em
