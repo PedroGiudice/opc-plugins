@@ -16,9 +16,19 @@ comando cru, do caminho de disco ou de "Used plugin x: y". Complementa o
 | `Skill` | "Carregou o roteiro: nome" | › cinza |
 | `ToolSearch` | "Carregou ferramentas" | › cinza |
 | `WebFetch`, `WebSearch` | "Consultou a página: host" / "Pesquisou na internet: «q»" | › verde |
-| case-knowledge fora da busca (`memoria_search`, `metadata`, `manifesto`, `document`, `contexto`, `facet`, `reconstruir`, `buscar_*`, ...) | "Consultou a memória do caso: «q»", "Leu a ficha do caso", "Leu o índice dos autos", "Leu a peça inteira: X"... | ■ azul |
-| stj-vec-tools `document`, `filters` | "Leu o inteiro teor: X", "Listou os filtros do STJ" | ◈ lavanda |
-| legal-vec-tools `document`, `sources`, `recommend` | "Leu o dispositivo: X", "Listou as fontes da legislação" | § verde |
+| case-knowledge fora da busca (`memoria_search`, `metadata`, `manifesto`, `document`, `contexto`, `facet`, `reconstruir`, `buscar_*`, ...) | "Consultou a memória do caso: «q»", "Leu a ficha do caso", "Leu o índice dos autos", "Leu a peça inteira: Sentença · arquivo (pág. 9)"... | ■ azul |
+| stj-vec-tools `document`, `filters` | "Leu o inteiro teor: AREsp 2132923 · acórdão, Terceira Turma, Min. Moura Ribeiro, julgamento em 12/12/2022", "Listou os filtros do STJ" | ◈ lavanda |
+| legal-vec-tools `document`, `sources`, `recommend` | "Leu o dispositivo: CPC, art. 1012", "Listou as fontes da legislação" | § verde |
+
+Leituras (0.1.3): a linha diz O QUE foi lido, copiando do resultado. Peça:
+classe do cabeçalho `Peca:` da saída + arquivo sem `.json` + página do
+`#pNNNN` do segmento. Julgado: `processo`, `tipo`, `orgao_julgador`,
+`ministro` e `data_julgamento` (ou `data_publicacao`) do objeto `document`.
+Dispositivo: rótulo pelo `doc_id` (`cpc_art_1012`, `sumula_stj_547`). O
+identificador interno (doc_id, `<arquivo>.json#pNNNN`) nunca vai para a linha:
+fica em "Detalhes"; em curso, ou com saída ilegível, a frase fica genérica
+("Leu o inteiro teor de um julgado", "Leu um dispositivo"). O rótulo das
+classes de peça é espelho do `PECAS` do aidv-autos.
 
 Estados: em curso (gerúndio, sem botão); interrompido (apagado); erro
 (`isErrored`): "× Falhou: frase" + a linha útil do erro (num traceback, a
@@ -44,6 +54,12 @@ o JSON/texto das tools NÃO muda.
   pessoa). Em sessão hospedada na VM por SSH, a cópia que o Desktop envia vem
   sem `hooks/` e sombreia a instalação local. Desenvolver pelo dev-mods da
   sessão (skill `plugin-authoring`).
+- Desenvolver pela VM com o mod JÁ instalado na máquina do Desktop: a sessão
+  hospedada na VM recebe a cópia instalada SEM `hooks/`, com o mesmo nome, e
+  ela vence a cópia do dev-mods (medido 09/10/2026: nada desenha, nenhum aviso).
+  Contorno: no dev-mods, renomear o plugin para `<mod>-dev` (`name` do
+  plugin.json, `plugin:` dos atoms, chave do `PluginState` em `types/` e
+  `PLUGIN` dos testes) e desfazer a troca ao devolver o código ao dev clone.
 - Em grupo de tools o Desktop desenha só o site `ToolUse`; o detalhe vive na
   linha.
 - Gates: `claude plugin validate`, `tsc` contra o `.d.ts` da sessão e

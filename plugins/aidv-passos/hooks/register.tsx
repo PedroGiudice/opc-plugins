@@ -212,7 +212,8 @@ const STJ = 'mcp__plugin_stj-vec-tools_stj-vec-tools__'
 const LEI = 'mcp__plugin_legal-vec-tools_legal-vec-tools__'
 
 type Frase = { feito: string; rodando: string; categoria: Categoria }
-type FraseDe = (input: unknown) => Frase
+// `output` só existe com a chamada concluída: a frase em curso vem do input.
+type FraseDe = (input: unknown, output: unknown) => Frase
 
 function texto(input: unknown, ...nomes: string[]): string | null {
   for (const n of nomes) {
@@ -244,6 +245,188 @@ function comObjeto(feito: string, rodando: string, categoria: Categoria, ...nome
   }
 }
 
+// ---------------------------------------------------------------------------
+// Leituras: a linha diz O QUE foi lido, copiando do resultado (classe da peça,
+// processo, órgão, relator, datas). O identificador interno da base (doc_id,
+// `<arquivo>.json#pNNNN`) fica só em "Detalhes".
+// ---------------------------------------------------------------------------
+
+// Rótulo humano das classes de peça: espelho do `PECAS` do aidv-autos (mods
+// não compartilham código; mudar lá exige mudar aqui).
+const PECA_ROTULO: Record<string, string> = {
+  inicial: 'Petição inicial',
+  cumprimento_sentenca: 'Cumprimento de sentença',
+  embargos_terceiro: 'Embargos de terceiro',
+  incidente_desconsideracao_pj: 'Incidente de desconsideração da PJ',
+  contestacao: 'Contestação',
+  replica: 'Réplica',
+  manifestacao: 'Manifestação',
+  manifestacao_provas: 'Manifestação sobre provas',
+  peticao_diversa: 'Petição diversa',
+  alegacoes_finais: 'Alegações finais',
+  impugnacao_cumprimento_sentenca: 'Impugnação ao cumprimento de sentença',
+  embargos_execucao: 'Embargos à execução',
+  excecao_preexecutividade: 'Exceção de pré-executividade',
+  decisao_interlocutoria: 'Decisão interlocutória',
+  despacho: 'Despacho',
+  sentenca: 'Sentença',
+  acordao: 'Acórdão',
+  embargos_declaracao: 'Embargos de declaração',
+  agravo: 'Agravo de instrumento',
+  agravo_interno: 'Agravo interno',
+  agravo_peticao: 'Agravo de petição',
+  apelacao: 'Apelação',
+  recurso_ordinario: 'Recurso ordinário',
+  recurso_revista: 'Recurso de revista',
+  recurso_especial: 'Recurso especial',
+  recurso_extraordinario: 'Recurso extraordinário',
+  contrarrazoes: 'Contrarrazões',
+  ata_audiencia: 'Ata de audiência',
+  acordo: 'Acordo',
+  certidao: 'Certidão',
+  mandado: 'Mandado',
+  ato_ordinatorio: 'Ato ordinatório',
+  procuracao: 'Procuração',
+  contrato: 'Contrato',
+  comprovante: 'Comprovante',
+  nota_fiscal: 'Nota fiscal',
+  guia_custas: 'Guia de custas',
+  documento_pessoal: 'Documento pessoal',
+  documento_societario: 'Documento societário',
+  laudo: 'Laudo',
+  demonstrativo_calculo: 'Demonstrativo de cálculo',
+  trct: 'TRCT (rescisão)',
+  contracheque: 'Contracheque',
+  cartao_ponto: 'Cartão de ponto',
+  ctps: 'CTPS',
+  norma_coletiva: 'Norma coletiva',
+  certidao_divida_ativa: 'Certidão de dívida ativa',
+  certidao_extrajudicial: 'Certidão extrajudicial',
+  auto_infracao: 'Auto de infração',
+  outros_anexos: 'Outros anexos',
+}
+
+function rotuloDaPeca(peca: string): string {
+  const classe = peca.split('/')[0] ?? peca
+  return PECA_ROTULO[classe] ?? classe.replace(/_/g, ' ')
+}
+
+function semJson(nome: string): string {
+  return nome.replace(/\.json$/i, '')
+}
+
+// `<arquivo>.json#p0009` -> o arquivo e a página do PDF onde o documento começa.
+function alvoDoSegmento(seg: string): string {
+  const m = /^(.*)#p(\d+)$/.exec(seg)
+  return m && m[1] !== undefined && m[2] !== undefined ? `${semJson(m[1])} (pág. ${Number(m[2])})` : semJson(seg)
+}
+
+// Linha `Rotulo: valor` do cabeçalho da saída (antes da primeira linha em branco).
+function doCabecalho(saida: string, rotulo: string): string | null {
+  const cabecalho = saida.split(/\r?\n\r?\n/)[0] ?? ''
+  return new RegExp(`^${rotulo}: (.+)$`, 'm').exec(cabecalho)?.[1]?.trim() || null
+}
+
+const pecaInteira: FraseDe = (input, output) => {
+  const seg = texto(input, 'segmento', 'segmento_id')
+  const doc = texto(input, 'documento')
+  const alvo = seg ? alvoDoSegmento(seg) : doc ? semJson(doc) : null
+  const peca = doCabecalho(textoDaSaida(output), 'Peca')
+  const objeto = [peca ? rotuloDaPeca(peca) : null, alvo].filter(Boolean).join(' · ')
+  return {
+    feito: objeto ? `Leu a peça inteira: ${corta(objeto, 140)}` : 'Leu a peça inteira',
+    rodando: alvo ? `Lendo a peça inteira: ${corta(alvo, 120)}…` : 'Lendo a peça inteira…',
+    categoria: 'leituras',
+  }
+}
+
+const contextoDoTrecho: FraseDe = input => {
+  const doc = texto(input, 'documento')
+  const alvo = doc ? `: ${corta(semJson(doc), 90)}` : ''
+  return { feito: `Leu o contexto de um trecho${alvo}`, rodando: `Lendo o contexto de um trecho${alvo}…`, categoria: 'leituras' }
+}
+
+// "TERCEIRA TURMA" -> "Terceira Turma"; "LUIS FELIPE SALOMÃO" -> "Luis Felipe Salomão".
+const MINUSCULAS = new Set(['de', 'da', 'do', 'das', 'dos', 'e'])
+function nomeProprio(s: string): string {
+  return s
+    .toLowerCase()
+    .split(/\s+/)
+    .map((w, i) => (MINUSCULAS.has(w) && i > 0 ? w : w.charAt(0).toUpperCase() + w.slice(1)))
+    .join(' ')
+}
+
+function dataCurta(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso)
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : iso
+}
+
+// Campo string do JSON da saída, lido por expressão para não depender do
+// JSON inteiro (o inteiro teor é grande e pode vir cortado).
+function campoJson(trecho: string, nome: string): string | null {
+  const m = new RegExp(`"${nome}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(trecho)
+  if (!m || m[1] === undefined) return null
+  try {
+    return (JSON.parse(`"${m[1]}"`) as string).trim() || null
+  } catch {
+    return m[1].trim() || null
+  }
+}
+
+const TIPO_JULGADO: Record<string, string> = { 'ACÓRDÃO': 'acórdão', ACORDAO: 'acórdão', 'DECISÃO': 'decisão', DECISAO: 'decisão' }
+
+const inteiroTeor: FraseDe = (input, output) => {
+  const saida = textoDaSaida(output)
+  const fim = saida.indexOf('"chunks"')
+  // Só o objeto `document`, que vem antes dos chunks.
+  const doc = fim >= 0 ? saida.slice(0, fim) : saida.slice(0, 2000)
+  const processo = campoJson(doc, 'processo')
+  const tipo = campoJson(doc, 'tipo')
+  const orgao = campoJson(doc, 'orgao_julgador')
+  const ministro = campoJson(doc, 'ministro')
+  const julgamento = campoJson(doc, 'data_julgamento')
+  const publicacao = campoJson(doc, 'data_publicacao')
+  const dados = [
+    tipo ? TIPO_JULGADO[tipo.toUpperCase()] ?? tipo.toLowerCase() : null,
+    orgao ? nomeProprio(orgao) : null,
+    ministro ? `Min. ${nomeProprio(ministro)}` : null,
+    julgamento ? `julgamento em ${dataCurta(julgamento)}` : publicacao ? `publicação em ${dataCurta(publicacao)}` : null,
+  ]
+    .filter(Boolean)
+    .join(', ')
+  const pedido = texto(input, 'processo')
+  return {
+    feito: processo ? `Leu o inteiro teor: ${corta(dados ? `${processo} · ${dados}` : processo, 140)}` : 'Leu o inteiro teor de um julgado',
+    rodando: pedido ? `Lendo o inteiro teor: ${corta(pedido, 60)}…` : 'Lendo o inteiro teor de um julgado…',
+    categoria: 'leituras',
+  }
+}
+
+const CODIGOS: Record<string, string> = {
+  cf: 'CF', cc: 'CC', cpc: 'CPC', cdc: 'CDC', clt: 'CLT', cp: 'CP', cpp: 'CPP', eca: 'ECA', ctn: 'CTN',
+  codigo_civil: 'Código Civil', codigo_penal: 'Código Penal', marco_seguros: 'Marco Legal dos Seguros',
+}
+
+// Rótulo do dispositivo pelo próprio doc_id (`cpc_art_1012`, `sumula_stj_547`);
+// formato desconhecido = sem rótulo, nunca o id cru na linha.
+function rotuloDoDispositivo(docId: string): string | null {
+  const art = /^([a-z][a-z0-9_]*?)_art_([\w-]+)$/i.exec(docId)
+  if (art && art[1] && art[2]) return `${CODIGOS[art[1].toLowerCase()] ?? art[1].replace(/_/g, ' ')}, art. ${art[2].replace(/_/g, '-')}`
+  const sum = /^sumula_([a-z]+)_(\d+)$/i.exec(docId)
+  if (sum && sum[1] && sum[2]) return `Súmula ${sum[2]} do ${sum[1].toUpperCase()}`
+  return null
+}
+
+const dispositivo: FraseDe = input => {
+  const id = texto(input, 'doc_id')
+  const r = id ? rotuloDoDispositivo(id) : null
+  return {
+    feito: r ? `Leu o dispositivo: ${r}` : 'Leu um dispositivo',
+    rodando: r ? `Lendo o dispositivo: ${r}…` : 'Lendo um dispositivo…',
+    categoria: 'leituras',
+  }
+}
+
 const JURIDICAS: Record<string, FraseDe> = {
   [`${CK}memoria_search`]: comQuery('Consultou a memória do caso', 'Consultando a memória do caso', 'pesquisas'),
   [`${CK}metadata`]: fixa('Leu a ficha do caso', 'Lendo a ficha do caso…', 'leituras'),
@@ -251,8 +434,8 @@ const JURIDICAS: Record<string, FraseDe> = {
   [`${CK}stats`]: fixa('Contou as peças dos autos', 'Contando as peças dos autos…', 'leituras'),
   [`${CK}info`]: fixa('Conferiu qual é o caso ativo', 'Conferindo o caso ativo…', 'leituras'),
   [`${CK}list_cases`]: fixa('Listou os casos', 'Listando os casos…', 'leituras'),
-  [`${CK}document`]: comObjeto('Leu a peça inteira', 'Lendo a peça inteira', 'leituras', 'segmento', 'documento', 'segmento_id'),
-  [`${CK}contexto`]: comObjeto('Leu o contexto de um trecho', 'Lendo o contexto de um trecho', 'leituras', 'documento'),
+  [`${CK}document`]: pecaInteira,
+  [`${CK}contexto`]: contextoDoTrecho,
   [`${CK}facet`]: comObjeto('Mapeou os valores de', 'Mapeando os valores de', 'leituras', 'field', 'campo'),
   [`${CK}reconstruir`]: comQuery('Reconstruiu os autos sobre', 'Reconstruindo os autos sobre', 'leituras'),
   [`${CK}buscar_cronologico`]: comQuery('Pesquisou nos autos em ordem cronológica', 'Pesquisando nos autos em ordem cronológica', 'pesquisas'),
@@ -262,9 +445,9 @@ const JURIDICAS: Record<string, FraseDe> = {
   [`${CK}cross_ref`]: comObjeto('Procurou onde os autos citam', 'Procurando onde os autos citam', 'pesquisas', 'valor', 'item', 'query'),
   [`${CK}discover`]: comQuery('Explorou os autos', 'Explorando os autos', 'pesquisas'),
   [`${CK}recommend`]: fixa('Buscou trechos parecidos nos autos', 'Buscando trechos parecidos nos autos…', 'pesquisas'),
-  [`${STJ}document`]: comObjeto('Leu o inteiro teor', 'Lendo o inteiro teor', 'leituras', 'doc_id', 'processo'),
+  [`${STJ}document`]: inteiroTeor,
   [`${STJ}filters`]: fixa('Listou os filtros do STJ', 'Listando os filtros do STJ…', 'leituras'),
-  [`${LEI}document`]: comObjeto('Leu o dispositivo', 'Lendo o dispositivo', 'leituras', 'doc_id'),
+  [`${LEI}document`]: dispositivo,
   [`${LEI}sources`]: fixa('Listou as fontes da legislação', 'Listando as fontes da legislação…', 'leituras'),
   [`${LEI}recommend`]: fixa('Buscou dispositivos parecidos', 'Buscando dispositivos parecidos…', 'pesquisas'),
 }
@@ -428,7 +611,7 @@ function passoBase(tool: string, input: unknown, output: unknown): Omit<Passo, '
     default: {
       const juridica = JURIDICAS[tool]
       if (juridica) {
-        const f = juridica(input)
+        const f = juridica(input, output)
         return { ...f, tecnico: inputCompacto(input), docx: null }
       }
       return {

@@ -231,3 +231,165 @@ for (const surface of SURFACES) {
     expect(glifo?.props.color).toBe('#8a4a0b')
   })
 }
+
+// Leituras de peça e de julgado: a linha mostra o que o resultado diz (peça,
+// processo, órgão, relator, data), nunca o identificador interno da base.
+const CK_DOC = 'mcp__plugin_case-knowledge_case-knowledge__document'
+const STJ_DOC = 'mcp__plugin_stj-vec-tools_stj-vec-tools__document'
+const LEI_DOC = 'mcp__plugin_legal-vec-tools_legal-vec-tools__document'
+
+const julgado = (doc: Record<string, string>) => ({
+  content: [{ type: 'text', text: JSON.stringify({ document: doc, chunks: [{ id: 'x:0', content: 'ACÓRDÃO\nVistos...', tipo: 'NÃO É O TIPO' }] }, null, 2) }],
+})
+
+for (const surface of SURFACES) {
+  test(`${surface}: inteiro teor do STJ mostra processo, órgão, relator e julgamento`, async $ => {
+    const ui = await $.ui.mount({
+      plugin: PLUGIN,
+      surface,
+      component: 'ToolUse',
+      viewport: { columns: 160, rows: 40 },
+      props: {
+        ...base,
+        tool_use_id: 'j1',
+        tool: STJ_DOC,
+        input: { doc_id: '173423225' },
+        output: julgado({
+          id: '173423225', processo: 'AREsp 2132923', classe: 'ARESP', ministro: 'MOURA RIBEIRO',
+          orgao_julgador: 'TERCEIRA TURMA', data_julgamento: '2022-12-12', data_publicacao: '2022-12-14', tipo: 'ACÓRDÃO',
+        }),
+      },
+    })
+    const t = await textos(ui)
+    expect(t).toContain('Leu o inteiro teor: AREsp 2132923 · acórdão, Terceira Turma, Min. Moura Ribeiro, julgamento em 12/12/2022')
+    expect(t).not.toContain('173423225')
+    await ui.press({ key: 'det-j1' })
+    expect(await textos(ui)).toContain('doc_id: 173423225')
+  })
+
+  test(`${surface}: decisão monocrática sem órgão nem julgamento usa a publicação`, async $ => {
+    const ui = await $.ui.mount({
+      plugin: PLUGIN,
+      surface,
+      component: 'ToolUse',
+      viewport: { columns: 160, rows: 40 },
+      props: {
+        ...base,
+        tool_use_id: 'j2',
+        tool: STJ_DOC,
+        input: { doc_id: '132591956' },
+        output: julgado({
+          id: '132591956', processo: 'REsp 1925971', classe: 'RESP', ministro: 'LUIS FELIPE SALOMÃO',
+          orgao_julgador: '', data_julgamento: '', data_publicacao: '2021-09-01', tipo: 'DECISAO',
+        }),
+      },
+    })
+    expect(await textos(ui)).toContain('Leu o inteiro teor: REsp 1925971 · decisão, Min. Luis Felipe Salomão, publicação em 01/09/2021')
+  })
+
+  test(`${surface}: inteiro teor em curso ou ilegível não mostra o número interno`, async $ => {
+    const rodando = await $.ui.mount({
+      plugin: PLUGIN,
+      surface,
+      component: 'ToolUse',
+      props: { ...base, isRunning: true, tool_use_id: 'j3', tool: STJ_DOC, input: { doc_id: '346123902' } },
+    })
+    expect(await textos(rodando)).toContain('Lendo o inteiro teor de um julgado')
+    expect(await textos(rodando)).not.toContain('346123902')
+    const ilegivel = await $.ui.mount({
+      plugin: PLUGIN,
+      surface,
+      component: 'ToolUse',
+      props: { ...base, tool_use_id: 'j4', tool: STJ_DOC, input: { doc_id: '346123902' }, output: 'documento não encontrado' },
+    })
+    expect(await textos(ilegivel)).toContain('Leu o inteiro teor de um julgado')
+    expect(await textos(ilegivel)).not.toContain('346123902')
+  })
+
+  test(`${surface}: peça inteira mostra a classe e o arquivo, sem .json nem #p`, async $ => {
+    const ui = await $.ui.mount({
+      plugin: PLUGIN,
+      surface,
+      component: 'ToolUse',
+      props: {
+        ...base,
+        tool_use_id: 'p1',
+        tool: CK_DOC,
+        input: { segmento: 'Salesforce x Redebrasil - evento 107 ao 117.json#p0009' },
+        output: {
+          content: [{
+            type: 'text',
+            text: 'Segmento: Salesforce x Redebrasil - evento 107 ao 117.json#p0009\nArquivo: Salesforce x Redebrasil - evento 107 ao 117.json\nPeca: sentenca\nTitulo: SENTENÇA\nChunks 2-4 de 3 (ordem sequencial)\n\n--- chunk 2 ---\nPeca: não é o cabeçalho',
+          }],
+        },
+      },
+    })
+    const t = await textos(ui)
+    expect(t).toContain('Leu a peça inteira: Sentença · Salesforce x Redebrasil - evento 107 ao 117 (pág. 9)')
+    expect(t).not.toContain('.json')
+    expect(t).not.toContain('#p0009')
+  })
+
+  test(`${surface}: peça com aviso de corte e subtipo, e leitura em curso`, async $ => {
+    const ui = await $.ui.mount({
+      plugin: PLUGIN,
+      surface,
+      component: 'ToolUse',
+      props: {
+        ...base,
+        tool_use_id: 'p2',
+        tool: CK_DOC,
+        input: { segmento: 'autos parte 2.json#p0107' },
+        output: {
+          content: [{
+            type: 'text',
+            text: '[aviso: documento maior que o limite de output — entregue ate o chunk 33 de 40. Continue com from_chunk=34.]\nSegmento: autos parte 2.json#p0107\nArquivo: autos parte 2.json\nPeca: contestacao/merito\nChunks 28-33 de 6 (ordem sequencial)\n\n',
+          }],
+        },
+      },
+    })
+    expect(await textos(ui)).toContain('Leu a peça inteira: Contestação · autos parte 2 (pág. 107)')
+    const rodando = await $.ui.mount({
+      plugin: PLUGIN,
+      surface,
+      component: 'ToolUse',
+      props: { ...base, isRunning: true, tool_use_id: 'p3', tool: CK_DOC, input: { segmento: 'autos parte 2.json#p0107' } },
+    })
+    expect(await textos(rodando)).toContain('Lendo a peça inteira: autos parte 2 (pág. 107)')
+  })
+
+  test(`${surface}: documento inteiro (sem segmento) tira o .json do nome`, async $ => {
+    const ui = await $.ui.mount({
+      plugin: PLUGIN,
+      surface,
+      component: 'ToolUse',
+      props: {
+        ...base,
+        tool_use_id: 'p4',
+        tool: CK_DOC,
+        input: { documento: 'Procuração.json' },
+        output: { content: [{ type: 'text', text: 'Documento: Procuração.json\nChunks 0-0 de 1 (ordem sequencial)\n\n' }] },
+      },
+    })
+    const t = await textos(ui)
+    expect(t).toContain('Leu a peça inteira: Procuração')
+    expect(t).not.toContain('.json')
+  })
+
+  test(`${surface}: dispositivo da legislação pelo rótulo legível`, async $ => {
+    for (const [id, esperado] of [
+      ['cpc_art_1012', 'Leu o dispositivo: CPC, art. 1012'],
+      ['processo_administrativo_art_61', 'Leu o dispositivo: processo administrativo, art. 61'],
+      ['sumula_stj_547', 'Leu o dispositivo: Súmula 547 do STJ'],
+      ['xpto-9', 'Leu um dispositivo'],
+    ] as const) {
+      const ui = await $.ui.mount({
+        plugin: PLUGIN,
+        surface,
+        component: 'ToolUse',
+        props: { ...base, tool_use_id: `l-${id}`, tool: LEI_DOC, input: { doc_id: id }, output: '{"chunks":[]}' },
+      })
+      expect(await textos(ui)).toContain(esperado)
+    }
+  })
+}
