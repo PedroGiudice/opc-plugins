@@ -22,3 +22,9 @@ test("descricoes avisam que voto vencido nao e a posicao do colegiado", () => {
 test("ementa_origem e identificada como do tribunal de origem", () => {
   assert.match(src, /ementa_origem = ementa do acordao recorrido transcrita \(tribunal de origem, NAO do STJ\)/);
 });
+
+test("ementa_citada e excluida por padrao e o opt-in incluir_citadas existe (CMR-290)", () => {
+  assert.match(src, /incluir_citadas: z\s*\.boolean\(\)/);
+  assert.match(src, /Por padrao os resultados EXCLUEM ementa_citada/);
+  assert.match(src, /substitui a exclusao padrao de ementa_citada/);
+});

@@ -136,6 +136,7 @@ const secaoValues =
 
 // Leitura juridica dos rotulos do chunker v3 (repetida nas descricoes das tools).
 const avisoSecoes =
+  "Por padrao os resultados EXCLUEM ementa_citada (precedente transcrito dentro de outra decisao); passe filters.incluir_citadas=true ou secao=['ementa_citada'] para ve-las. " +
   "Rotulos: voto_vencido = voto que FICOU VENCIDO, NAO e a posicao do colegiado e nunca deve ser citado como entendimento da turma; " +
   "voto_vista e voto_vogal = votos de outros ministros (conferir se acompanharam o relator); " +
   "ementa_origem = ementa do acordao recorrido transcrita (tribunal de origem, NAO do STJ); " +
@@ -168,7 +169,14 @@ const filtersField = z
     secao: secaoField.optional().describe(`Restringe a busca a uma ou mais secoes do acordao (${secaoValues}). String ou array.`),
     must_not_secao: secaoField
       .optional()
-      .describe(`Exclui chunks das secoes informadas (${secaoValues}). String ou array. Util para fugir de transcricoes literais repetidas.`),
+      .describe(`Exclui chunks das secoes informadas (${secaoValues}). String ou array. Se informado, substitui a exclusao padrao de ementa_citada.`),
+    incluir_citadas: z
+      .boolean()
+      .optional()
+      .describe(
+        "Por padrao a busca EXCLUI ementa_citada (a mesma ementa transcrita em N decisoes lota o top-10 com copias). " +
+          "true traz as citacoes de volta; util para 'quem cita o precedente X' (ou use secao: ['ementa_citada'] / processo_cited)."
+      ),
   })
   .optional()
   .default({})
