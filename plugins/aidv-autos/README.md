@@ -22,10 +22,19 @@ pelo id do painel e das chaves de estado (renomear é decisão do empacotamento)
   ■ ato / ○ expediente / ◆ anexo, rótulo da peça em português na cor do tom
   AiDV, fls., data de juntada, parte e título) e "Ver no painel". Enquanto
   roda: "Buscando nos autos: …". Erro e interrupção têm linha própria.
+  A linha cabe SEMPRE numa linha (0.2.2): rótulo, contagem e botões ficam
+  inteiros, os filtros cedem primeiro (cortados, ou fora da linha em tela
+  estreita) e a pergunta leva o que sobra, cortada no fim (`wrap:
+  'truncate-end'`). Antes, uma linha mais larga que a tela encolhia cada
+  pedaço e o quebrava na própria coluna (pesquisas do STJ com filtros viravam
+  uma tabela de duas linhas).
+- Nome de arquivo dos autos sem `.json` (a extensão do OCR) no filtro
+  `documento`, nos grupos de "Detalhes" e no painel (0.2.2).
 - **Bloco de resultado** (`ToolResult`): nunca desenha o JSON. A lista vive
   na linha, porque dentro de um grupo de tools o motor não desenha esse site.
-- **Painel** (`Pane`, id `aidv-autos`, título pela fonte selecionada):
-  pesquisas da sessão no topo (com o glifo da fonte; alternam a selecionada),
+- **Painel** (`Pane`, id `aidv-autos`, título fixo "Pesquisas da sessão"
+  desde a 0.2.2, porque a lista mistura as três fontes): "Recentes" no topo
+  (com o glifo da fonte; alternam a selecionada),
   itens da pesquisa selecionada com preview limpo e os botões de leitura
   ("Peça inteira"/"Contexto" nos autos, "Inteiro teor" no STJ, "Dispositivo
   inteiro" na legislação), que chamam as tools `document`/`contexto` do
@@ -53,6 +62,12 @@ O JSON que o modelo recebe NÃO muda: o mod lê uma cópia do `text` em
   são traduzidas em `CODIGOS`; prefixo desconhecido usa o nome do código que
   vem no próprio texto.
 
+- Desenvolver pela VM com o mod JÁ instalado na máquina do Desktop: a sessão
+  hospedada na VM recebe a cópia instalada SEM `hooks/`, com o mesmo nome, e
+  ela vence a cópia do dev-mods (medido 09/10/2026: nada desenha, nenhum aviso).
+  Contorno: no dev-mods, renomear o plugin para `<mod>-dev` (`name` do
+  plugin.json, `plugin:` dos atoms, chave do `PluginState` em `types/` e
+  `PLUGIN` dos testes) e desfazer a troca ao devolver o código ao dev clone.
 - Em grupo de tools ("Used N tools") só a linha `ToolUse` existe; o site
   `ToolResult` não é desenhado. Qualquer detalhe tem de estar na linha.
 - O painel SOLTA o teclado a cada redesenho: o clique seguinte vira foco em
@@ -72,5 +87,8 @@ O JSON que o modelo recebe NÃO muda: o mod lê uma cópia do `text` em
 Dev: skill `plugin-authoring` + copiar para `~/.claude/dev-mods/<sessão>/`
 (hot reload). Ou `claude --plugin-dir ~/opc-plugins/plugins/aidv-autos`.
 Validação: `claude plugin validate <dir>`; tipos: `tsc` com o `.d.ts` que a
-skill grava (`tsconfig` sugerido no cabeçalho do arquivo). Ainda FORA do
-`marketplace.json`.
+skill grava (`tsconfig` sugerido no cabeçalho do arquivo); testes:
+`claude plugin test <dir>` (`tests/autos.test.ts`, terminal + desktop).
+Fora do engine (sem os tipos das tools MCP que ele grava ao carregar), o
+`tsc` acusa o matcher `{ tool: TOOL }` do `tool.call`: é do ambiente, não do
+código. No `marketplace.json` e na `SETUP_PLUGINS` desde 06/10/2026.

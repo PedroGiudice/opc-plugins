@@ -9,6 +9,8 @@ import type { Busca, Fonte, FonteLeitura, Leitura, Trecho } from '../types'
 // ---------------------------------------------------------------------------
 
 const PANE = 'aidv-autos'
+// Um painel só, para as três fontes: o título não muda com a pesquisa aberta.
+const TITULO_PAINEL = 'Pesquisas da sessão'
 const MAX_BUSCAS = 15
 
 type Meta = {
@@ -17,7 +19,6 @@ type Meta = {
   tools: string[]
   glifo: string
   cor: string
-  titulo: string
   rodando: string
   feito: string
   falhou: string
@@ -37,7 +38,6 @@ const FONTES: Record<Fonte, Meta> = {
     tools: ['mcp__plugin_case-knowledge_case-knowledge__search'],
     glifo: '■',
     cor: COR_INFO,
-    titulo: 'Autos do caso',
     rodando: 'Buscando nos autos:',
     feito: 'Buscou nos autos:',
     falhou: 'Busca nos autos falhou:',
@@ -50,7 +50,6 @@ const FONTES: Record<Fonte, Meta> = {
     tools: ['mcp__plugin_stj-vec-tools_stj-vec-tools__search', 'mcp__plugin_stj-vec-tools_stj-vec-tools__search_formula'],
     glifo: '◈',
     cor: COR_LAVENDER,
-    titulo: 'Jurisprudência do STJ',
     rodando: 'Pesquisando jurisprudência do STJ:',
     feito: 'Pesquisou jurisprudência do STJ:',
     falhou: 'Pesquisa de jurisprudência falhou:',
@@ -63,7 +62,6 @@ const FONTES: Record<Fonte, Meta> = {
     tools: ['mcp__plugin_legal-vec-tools_legal-vec-tools__search'],
     glifo: '§',
     cor: COR_OK,
-    titulo: 'Legislação',
     rodando: 'Pesquisando a legislação:',
     feito: 'Pesquisou a legislação:',
     falhou: 'Pesquisa de legislação falhou:',
@@ -212,6 +210,11 @@ function dataCurta(iso: string | null): string {
   return m ? `${m[3]}/${m[2]}/${m[1]}` : iso
 }
 
+// O arquivo dos autos é o JSON do OCR: a extensão não diz nada ao advogado.
+function semJson(nome: string): string {
+  return nome.replace(/\.json$/i, '')
+}
+
 function corta(s: string, max: number): string {
   return s.length > max ? s.slice(0, max - 1).trimEnd() + '…' : s
 }
@@ -279,7 +282,7 @@ function lerLotesAutos(texto: string): Busca['lotes'] {
     const cab = /^=== (query|documento): (.*) ===$/.exec(linha)
     if (cab) {
       if (atual.trechos.length || atual.rotulo !== null) lotes.push(atual)
-      atual = { rotulo: cab[2] ?? '', trechos: [] }
+      atual = { rotulo: cab[1] === 'documento' ? semJson(cab[2] ?? '') : cab[2] ?? '', trechos: [] }
       continue
     }
     if (!linha.startsWith('{')) continue
@@ -395,7 +398,7 @@ function filtrosDe(fonte: Fonte, input: unknown): string[] {
   if (fonte === 'autos') {
     for (const k of ['peca', 'fase', 'documento', 'categoria', 'subtipo', 'parte_peticionante']) {
       const v = i[k]
-      if (typeof v === 'string' && v) out.push(k === 'peca' ? rotulo(v) : `${k}: ${v}`)
+      if (typeof v === 'string' && v) out.push(k === 'peca' ? rotulo(v) : `${k}: ${k === 'documento' ? semJson(v) : v}`)
     }
     if (Array.isArray(i.casos) && i.casos.length) out.push(`casos: ${i.casos.join(', ')}`)
     return out
@@ -456,7 +459,7 @@ function cabecalho(t: Trecho): { marca: string; cor: string; titulo: string; met
     return { marca: '§', cor: COR_OK, titulo: t.rotuloLei, meta: '', nome: '' }
   }
   const meta = [fls(t.paginaInicio, t.paginaFim), dataCurta(t.data), t.parte ? PARTE[t.parte] ?? t.parte : ''].filter(Boolean).join(' · ')
-  const nome = t.titulo ?? t.documento.replace(/\.json$/i, '')
+  const nome = t.titulo ?? semJson(t.documento)
   return { marca: marcador(t.peca), cor: cor(t.peca), titulo: rotulo(t.peca), meta, nome }
 }
 
@@ -714,78 +717,107 @@ export const register: Register = on => {
 
         const query = b?.query ?? queryDe(e.props.input)
         const filtros = b?.filtros ?? filtrosDe(meta.fonte, e.props.input)
-        const q = corta(query, Math.max(24, e.viewport?.columns ? e.viewport.columns - 60 : 80))
+        const colunas = e.viewport?.columns ?? 100
+
+        // Uma linha só: rótulo, contagem e botões ficam inteiros; os filtros
+        // cedem primeiro (cortados, ou fora da linha quando a tela é estreita:
+        // seguem no painel); a pergunta leva o que sobra e é cortada no fim
+        // (inteira no painel). Sem isto, uma linha mais larga que a tela
+        // encolhia cada pedaço e o quebrava na própria coluna.
+        const MIN_PERGUNTA = 16
+        const ajusta = (fixos: string[], botoes: string[]): { q: string; f: string } => {
+          const ocupado =
+            fixos.filter(Boolean).reduce((n, x) => n + x.length + 1, 0) + botoes.reduce((n, x) => n + x.length + 5, 0)
+          const livre = colunas - 4 - ocupado
+          let f = ''
+          if (filtros.length) {
+            const inteiro = `(${corta(filtros.join(', '), 48)})`
+            const cabe = livre - MIN_PERGUNTA - 1
+            if (inteiro.length <= cabe) f = inteiro
+            else if (cabe >= 14) f = `(${corta(filtros.join(', '), cabe - 2)})`
+          }
+          return { q: corta(query, Math.max(MIN_PERGUNTA, livre - (f ? f.length + 1 : 0))), f }
+        }
+        const linhaDeBusca = (glifo: RenderElement, rotulo: RenderElement, q: string, cauda: RenderElement[], dim = false) => (
+          <Box columnGap={1}>
+            {glifo}
+            <Box flexShrink={0}>{rotulo}</Box>
+            <Box flexShrink={1} minWidth={0}>
+              <Text wrap="truncate-end" dimColor={dim}>{q}</Text>
+            </Box>
+            {cauda.length ? (
+              <Box flexShrink={0} columnGap={1}>
+                {cauda}
+              </Box>
+            ) : null}
+          </Box>
+        )
+        const filtrosEl = (f: string): RenderElement[] => (f ? [<Text key="filtros" dimColor>{f}</Text>] : [])
 
         if (e.props.isRunning || !b || !b.concluida) {
-          return (
-            <Box columnGap={1}>
-              <Text color={meta.cor}>{meta.glifo}</Text>
-              <Text bold>{meta.rodando}</Text>
-              <Text>{q}</Text>
-              {filtros.length ? <Text dimColor>({filtros.join(', ')})</Text> : null}
-            </Box>
-          )
+          const { q, f } = ajusta([meta.glifo, meta.rodando], [])
+          return linhaDeBusca(<Text color={meta.cor}>{meta.glifo}</Text>, <Text bold>{meta.rodando}</Text>, q, filtrosEl(f))
         }
 
         if (e.props.isInterrupted) {
-          return (
-            <Box columnGap={1}>
-              <Text dimColor>{meta.glifo}</Text>
-              <Text bold dimColor>{meta.interrompida}</Text>
-              <Text dimColor>{q}</Text>
-            </Box>
+          return linhaDeBusca(
+            <Text dimColor>{meta.glifo}</Text>,
+            <Text bold dimColor>{meta.interrompida}</Text>,
+            ajusta([meta.glifo, meta.interrompida], []).q,
+            [],
+            true,
           )
         }
 
         if (b.erro || e.props.isErrored) {
-          return (
-            <Box columnGap={1}>
-              <Text color={COR_DANGER}>{meta.glifo}</Text>
-              <Text bold>{meta.falhou}</Text>
-              <Text>{q}</Text>
-              <Text dimColor>{corta(b.erro ?? '', 80)}</Text>
-            </Box>
+          const motivo = corta(b.erro ?? '', 80)
+          return linhaDeBusca(
+            <Text color={COR_DANGER}>{meta.glifo}</Text>,
+            <Text bold>{meta.falhou}</Text>,
+            ajusta([meta.glifo, meta.falhou, motivo], []).q,
+            motivo ? [<Text key="motivo" dimColor>{motivo}</Text>] : [],
           )
         }
 
         const t = totais(b)
         const estaAberto = abertos[b.id] === true
         const id = b.id
-        const largura = Math.max(40, (e.viewport?.columns ?? 100) - 8)
+        const largura = Math.max(40, colunas - 8)
+        const rotuloDetalhes = estaAberto ? 'Ocultar' : 'Detalhes'
+        const contagem = resumo(b)
 
-        const linha = (
-          <Box columnGap={1}>
-            <Text color={meta.cor}>{meta.glifo}</Text>
-            <Text bold>{meta.feito}</Text>
-            <Text>{q}</Text>
-            {filtros.length ? <Text dimColor>({filtros.join(', ')})</Text> : null}
-            <Text dimColor>·</Text>
-            <Text dimColor>{resumo(b)}</Text>
-            {t.trechos > 0 ? (
-              <Button
-                key={`det-${id}`}
-                plain
-                dimColor
-                onPress={() => update($, aberto, a => ({ ...a, [id]: !a[id] }))}
-              >
-                {estaAberto ? 'Ocultar' : 'Detalhes'}
-              </Button>
-            ) : null}
-            {t.trechos > 0 ? (
-              <Button
-                key={`pane-${id}`}
-                plain
-                dimColor
-                onPress={async () => {
-                  await update($, selecionada, () => id)
-                  const r = await $.ui.open({ id: PANE, title: meta.titulo, columns: 64, focus: true })
-                  if (!r.isPlaced) $.ui.toast(`${meta.titulo}: alargue a janela para ver o painel.`)
-                }}
-              >
-                Ver no painel
-              </Button>
-            ) : null}
-          </Box>
+        const botoes = t.trechos > 0 ? [rotuloDetalhes, 'Ver no painel'] : []
+        const { q, f } = ajusta([meta.glifo, meta.feito, '·', contagem], botoes)
+        const cauda: RenderElement[] = [
+          ...filtrosEl(f),
+          <Text key="ponto" dimColor>·</Text>,
+          <Text key="contagem" dimColor>{contagem}</Text>,
+        ]
+        if (t.trechos > 0) {
+          cauda.push(
+            <Button key={`det-${id}`} plain dimColor onPress={() => update($, aberto, a => ({ ...a, [id]: !a[id] }))}>
+              {rotuloDetalhes}
+            </Button>,
+            <Button
+              key={`pane-${id}`}
+              plain
+              dimColor
+              onPress={async () => {
+                await update($, selecionada, () => id)
+                const r = await $.ui.open({ id: PANE, title: TITULO_PAINEL, columns: 64, focus: true })
+                if (!r.isPlaced) $.ui.toast('Alargue a janela para ver o painel de pesquisas.')
+              }}
+            >
+              Ver no painel
+            </Button>,
+          )
+        }
+
+        const linha = linhaDeBusca(
+          <Text color={meta.cor}>{meta.glifo}</Text>,
+          <Text bold>{meta.feito}</Text>,
+          q,
+          cauda,
         )
 
         if (!estaAberto) return linha
@@ -817,13 +849,12 @@ export const register: Register = on => {
     const prontas = lista.filter(b => b.concluida && !b.erro)
     const b = prontas.find(x => x.id === sel) ?? prontas[prontas.length - 1]
     const largura = Math.max(30, e.props.bodyColumns - 2)
-    const tituloPainel = b ? FONTES[b.fonte].titulo : 'Pesquisas'
 
     // Pede o foco de volta ao painel: no Desktop, cada redesenho solta o
     // teclado e o clique seguinte viraria foco em vez de pressão.
     const refocar = () => {
       $.clock.after(250, () => {
-        void $.ui.open({ id: PANE, title: tituloPainel, focus: true })
+        void $.ui.open({ id: PANE, title: TITULO_PAINEL, focus: true })
       })
     }
 
@@ -992,7 +1023,7 @@ export const register: Register = on => {
       <Box flexDirection="column" paddingX={1}>
         {recentes.length > 1 ? (
           <Box flexDirection="column" marginBottom={1}>
-            <Text dimColor>Pesquisas desta sessão</Text>
+            <Text dimColor>Recentes</Text>
             {recentes.map(r => (
               <Box key={`selb-${r.id}`} columnGap={1}>
                 <Text color={FONTES[r.fonte].cor} dimColor={r.id !== b.id}>{FONTES[r.fonte].glifo}</Text>
