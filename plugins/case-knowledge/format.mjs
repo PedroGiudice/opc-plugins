@@ -1063,3 +1063,24 @@ function renderListaDaFicha(data, listas, nome, aPartir, globalCap) {
   }
   return montar(lo);
 }
+
+// === Tool comparar ===
+
+/**
+ * Os `limit` pares mais similares, do maior score para o menor, cada par uma
+ * vez. A API repassa `limit` ao search_matrix_pairs do Qdrant, onde ele e o
+ * numero de vizinhos POR PONTO da amostra: com os defaults (sample 200, limit
+ * 20) chegavam 4.000 pares agrupados por ponto, 344 mil chars (medido em
+ * 09/10/2026), quando a tool promete os `limit` pares mais similares. O corte
+ * e exato: um par do top `limit` global esta entre os `limit` vizinhos mais
+ * proximos de cada um dos seus dois pontos.
+ */
+export function paresMaisSimilares(pairs, limit) {
+  const unicos = new Map();
+  for (const p of pairs || []) {
+    const chave = [p.a, p.b].sort().join("\u0000");
+    const atual = unicos.get(chave);
+    if (!atual || p.score > atual.score) unicos.set(chave, p);
+  }
+  return [...unicos.values()].sort((x, y) => y.score - x.score).slice(0, limit);
+}

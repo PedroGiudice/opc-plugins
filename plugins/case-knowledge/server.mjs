@@ -26,6 +26,7 @@ import {
   renderReconstrucao,
   renderManifesto,
   renderMetadata,
+  paresMaisSimilares,
   detectaCollectionAusente,
   renderCaseSemBase,
 } from "./format.mjs";
@@ -859,7 +860,7 @@ server.tool(
     try {
       const alvo = (await sessao()).resolve(caso);
       const data = await apiPost(`/cases/${alvo.name}/comparar`, { sample, limit, peca, documento });
-      const lines = data.pairs.map((p) => `[${p.score.toFixed(3)}] ${p.a} <-> ${p.b}`);
+      const lines = paresMaisSimilares(data.pairs, limit).map((p) => `[${p.score.toFixed(3)}] ${p.a} <-> ${p.b}`);
       return { content: [{ type: "text", text: lines.join("\n") || "Nenhum par encontrado." }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Erro no comparar: ${err.message}` }], isError: true };
