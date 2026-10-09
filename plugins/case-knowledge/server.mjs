@@ -19,6 +19,8 @@ import {
   OUTPUT_CAP_CHARS,
   renderLines,
   buildCappedPayload,
+  degradeNotice,
+  renderHitsComTeto,
   capContextChunks,
   renderDocumentChunks,
   renderReconstrucao,
@@ -49,19 +51,6 @@ const CASES_BASE = process.env.CASE_KNOWLEDGE_CASES_BASE || defaultCasesBase();
 const REQUEST_TIMEOUT_MS = 60_000;
 const MAX_RETRIES = 3;
 const RETRY_DELAYS = [500, 1500, 3000];
-
-function degradeNotice(degraded, requestedChars) {
-  if (!degraded) return "";
-  const parts = [];
-  // content_chars do degraded e o valor FINAL usado; so e "reduzido" se
-  // ficou abaixo do que o caller pediu (com requested <= 200 nao ha degrau).
-  if (degraded.content_chars > 0 && degraded.content_chars < requestedChars) {
-    parts.push(`preview reduzido para ${degraded.content_chars} chars`);
-  }
-  if (degraded.kept !== null) parts.push(`resultados cortados para top ${degraded.kept} por lista`);
-  return `[aviso: output excederia o limite de tokens — ${parts.join("; ")}. ` +
-    `Refine com filtros, limit menor ou leia chunks especificos via contexto.]\n\n`;
-}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -188,7 +177,7 @@ const server = new McpServer(
       "Tools sobre os DOCUMENTOS do caso ativo (derivado do cwd). Guia de decisao:",
       "- Abrir sessao / entender o caso: metadata -> manifesto -> stats; memoria_search para o que ja foi feito/decidido em sessoes anteriores.",
       "- Achar tema/argumento: search (filtros peca/fase/documento/categoria). Dois temas que precisam aparecer JUNTOS: buscar_interseccao. Os mais recentes sobre um tema: buscar_cronologico. Panorama por documentos distintos: buscar_diversificado. Mais-como-este a partir de chunks: recommend. Na direcao de X evitando Y: discover.",
-      "- Ler na INTEGRA: contexto (janela ao redor de um chunk do search) ou document (peca inteira em ordem sequencial). O content do search e PREVIEW — nunca citar/transcrever a partir dele.",
+      "- Ler na INTEGRA: contexto (janela ao redor de um chunk do search) ou document (peca inteira em ordem sequencial). O content do search, das buscas buscar_* e do recommend e PREVIEW — nunca citar/transcrever a partir dele.",
       "- Reconstruir passagens continuas de um tema atravessando varios documentos, em ordem processual: reconstruir. Prefira document para UMA peca inteira; reconstruir para o recorte de VARIOS documentos.",
       "- Contar/mapear valores de campo: facet. Citacoes do caso: facet em processos_citados/recursos_citados/sumulas_citadas/temas_repetitivos/dispositivos_citados; onde mais os autos citam um item: cross_ref.",
       "- Repeticao/duplicata entre pecas: comparar.",
@@ -252,6 +241,18 @@ async function refreshRoots() {
 const DESC_CASO =
   "Caso alvo quando a sessao tem mais de um (campo 'caso' dos resultados de search; " +
   "veja info). Default: caso principal.";
+
+/** Preview do content por resultado, comum ao search e as buscas avancadas. */
+const contentCharsField = z.number().int().min(0).max(20000).default(1200)
+  .describe("Tamanho do preview de content por resultado, em chars (default 1200). " +
+    "0 = retorna content integral SEM truncar — use com limit baixo (<=3) para nao " +
+    "estourar o limite de output. Para leitura pontual na integra prefira a tool contexto.");
+
+/** Frase das descricoes: o content das buscas e preview, a integra vem do contexto. */
+const DESC_PREVIEW =
+  "O content de cada resultado e PREVIEW (default 1200 chars; content_truncated=true e " +
+  "content_len marcam o corte) e a saida tem teto de tamanho: para ler um trecho na INTEGRA " +
+  "use contexto(documento, chunk_index).";
 
 /**
  * Sessao atual, esperando a resposta inicial de roots por ate 3 s.
@@ -334,10 +335,7 @@ server.tool(
         "veja a tool info). Omitido = todos os casos ativos. O valor 'relacionados' expande os " +
         "relacionados do case.yaml. Nome fora do conjunto e erro: o escopo e ampliado pelo usuario " +
         "(Add folder), nunca por aqui."),
-    content_chars: z.number().int().min(0).max(20000).default(1200)
-      .describe("Tamanho do preview de content por resultado, em chars (default 1200). " +
-        "0 = retorna content integral SEM truncar — use com limit baixo (<=3) para nao " +
-        "estourar o limite de output. Para leitura pontual na integra prefira a tool contexto."),
+    content_chars: contentCharsField,
   },
   async ({ query, limit, peca, subtipo, parte_peticionante, fase, documento, numero_processo, categoria, agrupar, casos, content_chars }) => {
     let principalNome = null;
@@ -722,7 +720,8 @@ server.tool(
     "encontra chunks vetorialmente similares aos positivos e diferentes dos negativos. " +
     "Util para expandir resultados de busca, encontrar mais do mesmo tipo de conteudo, " +
     "ou refinar uma pesquisa a partir de exemplos. " +
-    "Aceita batch via 'queries' — multiplas combinacoes positive/negative em uma chamada (Qdrant recommend_batch).",
+    "Aceita batch via 'queries' — multiplas combinacoes positive/negative em uma chamada (Qdrant recommend_batch). " +
+    DESC_PREVIEW,
   {
     positive: z.array(z.string()).optional()
       .describe("Chunk IDs relevantes (single mode). Use isto OU 'queries', nao ambos."),
@@ -768,9 +767,15 @@ server.tool(
       const data = await res.json();
 
       if (isBatch) {
-        return {
-          content: [{ type: "text", text: JSON.stringify(data.batch, null, 2) }],
-        };
+        const listas = (data.batch || []).map((hits, i) => ({
+          cabecalho: `recomendacao ${i + 1} (positive: ${queries[i].positive.join(", ")})`,
+          hits: hits || [],
+        }));
+        if (listas.every((l) => l.hits.length === 0)) {
+          return { content: [{ type: "text", text: "Nenhum resultado." }] };
+        }
+        const text = renderHitsComTeto(listas, { rotuloLista: "recomendacao(oes)" });
+        return { content: [{ type: "text", text }] };
       }
 
       const lines = data.map(
@@ -892,7 +897,8 @@ server.tool(
     "Stage 1: recall amplo por similaridade (default 100 candidatos). " +
     "Stage 2: reordena por data_juntada (mais recentes primeiro). " +
     "Use quando precisa dos chunks mais RECENTES sobre um tema, nao apenas os mais SIMILARES. " +
-    "Ex: 'argumentos sobre tutela em ordem cronologica de juntada'.",
+    "Ex: 'argumentos sobre tutela em ordem cronologica de juntada'. " +
+    DESC_PREVIEW,
   {
     query: z.string().describe("Texto da busca semantica"),
     recall_limit: z.number().int().min(20).max(500).default(100)
@@ -908,15 +914,19 @@ server.tool(
         "Nao aceita data_juntada (indexada como Keyword)."),
     ascending: z.boolean().default(false)
       .describe("Ordem crescente (default false = mais recentes primeiro)"),
+    content_chars: contentCharsField,
     caso: z.string().optional().describe(DESC_CASO),
   },
-  async ({ query, recall_limit, limit, peca, order_field, ascending, caso }) => {
+  async ({ query, recall_limit, limit, peca, order_field, ascending, content_chars, caso }) => {
     try {
       const alvo = (await sessao()).resolve(caso);
       const data = await apiPost(`/cases/${alvo.name}/buscar_cronologico`, {
         query, recall_limit, limit, peca, order_field, ascending,
       });
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+      if (!Array.isArray(data) || data.length === 0) {
+        return { content: [{ type: "text", text: "Nenhum resultado encontrado." }] };
+      }
+      return { content: [{ type: "text", text: renderHitsComTeto([{ hits: data }], { contentChars: content_chars }) }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Erro: ${err.message}` }], isError: true };
     }
@@ -932,7 +942,8 @@ server.tool(
     "Resultado: chunks que aparecem bem nas DUAS queries. " +
     "MUITO mais preciso que filtrar resultados de uma busca simples por outro tema. " +
     "Ex: 'tutela de urgencia' + 'danos materiais' = chunks que tratam dos DOIS topicos juntos, " +
-    "nao chunks que mencionam um e tangenciam o outro.",
+    "nao chunks que mencionam um e tangenciam o outro. " +
+    DESC_PREVIEW,
   {
     query_a: z.string().describe("Primeira query (recall amplo)"),
     query_b: z.string().describe("Segunda query (rerank dos candidatos da query_a)"),
@@ -941,15 +952,19 @@ server.tool(
     limit: z.number().int().min(1).max(50).default(10)
       .describe("Numero final de resultados"),
     peca: z.string().optional(),
+    content_chars: contentCharsField,
     caso: z.string().optional().describe(DESC_CASO),
   },
-  async ({ query_a, query_b, recall_limit, limit, peca, caso }) => {
+  async ({ query_a, query_b, recall_limit, limit, peca, content_chars, caso }) => {
     try {
       const alvo = (await sessao()).resolve(caso);
       const data = await apiPost(`/cases/${alvo.name}/buscar_interseccao`, {
         query_a, query_b, recall_limit, limit, peca,
       });
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+      if (!Array.isArray(data) || data.length === 0) {
+        return { content: [{ type: "text", text: "Nenhum resultado encontrado." }] };
+      }
+      return { content: [{ type: "text", text: renderHitsComTeto([{ hits: data }], { contentChars: content_chars }) }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Erro: ${err.message}` }], isError: true };
     }
@@ -964,7 +979,8 @@ server.tool(
     "Stage 2: agrupa por campo (default 'documento'), retorna 1 chunk por grupo. " +
     "Garante diversidade — evita que um documento grande monopolize os resultados. " +
     "Diferente de search agrupar=true (one-stage), aqui o recall e mais amplo. " +
-    "Ex: 'inadimplemento contratual' diversificado = N documentos distintos que tratam do tema.",
+    "Ex: 'inadimplemento contratual' diversificado = N documentos distintos que tratam do tema. " +
+    DESC_PREVIEW,
   {
     query: z.string().describe("Texto da busca"),
     recall_limit: z.number().int().min(50).max(500).default(200)
@@ -976,15 +992,22 @@ server.tool(
     group_by: z.enum(["documento", "peca"]).default("documento")
       .describe("Campo de agrupamento (default documento)"),
     peca: z.string().optional(),
+    content_chars: contentCharsField,
     caso: z.string().optional().describe(DESC_CASO),
   },
-  async ({ query, recall_limit, groups, chunks_per_group, group_by, peca, caso }) => {
+  async ({ query, recall_limit, groups, chunks_per_group, group_by, peca, content_chars, caso }) => {
     try {
       const alvo = (await sessao()).resolve(caso);
       const data = await apiPost(`/cases/${alvo.name}/buscar_diversificado`, {
         query, recall_limit, groups, chunks_per_group, group_by, peca,
       });
-      return { content: [{ type: "text", text: JSON.stringify(data.groups, null, 2) }] };
+      const grupos = data.groups || [];
+      if (grupos.length === 0) {
+        return { content: [{ type: "text", text: "Nenhum resultado encontrado." }] };
+      }
+      const listas = grupos.map((g) => ({ cabecalho: `${group_by}: ${g.group_id}`, hits: g.hits || [] }));
+      const text = renderHitsComTeto(listas, { contentChars: content_chars, rotuloLista: "grupo(s)" });
+      return { content: [{ type: "text", text }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Erro: ${err.message}` }], isError: true };
     }

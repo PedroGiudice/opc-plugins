@@ -132,6 +132,66 @@ export function buildCappedPayload({ lists, render, contentChars = 1200, globalC
 }
 
 /**
+ * Aviso que antecede o texto quando o buildCappedPayload reduziu o pedido.
+ * `degraded.content_chars` e o preview FINAL; so conta como "reduzido" se
+ * ficou abaixo do que o caller pediu (com requested <= 200 nao ha degrau).
+ */
+export function degradeNotice(degraded, requestedChars) {
+  if (!degraded) return "";
+  const parts = [];
+  if (degraded.content_chars > 0 && degraded.content_chars < requestedChars) {
+    parts.push(`preview reduzido para ${degraded.content_chars} chars`);
+  }
+  if (degraded.kept !== null) parts.push(`resultados cortados para top ${degraded.kept} por lista`);
+  return `[aviso: output excederia o limite de tokens — ${parts.join("; ")}. ` +
+    `Refine com filtros, limit menor ou leia chunks especificos via contexto.]\n\n`;
+}
+
+/** Folga para os avisos no topo: o texto inteiro, avisos inclusos, fica no teto. */
+const RESERVA_AVISO = 400;
+
+/**
+ * Saida das buscas que devolvem hits do caso fora do `search`
+ * (buscar_cronologico, buscar_interseccao, buscar_diversificado e recommend em
+ * lote): mesmo formato e mesmo teto do search, uma linha JSON por hit com o
+ * content em preview. Antes essas tools devolviam o JSON da API com o content
+ * INTEGRAL de cada chunk: 10 resultados passavam de 47 mil caracteres e o
+ * Claude Code gravava o resultado em arquivo.
+ *
+ * `listas`: [{ cabecalho?, hits }], uma por grupo/consulta (o cabecalho vira
+ * `=== cabecalho ===`); sem cabecalho, uma lista simples. A ordem dos hits e a
+ * da API (cronologica, de score) e o degrade corta sempre a cauda.
+ *
+ * Alem das duas alavancas do buildCappedPayload, uma terceira: se nem o preview
+ * minimo com 1 hit por lista couber (muitos grupos de 1 hit, que nao tem cauda
+ * para cortar), omite listas inteiras do fim, mantendo >=1, com aviso. Um hit
+ * sozinho acima do teto (content_chars 0) sai assim mesmo: nunca parte chunk.
+ */
+export function renderHitsComTeto(listas, { contentChars = 1200, globalCap = OUTPUT_CAP_CHARS, rotuloLista = "lista(s)" } = {}) {
+  const limite = globalCap - RESERVA_AVISO;
+  const montar = (ls) =>
+    buildCappedPayload({
+      lists: ls.map((l) => l.hits || []),
+      render: (pls) =>
+        ls.map((l, i) => (l.cabecalho ? `=== ${l.cabecalho} ===\n` : "") + renderLines(pls[i])).join("\n\n"),
+      contentChars,
+      globalCap: limite,
+    });
+  let n = listas.length;
+  let out = montar(listas);
+  while (out.text.length > limite && n > 1) {
+    n--;
+    out = montar(listas.slice(0, n));
+  }
+  const omitidas = listas.length - n;
+  const avisoListas = omitidas > 0
+    ? `[aviso: ${omitidas} ${rotuloLista} do fim omitido(s) para caber no limite de output. ` +
+      `Refine com menos grupos ou filtros.]\n\n`
+    : "";
+  return avisoListas + degradeNotice(out.degraded, contentChars) + out.text;
+}
+
+/**
  * Renderiza os chunks de um documento INTEIRO em ordem sequencial
  * (tool `document`). Conteudo integral, nunca preview — leitura de peca
  * completa e a razao de existir da tool. Quando o documento nao cabe no
