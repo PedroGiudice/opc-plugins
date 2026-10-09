@@ -7,15 +7,19 @@ comando cru, do caminho de disco ou de "Used plugin x: y". Complementa o
 
 | Tool | Linha | Glifo |
 |---|---|---|
-| `Bash` | a `description` que o modelo escreveu; sem ela, "Rodou um comando" (nunca adivinha) | › âmbar |
+| `Bash`, `PowerShell` | a `description` que o modelo escreveu; sem ela, "Rodou um comando" (nunca adivinha) | › âmbar |
 | `Bash` com `Salvo: <x>.docx` no stdout (geradores CMR) | "Montou o documento x.docx" + caminho; guard de sobrescrita: "Gravou o documento ao lado" | ■ azul |
-| `Read` | "Leu o briefing do caso" / "o mapa processual" / "a ficha do caso" / "a memória do caso" / "o documento X" / "o arquivo X" | › cinza |
-| `Write`, `Edit`, `MultiEdit` | "Escreveu X" / "Alterou X" | › terracota |
+| `Read` | "Leu o briefing do caso" / "o mapa processual" / "a ficha do caso" / "o documento X" / "o arquivo X"; "Viu a imagem pg3.png"; "Leu o PDF X, págs. 1 a 6"; "Leu o restante de um resultado grande: peça inteira" (arquivo de `tool-results/`); "Leu o material de apoio do roteiro de revisão contratual"; memória: "Leu o índice da memória do caso" / "Leu a anotação da memória: nome" | › cinza |
+| `Write`, `Edit`, `MultiEdit` | pasta do caso: "Salvou na pasta do caso: X" / "Alterou na pasta do caso: X" (o arquivo circula para os colegas); rascunho da sessão: "Escreveu um arquivo de trabalho temporário: X"; briefing/mapa/ficha/inventário: frase própria | › terracota |
+| `Write`/`Edit` em `.memoria/` ou `.feedback/` | "Anotou na memória do caso: <description do frontmatter>"; orientação (`type: feedback`, ou nome `feedback_` sem type, a regra do `memFileType` do sync): "Anotou uma orientação para todos os casos: …"; `MEMORY.md`: "Atualizou o índice da memória do caso"; edição: "Atualizou a anotação da memória: nome" | › terracota |
 | `Glob`, `Grep` | "Procurou arquivos: p" / "Procurou no texto: «p»" | › cinza |
-| `Agent` | "Delegou uma tarefa: description" | › lavanda |
-| `Skill` | "Carregou o roteiro: nome" | › cinza |
-| `ToolSearch` | "Carregou ferramentas" | › cinza |
-| `WebFetch`, `WebSearch` | "Consultou a página: host" / "Pesquisou na internet: «q»" | › verde |
+| `Agent` | por tipo: "Pediu uma tradução: …" (`tradutor`), "Pediu uma pesquisa jurídica: …", "Pediu uma análise dos autos: …", "Pediu a leitura de páginas da internet: …"; demais "Delegou uma tarefa: description" | › lavanda |
+| `Skill` | roteiros do escritório pelo nome: "Abriu o roteiro de geração de peças do CMR", "Abriu as ferramentas de documento Word"...; desconhecido: "Carregou o roteiro: nome" | › cinza |
+| `ToolSearch` | "Carregou ferramentas", em cinza (sem valor para o advogado) | › cinza |
+| `WebFetch`, `WebSearch` | sites oficiais pelo nome ("Consultou o site do Planalto (legislação federal)", "Consultou o e-SAJ do TJSP"); demais "Consultou a página: host" / "Pesquisou na internet: «q»" | › verde |
+| `SendUserFile` | "Elaborou o documento X.docx" / "a planilha X.xlsx" / "2 arquivos: X e Y"; legenda em Detalhes. O bloco de resultado fica nativo. No Desktop a entrega é desenhada por componente próprio (legenda + cartão do arquivo, medido 10/10/2026): a linha não aparece lá e o cartão segue intacto; vale no terminal | ■ azul |
+| Navegador (`claude-in-chrome`, `Claude_Browser`) | "No navegador: <action_summary do modelo>" (inicial minúscula, resto intacto); sem resumo: "olhou a tela", "esperou a página", "clicou na página", "abriu host", "procurou «q» na página", "rodou um script na página"; lote: "No navegador: 3 ações · <principal>". O bloco de resultado fica nativo (print da tela) | › azul |
+| `Artifact`, capítulo, sessões anteriores, `TaskStop` | "Publicou a página: …", "Marcou um novo capítulo: …", "Consultou sessões anteriores", "Interrompeu uma tarefa em segundo plano" | › cinza |
 | case-knowledge fora da busca (`memoria_search`, `metadata`, `manifesto`, `document`, `contexto`, `facet`, `reconstruir`, `buscar_*`, ...) | "Consultou a memória do caso: «q»", "Leu a ficha do caso", "Leu o índice dos autos", "Leu a peça inteira: Sentença · arquivo (pág. 9)"... | ■ azul |
 | stj-vec-tools `document`, `filters` | "Leu o inteiro teor: AREsp 2132923 · acórdão, Terceira Turma, Min. Moura Ribeiro, julgamento em 12/12/2022", "Listou os filtros do STJ" | ◈ lavanda |
 | legal-vec-tools `document`, `sources`, `recommend` | "Leu o dispositivo: CPC, art. 1012", "Listou as fontes da legislação" | § verde |
@@ -44,7 +48,7 @@ apagava as linhas (0.1.0). Medido em 06/10/2026; as linhas internas seguem
 humanizadas em qualquer superfície.
 
 `prompt.compose` acrescenta uma seção de sessão (`aidv-passos:descricoes`)
-pedindo ao modelo a `description` do Bash/Agent em português, para leigo,
+pedindo ao modelo a `description` do Bash/PowerShell/Agent em português, para leigo,
 sem repetir o comando. É a única coisa do mod que toca o que o modelo lê;
 o JSON/texto das tools NÃO muda.
 

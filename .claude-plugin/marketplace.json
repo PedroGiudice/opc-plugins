@@ -71,7 +71,7 @@
     },
     {
       "name": "aidv-passos",
-      "description": "Mod (function hooks): as ferramentas de bastidor (Bash, leitura/escrita de arquivos, buscas, subagentes, ToolSearch, web) e as tools juridicas fora da busca viram uma frase em portugues no transcript; .docx gerado como evento; erro nunca escondido. Exige Claude Code >= 2.1.287.",
+      "description": "Mod (function hooks): as ferramentas de bastidor (Bash, PowerShell, leitura/escrita de arquivos, memoria do caso, buscas, subagentes, navegador, entrega de arquivo, ToolSearch, web) e as tools juridicas fora da busca viram uma frase em portugues no transcript; .docx gerado como evento; erro nunca escondido. Exige Claude Code >= 2.1.287.",
       "author": {
         "name": "opc"
       },

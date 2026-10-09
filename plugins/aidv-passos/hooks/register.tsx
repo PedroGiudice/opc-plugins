@@ -2,12 +2,15 @@ import { atom, read, update } from 'claude-code'
 import type { Register, RenderElement } from 'claude-code'
 
 // ---------------------------------------------------------------------------
-// aidv-passos: as ferramentas de BASTIDOR (Bash, Read, Write, Edit, Glob, Grep,
-// Agent, Skill) viram uma frase em português no transcript. O que o modelo
-// recebe NÃO muda: o mod só desenha, lendo `props.input` e `props.output`.
+// aidv-passos: as ferramentas de BASTIDOR (Bash, PowerShell, Read, Write,
+// Edit, Glob, Grep, Agent, Skill, navegador, entrega de arquivo) viram uma
+// frase em português no transcript. O que o modelo recebe NÃO muda (exceto a
+// seção de prompt que pede a `description` em português): o mod só desenha,
+// lendo `props.input` e `props.output`. Frases decididas pelo CEO sobre o
+// inventário de 09/10/2026 (case-docs/docs/contexto/09102026-inventario-*).
 // ---------------------------------------------------------------------------
 
-const TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep', 'Agent', 'Skill', 'ToolSearch', 'WebFetch', 'WebSearch'] as const
+const TOOLS = ['Bash', 'PowerShell', 'Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep', 'Agent', 'Skill', 'ToolSearch', 'WebFetch', 'WebSearch'] as const
 
 // Seção acrescentada ao system prompt: a frase do Bash vem do `description`
 // que o modelo escreve; sem isto ele tende a escrevê-la em inglês.
@@ -15,7 +18,7 @@ const SECAO_PROMPT = {
   id: 'aidv-passos:descricoes',
   scope: 'session',
   text: [
-    'Ao chamar as ferramentas Bash e Agent, escreva o campo `description` em português do Brasil,',
+    'Ao chamar as ferramentas Bash, PowerShell e Agent, escreva o campo `description` em português do Brasil,',
     'numa frase curta que um advogado sem formação técnica entenda, dizendo o que a operação faz',
     'pelo trabalho dele (ex.: "Gerar a contestação em .docx", "Listar os documentos do caso").',
     'Nunca em inglês e nunca repetindo o comando. Essa frase é mostrada ao usuário no lugar do comando.',
@@ -151,6 +154,8 @@ type Passo = {
   docx: Docx | null
   categoria: Categoria
   fonte: FonteJuridica | null
+  // Linha em cinza: passo de infraestrutura sem valor para o advogado.
+  discreto?: boolean
 }
 
 // Glifo e cor da linha: fonte jurídica herda o vocabulário do aidv-autos
@@ -170,6 +175,10 @@ function marcaDe(p: Passo): { glifo: string; cor: string } {
       return { glifo: '›', cor: COR_LAVENDER }
     case 'pesquisas':
       return { glifo: '›', cor: COR_OK }
+    case 'anotações':
+      return { glifo: '›', cor: COR_PEACH }
+    case 'ações no navegador':
+      return { glifo: '›', cor: COR_INFO }
     default:
       return { glifo: '›', cor: COR_NEUTRAL }
   }
@@ -184,6 +193,8 @@ type Categoria =
   | 'tarefas delegadas'
   | 'roteiros'
   | 'pesquisas'
+  | 'anotações'
+  | 'ações no navegador'
   | 'outros'
 
 const PESQUISAS = new Set([
@@ -460,6 +471,420 @@ function inputCompacto(input: unknown): string[] {
   return pares.length ? [corta(pares.join(' · '), 300)] : []
 }
 
+// ---------------------------------------------------------------------------
+// Memória do caso e pool de feedback. A regra de "orientação para todos os
+// casos" espelha `memFileType` do sync-cases.mjs (case-knowledge): o
+// frontmatter manda nos dois sentidos; sem `type` conhecido, o prefixo
+// `feedback_` decide. É o sync que leva o arquivo ao pool do escritório.
+// ---------------------------------------------------------------------------
+
+const TIPOS_DE_MEMORIA = new Set(['project', 'reference', 'user'])
+
+function frontmatter(content: string): string | null {
+  return /^---\r?\n([\s\S]*?)\r?\n---/.exec(content)?.[1] ?? null
+}
+
+function tipoDoFrontmatter(content: string): string | undefined {
+  const fm = frontmatter(content)
+  if (fm === null) return undefined
+  let primeiro: string | undefined
+  for (const l of fm.split(/\r?\n/)) {
+    const v = /^\s*type:\s*["']?([A-Za-z_]+)["']?\s*(?:#.*)?$/.exec(l)?.[1]?.toLowerCase()
+    if (!v) continue
+    if (v === 'feedback') return 'feedback'
+    primeiro ??= v
+  }
+  return primeiro
+}
+
+function ehOrientacao(nome: string, content: string | null): boolean {
+  if (content !== null) {
+    const t = tipoDoFrontmatter(content)
+    if (t === 'feedback') return true
+    if (t !== undefined && TIPOS_DE_MEMORIA.has(t)) return false
+  }
+  return nome.startsWith('feedback_')
+}
+
+function descricaoDoFrontmatter(content: string): string | null {
+  const fm = frontmatter(content)
+  const v = fm ? /^\s*description:\s*(.+?)\s*$/m.exec(fm)?.[1] : undefined
+  if (!v) return null
+  const semAspas = /^(["'])(.*)\1$/.exec(v)?.[2] ?? v
+  return semAspas.replace(/\\"/g, '"').trim() || null
+}
+
+// "project-ed-gratuidade-adc80-modulacao.md" -> "ed gratuidade adc80 modulacao".
+function nomeDaAnotacao(base: string): string {
+  return base
+    .replace(/\.md$/i, '')
+    .replace(/^(project|feedback|reference|user)[-_]/i, '')
+    .replace(/[-_]+/g, ' ')
+    .trim()
+}
+
+function ehDaMemoria(p: string): boolean {
+  return /[\\/]\.memoria[\\/]/.test(p) || /[\\/]\.feedback[\\/]/.test(p) || basename(p) === 'MEMORY.md'
+}
+
+function ehDoPool(p: string): boolean {
+  return /[\\/]\.feedback[\\/]/.test(p)
+}
+
+type Escrita = { feito: string; rodando: string; categoria: Categoria }
+
+function escritaNaMemoria(p: string, content: string | null, edicao: boolean): Escrita {
+  const base = basename(p)
+  if (base === 'MEMORY.md') {
+    return { feito: 'Atualizou o índice da memória do caso', rodando: 'Atualizando o índice da memória do caso…', categoria: 'anotações' }
+  }
+  const nome = (content !== null ? descricaoDoFrontmatter(content) : null) ?? nomeDaAnotacao(base)
+  const orientacao = ehDoPool(p) || ehOrientacao(base, content)
+  if (edicao) {
+    const alvo = orientacao ? 'uma orientação para todos os casos' : 'a anotação da memória'
+    return { feito: `Atualizou ${alvo}: ${nome}`, rodando: `Atualizando ${alvo}: ${nome}…`, categoria: 'anotações' }
+  }
+  return orientacao
+    ? { feito: `Anotou uma orientação para todos os casos: ${nome}`, rodando: 'Anotando uma orientação para todos os casos…', categoria: 'anotações' }
+    : { feito: `Anotou na memória do caso: ${nome}`, rodando: 'Anotando na memória do caso…', categoria: 'anotações' }
+}
+
+// ---------------------------------------------------------------------------
+// Onde o arquivo fica: a pasta do caso circula para os colegas (pool de
+// workdocs); o rascunho da sessão é descartado.
+// ---------------------------------------------------------------------------
+
+const OBJETOS_FIXOS = new Set(['CLAUDE.md', 'MAPA_PROCESSUAL.md', 'case.yaml', 'documentos.yaml'])
+
+function ehRascunho(p: string): boolean {
+  return /[\\/]scratchpad[\\/]/i.test(p) || /appdata[\\/]local[\\/]temp[\\/]/i.test(p)
+}
+
+function ehPastaDoCasoDireta(p: string): boolean {
+  return /[\\/]cases[\\/][^\\/.][^\\/]*[\\/]/i.test(p) && !ehRascunho(p)
+}
+
+function escritaDeArquivo(p: string, edicao: boolean): Escrita {
+  const base = basename(p)
+  if (!OBJETOS_FIXOS.has(base)) {
+    if (ehPastaDoCasoDireta(p)) {
+      return edicao
+        ? { feito: `Alterou na pasta do caso: ${base}`, rodando: `Alterando na pasta do caso: ${base}…`, categoria: 'escritas' }
+        : { feito: `Salvou na pasta do caso: ${base}`, rodando: `Salvando na pasta do caso: ${base}…`, categoria: 'escritas' }
+    }
+    if (ehRascunho(p)) {
+      const v = edicao ? ['Alterou', 'Alterando'] : ['Escreveu', 'Escrevendo']
+      return { feito: `${v[0]} um arquivo de trabalho temporário: ${base}`, rodando: `${v[1]} um arquivo de trabalho temporário: ${base}…`, categoria: 'escritas' }
+    }
+  }
+  return edicao
+    ? { feito: `Alterou ${objetoDoArquivo(p)}`, rodando: `Alterando ${objetoDoArquivo(p)}…`, categoria: 'escritas' }
+    : { feito: `Escreveu ${objetoDoArquivo(p)}`, rodando: `Escrevendo ${objetoDoArquivo(p)}…`, categoria: 'escritas' }
+}
+
+// ---------------------------------------------------------------------------
+// Leituras de arquivo com objeto próprio.
+// ---------------------------------------------------------------------------
+
+// Resultado de tool acima do limite do Claude Code vai para `tool-results/`
+// com o nome `mcp-plugin_<server>_<server>-<tool>-<n>.txt`.
+const RESULTADO_GRANDE: Record<string, string> = {
+  'case-knowledge:document': 'peça inteira',
+  'case-knowledge:contexto': 'contexto de um trecho',
+  'case-knowledge:manifesto': 'índice dos autos',
+  'case-knowledge:search': 'pesquisa nos autos',
+  'case-knowledge:reconstruir': 'reconstrução dos autos',
+  'stj-vec-tools:document': 'inteiro teor',
+  'stj-vec-tools:search': 'pesquisa no STJ',
+  'legal-vec-tools:search': 'pesquisa na legislação',
+  'legal-vec-tools:document': 'dispositivo',
+}
+
+function rotuloDoResultadoGrande(base: string): string | null {
+  const m = /^mcp-plugin_([a-z0-9-]+?)_\1-([a-z_]+)-\d+\./i.exec(base)
+  if (m && m[1] && m[2]) return RESULTADO_GRANDE[`${m[1]}:${m[2]}`] ?? null
+  if (/^webfetch-/i.test(base)) return 'documento baixado da internet'
+  return null
+}
+
+function paginas(pages: string): string {
+  const intervalo = /^\s*(\d+)\s*-\s*(\d+)\s*$/.exec(pages)
+  if (intervalo) return `págs. ${intervalo[1]} a ${intervalo[2]}`
+  if (/^\s*\d+\s*$/.test(pages)) return `pág. ${pages.trim()}`
+  return `págs. ${pages.trim()}`
+}
+
+// Roteiros (skills) pelo nome do escritório; desconhecido mantém o nome técnico legível.
+const ROTEIROS: Record<string, string> = {
+  'gerar-peca-cmr': 'o roteiro de geração de peças do CMR',
+  'redacao-cmr': 'o padrão de redação do CMR',
+  'revisao-contratual-cmr': 'o roteiro de revisão contratual',
+  'leitura-autos': 'o roteiro de leitura dos autos',
+  'resposta-notificacao-cmr': 'o roteiro de resposta a notificação',
+  docx: 'as ferramentas de documento Word',
+  xlsx: 'as ferramentas de planilha',
+  pdf: 'as ferramentas de PDF',
+  pptx: 'as ferramentas de apresentação',
+  'chrome-browser': 'as instruções do navegador',
+  'built-in-browser': 'as instruções do navegador',
+}
+
+function roteiroConhecido(skill: string): string | null {
+  const nome = skill.includes(':') ? skill.slice(skill.lastIndexOf(':') + 1) : skill
+  return ROTEIROS[nome] ?? null
+}
+
+// "o roteiro" -> "do roteiro"; "as ferramentas" -> "das ferramentas".
+function contraiDe(objeto: string): string {
+  return objeto.replace(/^(o|a|os|as) /, (_, art: string) => `d${art} `)
+}
+
+function leituraDeArquivo(input: unknown): Escrita {
+  const p = campo(input, 'file_path') ?? ''
+  const base = basename(p)
+  const o = obj(input)
+  const parte = o.offset !== undefined || o.limit !== undefined ? ' (um trecho)' : ''
+  if (/[\\/]tool-results[\\/]/.test(p)) {
+    const r = rotuloDoResultadoGrande(base)
+    return {
+      feito: `Leu o restante de um resultado grande${r ? `: ${r}` : ''}${parte}`,
+      rodando: 'Lendo o restante de um resultado grande…',
+      categoria: 'leituras',
+    }
+  }
+  if (/\.(png|jpe?g|gif|webp|bmp)$/i.test(base)) {
+    return { feito: `Viu a imagem ${base}`, rodando: `Abrindo a imagem ${base}…`, categoria: 'leituras' }
+  }
+  if (ehDaMemoria(p)) {
+    if (base === 'MEMORY.md') return { feito: 'Leu o índice da memória do caso', rodando: 'Lendo o índice da memória do caso…', categoria: 'leituras' }
+    const alvo = ehDoPool(p) ? 'uma orientação do escritório' : 'a anotação da memória'
+    return { feito: `Leu ${alvo}: ${nomeDaAnotacao(base)}`, rodando: `Lendo ${alvo}: ${nomeDaAnotacao(base)}…`, categoria: 'leituras' }
+  }
+  const skill = /[\\/]\.claude[\\/]plugins[\\/].*[\\/]skills[\\/]([^\\/]+)[\\/]/.exec(p)?.[1]
+  if (skill) {
+    const roteiro = roteiroConhecido(skill) ?? `o roteiro ${nomeDoRoteiro(skill)}`
+    return { feito: `Leu o material de apoio ${contraiDe(roteiro)}`, rodando: `Lendo o material de apoio ${contraiDe(roteiro)}…`, categoria: 'leituras' }
+  }
+  const pages = campo(input, 'pages')
+  const pags = pages && /\.pdf$/i.test(base) ? `, ${paginas(pages)}` : ''
+  return { feito: `Leu ${objetoDoArquivo(p)}${pags}${parte}`, rodando: `Lendo ${objetoDoArquivo(p)}…`, categoria: 'leituras' }
+}
+
+// ---------------------------------------------------------------------------
+// Tarefas delegadas pelo tipo do agente e sites oficiais pelo nome.
+// ---------------------------------------------------------------------------
+
+const AGENTES: Record<string, [string, string]> = {
+  tradutor: ['Pediu uma tradução', 'Pedindo uma tradução'],
+  'legal-researcher': ['Pediu uma pesquisa jurídica', 'Pedindo uma pesquisa jurídica'],
+  'legal-case-analyst': ['Pediu uma análise dos autos', 'Pedindo uma análise dos autos'],
+  'web-fetch': ['Pediu a leitura de páginas da internet', 'Pedindo a leitura de páginas da internet'],
+}
+
+// Ordem importa: o mais específico antes (e-SAJ antes do TJSP).
+const SITES: ReadonlyArray<[string, string]> = [
+  ['planalto.gov.br', 'o site do Planalto (legislação federal)'],
+  ['stf.jus.br', 'o site do STF'],
+  ['stj.jus.br', 'o site do STJ'],
+  ['tst.jus.br', 'o site do TST'],
+  ['cnj.jus.br', 'o site do CNJ'],
+  ['esaj.tjsp.jus.br', 'o e-SAJ do TJSP'],
+  ['tjsp.jus.br', 'o site do TJSP'],
+  ['prefeitura.sp.gov.br', 'o site da Prefeitura de São Paulo'],
+  ['in.gov.br', 'o Diário Oficial da União'],
+  ['jusbrasil.com.br', 'o Jusbrasil'],
+  ['conjur.com.br', 'o Conjur'],
+]
+
+function hostDe(url: string): string {
+  return (url.replace(/^[a-z]+:\/\//i, '').split(/[/?#]/)[0] ?? url).replace(/^www\./i, '')
+}
+
+function siteConhecido(host: string): string | null {
+  for (const [dominio, nome] of SITES) if (host === dominio || host.endsWith(`.${dominio}`)) return nome
+  return null
+}
+
+// ---------------------------------------------------------------------------
+// Arquivo entregue ao usuário (SendUserFile): o Claude o produziu na sessão
+// em 121 de 123 entregas medidas (09/10/2026), daí "Elaborou".
+// ---------------------------------------------------------------------------
+
+function artigoDoArquivo(base: string): string {
+  const ext = /\.([a-z0-9]+)$/i.exec(base)?.[1]?.toLowerCase() ?? ''
+  if (ext === 'docx' || ext === 'doc') return 'o documento'
+  if (ext === 'xlsx' || ext === 'xls' || ext === 'csv') return 'a planilha'
+  if (ext === 'pdf') return 'o PDF'
+  if (ext === 'md' || ext === 'txt') return 'o texto'
+  if (/^(png|jpe?g|gif|webp)$/.test(ext)) return 'a imagem'
+  if (ext === 'html' || ext === 'htm') return 'a página'
+  if (ext === 'pptx') return 'a apresentação'
+  return 'o arquivo'
+}
+
+function listaComE(itens: string[]): string {
+  return itens.length <= 1 ? (itens[0] ?? '') : `${itens.slice(0, -1).join(', ')} e ${itens[itens.length - 1]}`
+}
+
+function entrega(input: unknown): Omit<Passo, 'fonte'> {
+  const arquivos = (Array.isArray(obj(input).files) ? (obj(input).files as unknown[]) : []).filter((f): f is string => typeof f === 'string')
+  const nomes = arquivos.map(basename)
+  const legenda = campo(input, 'caption')
+  const tecnico = [...(legenda ? [legenda] : []), ...arquivos]
+  const [unico] = nomes
+  if (nomes.length === 1 && unico) {
+    const alvo = `${artigoDoArquivo(unico)} ${unico}`
+    return { feito: `Elaborou ${alvo}`, rodando: `Enviando ${alvo}…`, tecnico, docx: null, categoria: 'documentos' }
+  }
+  const alvo = nomes.length ? `${nomes.length} arquivos: ${listaComE(nomes)}` : 'um arquivo'
+  return { feito: `Elaborou ${alvo}`, rodando: `Enviando ${nomes.length ? `${nomes.length} arquivos` : 'um arquivo'}…`, tecnico, docx: null, categoria: 'documentos' }
+}
+
+// ---------------------------------------------------------------------------
+// Navegador (Claude in Chrome e o navegador embutido do Desktop). Cliques e
+// digitação trazem `action_summary` escrito pelo modelo: vai como veio, só a
+// inicial minúscula ("PJe-Calc" fica intacto). Sem resumo, a frase sai da ação.
+// ---------------------------------------------------------------------------
+
+const NAV_PREFIXOS = ['mcp__claude-in-chrome__', 'mcp__Claude_Browser__'] as const
+const NAV_FERRAMENTAS = [
+  'computer', 'browser_batch', 'navigate', 'find', 'read_page', 'get_page_text', 'javascript_tool', 'form_input',
+  'file_upload', 'upload_image', 'tabs_context', 'tabs_context_mcp', 'tabs_create', 'tabs_create_mcp', 'tabs_close',
+  'tabs_close_mcp', 'tabs_select', 'resize_window', 'read_console_messages', 'read_network_requests', 'gif_creator',
+  'list_connected_browsers', 'select_browser', 'switch_browser', 'shortcuts_execute', 'shortcuts_list',
+] as const
+const NAVEGADOR: string[] = NAV_PREFIXOS.flatMap(p => NAV_FERRAMENTAS.map(f => `${p}${f}`))
+
+function acaoDoNavegador(tool: string): string | null {
+  for (const p of NAV_PREFIXOS) if (tool.startsWith(p)) return tool.slice(p.length)
+  return null
+}
+
+function minusculaInicial(s: string): string {
+  return /^[A-ZÀ-Ý][a-zà-ÿ]/.test(s) ? s.charAt(0).toLowerCase() + s.slice(1) : s
+}
+
+const CLIQUES = new Set(['left_click', 'right_click', 'double_click', 'triple_click', 'middle_click'])
+
+function fraseDoComputador(input: unknown): string {
+  const resumo = campo(input, 'action_summary')
+  if (resumo) return minusculaInicial(resumo.trim())
+  const acao = campo(input, 'action') ?? ''
+  if (acao === 'screenshot') return 'olhou a tela'
+  if (acao === 'wait') return 'esperou a página'
+  if (CLIQUES.has(acao)) return 'clicou na página'
+  if (acao === 'type') return 'digitou um texto'
+  if (acao === 'key') return 'apertou uma tecla'
+  if (acao === 'scroll' || acao === 'scroll_to') return 'rolou a página'
+  if (acao === 'zoom') return 'ampliou um trecho da tela'
+  if (acao === 'hover') return 'passou o mouse sobre a página'
+  if (acao === 'left_click_drag') return 'arrastou um elemento'
+  return 'agiu na página'
+}
+
+function fraseDoEndereco(url: string | null): string {
+  if (!url) return 'abriu uma página'
+  if (url === 'back') return 'voltou à página anterior'
+  if (url === 'forward') return 'avançou uma página'
+  if (/^file:/i.test(url)) {
+    let caminho = url.replace(/^file:\/*/i, '')
+    try {
+      caminho = decodeURIComponent(caminho)
+    } catch {
+      // nome com % solto: fica como veio
+    }
+    return `abriu o arquivo ${basename(caminho)}`
+  }
+  return `abriu ${hostDe(url)}`
+}
+
+function fraseNoNavegador(acao: string, input: unknown): string {
+  switch (acao) {
+    case 'computer':
+      return fraseDoComputador(input)
+    case 'navigate':
+      return fraseDoEndereco(campo(input, 'url'))
+    case 'find': {
+      const q = campo(input, 'query')
+      return q ? `procurou «${corta(q, 60)}» na página` : 'procurou na página'
+    }
+    case 'read_page':
+    case 'get_page_text':
+      return 'leu o texto da página'
+    case 'javascript_tool':
+      return 'rodou um script na página'
+    case 'form_input':
+      return 'preencheu um campo'
+    case 'file_upload': {
+      const ps = Array.isArray(obj(input).paths) ? (obj(input).paths as unknown[]).filter((x): x is string => typeof x === 'string') : []
+      const [um] = ps
+      return ps.length === 1 && um ? `anexou o arquivo ${basename(um)}` : ps.length > 1 ? `anexou ${ps.length} arquivos` : 'anexou um arquivo'
+    }
+    case 'upload_image':
+      return 'anexou uma imagem'
+    case 'tabs_context':
+    case 'tabs_context_mcp':
+      return 'conferiu as abas abertas'
+    case 'tabs_create':
+    case 'tabs_create_mcp':
+      return 'abriu uma aba nova'
+    case 'tabs_close':
+    case 'tabs_close_mcp':
+      return 'fechou uma aba'
+    case 'tabs_select':
+      return 'trocou de aba'
+    case 'resize_window':
+      return 'ajustou o tamanho da janela'
+    case 'read_console_messages':
+    case 'read_network_requests':
+      return 'leu o registro técnico da página'
+    case 'gif_creator':
+      return 'gravou a tela'
+    case 'shortcuts_execute':
+    case 'shortcuts_list':
+      return 'usou um atalho do navegador'
+    default:
+      return 'conectou-se ao navegador'
+  }
+}
+
+function passoNoNavegador(acao: string, input: unknown): Omit<Passo, 'fonte'> {
+  if (acao === 'browser_batch') {
+    const acoes = (Array.isArray(obj(input).actions) ? (obj(input).actions as unknown[]) : []).map(obj)
+    const frases = acoes.map(a => fraseNoNavegador(str(a.name) ?? '', a.input))
+    // A ação principal: a que o modelo resumiu; senão a primeira que não é espera nem foto da tela.
+    const comResumo = acoes.findIndex(a => campo(a.input, 'action_summary') !== null)
+    const principal = comResumo >= 0 ? frases[comResumo] : frases.find(f => f !== 'esperou a página' && f !== 'olhou a tela') ?? frases[0]
+    const resumo = frases.length > 1 ? `${frases.length} ações · ${principal ?? ''}` : principal ?? 'agiu na página'
+    return { feito: `No navegador: ${resumo}`, rodando: `No navegador: ${resumo}…`, tecnico: frases, docx: null, categoria: 'ações no navegador' }
+  }
+  const frase = fraseNoNavegador(acao, input)
+  return { feito: `No navegador: ${frase}`, rodando: `No navegador: ${frase}…`, tecnico: inputCompacto(input), docx: null, categoria: 'ações no navegador' }
+}
+
+// Outras tools do Desktop vistas nas sessões de caso.
+const OUTRAS: Record<string, (input: unknown) => Omit<Passo, 'fonte'>> = {
+  SendUserFile: entrega,
+  Artifact: input => {
+    const d = campo(input, 'description')
+    const alvo = d ? `: ${corta(d, 120)}` : campo(input, 'file_path') ? ` ${basename(campo(input, 'file_path') ?? '')}` : ''
+    return { feito: `Publicou a página${alvo}`, rodando: 'Publicando a página…', tecnico: inputCompacto(input), docx: null, categoria: 'documentos' }
+  },
+  mcp__ccd_session__mark_chapter: input => {
+    const t = campo(input, 'title')
+    return { feito: t ? `Marcou um novo capítulo: ${t}` : 'Marcou um novo capítulo', rodando: 'Marcando um novo capítulo…', tecnico: inputCompacto(input), docx: null, categoria: 'outros' }
+  },
+  mcp__ccd_session_mgmt__list_events: input => ({
+    feito: 'Consultou sessões anteriores', rodando: 'Consultando sessões anteriores…', tecnico: inputCompacto(input), docx: null, categoria: 'outros',
+  }),
+  mcp__ccd_session_mgmt__search_session_transcripts: input => ({
+    feito: 'Consultou sessões anteriores', rodando: 'Consultando sessões anteriores…', tecnico: inputCompacto(input), docx: null, categoria: 'outros',
+  }),
+  TaskStop: input => ({
+    feito: 'Interrompeu uma tarefa em segundo plano', rodando: 'Interrompendo uma tarefa em segundo plano…', tecnico: inputCompacto(input), docx: null, categoria: 'outros',
+  }),
+}
+
 function fonteDe(tool: string): FonteJuridica | null {
   if (tool.startsWith(CK)) return 'autos'
   if (tool.startsWith(STJ)) return 'stj'
@@ -474,7 +899,8 @@ function passoDe(tool: string, input: unknown, output: unknown): Passo {
 function passoBase(tool: string, input: unknown, output: unknown): Omit<Passo, 'fonte'> {
   const cmd = campo(input, 'command')
   switch (tool) {
-    case 'Bash': {
+    case 'Bash':
+    case 'PowerShell': {
       const descricao = campo(input, 'description')
       const docx = docxDaSaida(output)
       const tecnico = cmd ? [`$ ${corta(cmd, 300)}`] : []
@@ -499,25 +925,13 @@ function passoBase(tool: string, input: unknown, output: unknown): Omit<Passo, '
     }
     case 'Read': {
       const p = campo(input, 'file_path') ?? ''
-      const parte = obj(input).offset !== undefined || obj(input).limit !== undefined ? ' (um trecho)' : ''
-      return {
-        feito: `Leu ${objetoDoArquivo(p)}${parte}`,
-        rodando: `Lendo ${objetoDoArquivo(p)}…`,
-        tecnico: [p],
-        docx: null,
-        categoria: 'leituras',
-      }
+      return { ...leituraDeArquivo(input), tecnico: [p], docx: null }
     }
     case 'Write': {
       const p = campo(input, 'file_path') ?? ''
       const conteudo = campo(input, 'content') ?? ''
-      return {
-        feito: `Escreveu ${objetoDoArquivo(p)}`,
-        rodando: `Escrevendo ${objetoDoArquivo(p)}…`,
-        tecnico: [p, `${conteudo.length} caracteres`],
-        docx: null,
-        categoria: 'escritas',
-      }
+      const e = ehDaMemoria(p) ? escritaNaMemoria(p, conteudo, false) : escritaDeArquivo(p, false)
+      return { ...e, tecnico: [p, `${conteudo.length} caracteres`], docx: null }
     }
     case 'Edit':
     case 'MultiEdit': {
@@ -527,13 +941,8 @@ function passoBase(tool: string, input: unknown, output: unknown): Omit<Passo, '
       const tecnico = [p]
       if (velho) tecnico.push(`- ${corta(velho, 140)}`)
       if (novo) tecnico.push(`+ ${corta(novo, 140)}`)
-      return {
-        feito: `Alterou ${objetoDoArquivo(p)}`,
-        rodando: `Alterando ${objetoDoArquivo(p)}…`,
-        tecnico,
-        docx: null,
-        categoria: 'escritas',
-      }
+      const e = ehDaMemoria(p) ? escritaNaMemoria(p, null, true) : escritaDeArquivo(p, true)
+      return { ...e, tecnico, docx: null }
     }
     case 'Glob': {
       const padrao = campo(input, 'pattern') ?? ''
@@ -561,9 +970,10 @@ function passoBase(tool: string, input: unknown, output: unknown): Omit<Passo, '
     case 'Agent': {
       const descricao = campo(input, 'description') ?? 'uma tarefa'
       const tipo = campo(input, 'subagent_type')
+      const [feito, rodando] = AGENTES[tipo ? tipo.slice(tipo.lastIndexOf(':') + 1) : ''] ?? ['Delegou uma tarefa', 'Delegando uma tarefa']
       return {
-        feito: `Delegou uma tarefa: ${descricao}`,
-        rodando: `Delegando uma tarefa: ${descricao}…`,
+        feito: `${feito}: ${descricao}`,
+        rodando: `${rodando}: ${descricao}…`,
         tecnico: tipo ? [`agente ${tipo}`] : [],
         docx: null,
         categoria: 'tarefas delegadas',
@@ -571,9 +981,10 @@ function passoBase(tool: string, input: unknown, output: unknown): Omit<Passo, '
     }
     case 'Skill': {
       const skill = campo(input, 'skill') ?? ''
+      const roteiro = roteiroConhecido(skill)
       return {
-        feito: `Carregou o roteiro: ${nomeDoRoteiro(skill)}`,
-        rodando: `Carregando o roteiro: ${nomeDoRoteiro(skill)}…`,
+        feito: roteiro ? `Abriu ${roteiro}` : `Carregou o roteiro: ${nomeDoRoteiro(skill)}`,
+        rodando: roteiro ? `Abrindo ${roteiro}…` : `Carregando o roteiro: ${nomeDoRoteiro(skill)}…`,
         tecnico: [skill],
         docx: null,
         categoria: 'roteiros',
@@ -586,13 +997,15 @@ function passoBase(tool: string, input: unknown, output: unknown): Omit<Passo, '
         tecnico: inputCompacto(input),
         docx: null,
         categoria: 'outros',
+        discreto: true,
       }
     case 'WebFetch': {
       const url = campo(input, 'url') ?? ''
-      const host = url.replace(/^https?:\/\//, '').split('/')[0] ?? url
+      const host = hostDe(url)
+      const site = siteConhecido(host)
       return {
-        feito: `Consultou a página: ${corta(host, 60)}`,
-        rodando: `Consultando a página: ${corta(host, 60)}…`,
+        feito: site ? `Consultou ${site}` : `Consultou a página: ${corta(host, 60)}`,
+        rodando: site ? `Consultando ${site}…` : `Consultando a página: ${corta(host, 60)}…`,
         tecnico: [url],
         docx: null,
         categoria: 'pesquisas',
@@ -609,6 +1022,10 @@ function passoBase(tool: string, input: unknown, output: unknown): Omit<Passo, '
       }
     }
     default: {
+      const acao = acaoDoNavegador(tool)
+      if (acao !== null) return passoNoNavegador(acao, input)
+      const outra = OUTRAS[tool]
+      if (outra) return outra(input)
       const juridica = JURIDICAS[tool]
       if (juridica) {
         const f = juridica(input, output)
@@ -632,12 +1049,14 @@ function passoBase(tool: string, input: unknown, output: unknown): Omit<Passo, '
 const ORDEM: Categoria[] = [
   'leituras',
   'documentos',
+  'anotações',
   'escritas',
   'comandos',
   'buscas em arquivos',
   'pesquisas',
   'tarefas delegadas',
   'roteiros',
+  'ações no navegador',
   'outros',
 ]
 
@@ -650,6 +1069,8 @@ const SINGULAR: Record<Categoria, string> = {
   'tarefas delegadas': 'tarefa delegada',
   roteiros: 'roteiro',
   pesquisas: 'pesquisa',
+  'anotações': 'anotação',
+  'ações no navegador': 'ação no navegador',
   outros: 'outro',
 }
 
@@ -675,7 +1096,10 @@ export const register: Register = on => {
     return { sections: [...r.sections, SECAO_PROMPT] }
   })
 
-  for (const TOOL of [...TOOLS, ...Object.keys(JURIDICAS)]) {
+  // Navegador, entregas e tools do Desktop: só a linha. O bloco de resultado
+  // fica nativo (print da tela do navegador, cartão do arquivo entregue).
+  const SO_LINHA = [...NAVEGADOR, ...Object.keys(OUTRAS)]
+  for (const TOOL of [...TOOLS, ...Object.keys(JURIDICAS), ...SO_LINHA]) {
     on('ui.render', { component: 'ToolUse', props: { tool: TOOL } }, async ($, e) => {
       const { Box, Text, Button } = $.ui.resolve(e)
       const id = e.props.tool_use_id
@@ -733,7 +1157,7 @@ export const register: Register = on => {
         linha = (
           <Box columnGap={1}>
             <Text color={marca.cor}>{marca.glifo}</Text>
-            <Text>{corta(passo.feito, largura)}</Text>
+            <Text dimColor={passo.discreto === true}>{corta(passo.feito, largura)}</Text>
             {botao}
           </Box>
         )
@@ -762,6 +1186,7 @@ export const register: Register = on => {
       )
     })
 
+    if (SO_LINHA.includes(TOOL)) continue
     // Bloco do resultado (só existe fora de grupo): o conteúdo técnico vive em "Detalhes".
     on('ui.render', { component: 'ToolResult', props: { tool: TOOL } }, async ($, e) => {
       const { Box } = $.ui.resolve(e)
