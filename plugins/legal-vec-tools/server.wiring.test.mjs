@@ -21,3 +21,9 @@ test("subcomando login guardado por process.argv[2] === 'login'", () => {
   assert.match(src, /process\.argv\[2\]\s*===\s*["']login["']/);
   assert.match(src, /await\s+loginFlow\(\)/);
 });
+
+test("document fatia pelo saida.mjs e aceita from_chunk", () => {
+  assert.match(src, /import\s*\{[^}]*\bpaginarDocumento\b[^}]*\}\s*from\s*["']\.\/saida\.mjs["']/);
+  assert.match(src, /from_chunk:\s*z\s*\.number\(\)/);
+  assert.match(src, /paginarDocumento\([^;]*\{\s*fromChunk:\s*from_chunk,\s*rotulo:\s*"dispositivo"\s*\}/s);
+});

@@ -7,6 +7,7 @@
  * alcancavel tanto da propria VM quanto de qualquer maquina da tailnet.
  * Override por STJ_VEC_API_BASE para outros ambientes.
  * Exposes 4 tools: search, search_formula, document, filters.
+ * `document` sai fatiado no teto de saida (saida.mjs) com continuacao por from_chunk.
  *
  * Transport: stdio (required for Claude Code plugins)
  * Dependencies: @modelcontextprotocol/sdk, zod
@@ -20,6 +21,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { requestWithAuth, loginFlow } from "./auth.mjs";
+import { paginarDocumento } from "./saida.mjs";
 
 // O servico stj-vec-search roda SO na VM (extractlab). Default por plataforma:
 // no Windows (maquina cliente), a API publica com Bearer obrigatorio
@@ -284,14 +286,24 @@ server.tool(
 server.tool(
   "document",
   "Busca um documento especifico pelo doc_id. " +
-    "Retorna o conteudo completo do documento com todos os chunks e metadados. " +
+    "Retorna o inteiro teor: metadados e chunks INTEGRAIS em ordem (nunca resumo). " +
+    "Se o julgado não couber no limite de output, entrega os primeiros chunks inteiros e o " +
+    "aviso no topo traz from_chunk para continuar na próxima chamada. " +
     avisoSecoes,
   {
     doc_id: z.string().describe("ID do documento (campo doc_id dos resultados de busca)"),
+    from_chunk: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe("chunk_index inicial (default 0). Use o valor de 'Continue com from_chunk=N' do aviso para continuar a leitura."),
   },
-  async ({ doc_id }) => {
+  async ({ doc_id, from_chunk }) => {
     try {
-      return jsonContent(await apiGet(`/document/${doc_id}`));
+      const data = await apiGet(`/document/${doc_id}`);
+      const { text } = paginarDocumento(data, { fromChunk: from_chunk, rotulo: "julgado" });
+      return { content: [{ type: "text", text }] };
     } catch (err) {
       return errorContent("Erro ao buscar documento", err);
     }

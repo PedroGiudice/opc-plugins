@@ -6,6 +6,7 @@
  * loopback at 127.0.0.1:8423.
  * Tools: search (hybrid + filters), document (by doc_id), recommend (similar articles),
  *        sources (collection stats).
+ * `document` sai fatiado no teto de saida (saida.mjs) com continuacao por from_chunk.
  *
  * Transport: stdio (required for Claude Code plugins)
  */
@@ -14,6 +15,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { requestWithAuth, loginFlow } from "./auth.mjs";
+import { paginarDocumento } from "./saida.mjs";
 
 // legal-vec-api roda na VM. Default por plataforma: no Windows (maquina
 // cliente), a API publica com Bearer obrigatorio (legalvec.aidvlabs.com,
@@ -170,18 +172,25 @@ server.tool(
 server.tool(
   "document",
   "Busca um documento especifico pelo doc_id. " +
-    "Retorna todos os chunks do documento com conteudo completo.",
+    "Retorna todos os chunks do documento com conteudo completo (nunca resumo). " +
+    "Se o dispositivo não couber no limite de output, entrega os primeiros chunks inteiros e o " +
+    "aviso no topo traz from_chunk para continuar na próxima chamada.",
   {
     doc_id: z
       .string()
       .describe("ID do documento (campo doc_id dos resultados de busca)"),
+    from_chunk: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe("Índice do primeiro chunk a entregar (default 0). Use o valor de 'Continue com from_chunk=N' do aviso para continuar a leitura."),
   },
-  async ({ doc_id }) => {
+  async ({ doc_id, from_chunk }) => {
     try {
       const data = await apiGet(`/document/${doc_id}`);
-      return {
-        content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      };
+      const { text } = paginarDocumento(data, { fromChunk: from_chunk, rotulo: "dispositivo" });
+      return { content: [{ type: "text", text }] };
     } catch (err) {
       return {
         content: [
