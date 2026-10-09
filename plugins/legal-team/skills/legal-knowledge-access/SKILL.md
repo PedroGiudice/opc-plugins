@@ -53,10 +53,11 @@ de qualquer campo), `info`, `list_cases`.
 `peca`, `parent_peca`, `fase`, `documento`, `numero_processo`, `categoria`;
 `agrupar=true` diversifica). Especializadas: `buscar_interseccao` (dois temas
 juntos), `buscar_cronologico` (reordena por posição processual),
-`buscar_diversificado` (panorama por documentos), `recommend`
-(mais-como-este), `discover` (direção de X evitando Y), `comparar`
+`buscar_diversificado` (panorama por documentos), `comparar`
 (duplicatas/argumentos repetidos), `cross_ref(kind, value)` (onde mais os
-autos citam um processo/súmula/tema/dispositivo).
+autos citam um processo/súmula/tema/dispositivo). Versão de uma só parte
+(ex.: o que a autora alegou, não a ré): filtro `parte_peticionante` do
+`search` (autor, reu, terceiro, mp, juizo).
 
 **Leitura na íntegra:** o `content` do search é PREVIEW (1200 chars).
 `contexto(documento, chunk_index, janela)` — vizinhança completa;

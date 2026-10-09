@@ -454,8 +454,6 @@ const JURIDICAS: Record<string, FraseDe> = {
   [`${CK}buscar_interseccao`]: comQuery('Pesquisou nos autos dois temas juntos', 'Pesquisando nos autos dois temas juntos', 'pesquisas'),
   [`${CK}comparar`]: fixa('Comparou peças dos autos', 'Comparando peças dos autos…', 'leituras'),
   [`${CK}cross_ref`]: comObjeto('Procurou onde os autos citam', 'Procurando onde os autos citam', 'pesquisas', 'valor', 'item', 'query'),
-  [`${CK}discover`]: comQuery('Explorou os autos', 'Explorando os autos', 'pesquisas'),
-  [`${CK}recommend`]: fixa('Buscou trechos parecidos nos autos', 'Buscando trechos parecidos nos autos…', 'pesquisas'),
   [`${STJ}document`]: inteiroTeor,
   [`${STJ}filters`]: fixa('Listou os filtros do STJ', 'Listando os filtros do STJ…', 'leituras'),
   [`${LEI}document`]: dispositivo,

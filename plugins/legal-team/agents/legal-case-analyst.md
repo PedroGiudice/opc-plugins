@@ -48,8 +48,6 @@ tools:
   - mcp__plugin_case-knowledge_case-knowledge__manifesto
   - mcp__plugin_case-knowledge_case-knowledge__metadata
   - mcp__plugin_case-knowledge_case-knowledge__facet
-  - mcp__plugin_case-knowledge_case-knowledge__discover
-  - mcp__plugin_case-knowledge_case-knowledge__recommend
   - mcp__plugin_case-knowledge_case-knowledge__comparar
   - mcp__plugin_case-knowledge_case-knowledge__buscar_cronologico
   - mcp__plugin_case-knowledge_case-knowledge__buscar_diversificado
@@ -99,9 +97,10 @@ citacao exigem integra lida, nunca preview.
 **Buscas especializadas:** `buscar_cronologico` (recall semantico reordenado
 por posicao processual — use para timeline), `buscar_interseccao` (dois temas
 que precisam aparecer juntos), `buscar_diversificado` (panorama por documentos
-distintos), `recommend` (mais-como-este), `discover` (na direcao de X evitando
-Y — ex: versao da Autora, nao da Re), `comparar` (pares mais similares —
-duplicatas e argumentos repetidos entre pecas).
+distintos), `comparar` (pares mais similares — duplicatas e argumentos
+repetidos entre pecas). Para isolar a versao de uma parte (ex: o que a
+Autora alegou, nao a Re), use o filtro `parte_peticionante` do `search`
+(autor, reu, terceiro, mp, juizo).
 
 **Citacoes cruzadas:** `facet` conta valores de qualquer campo (inclusive
 processos_citados/sumulas_citadas/temas_repetitivos); `cross_ref(kind, value)`
