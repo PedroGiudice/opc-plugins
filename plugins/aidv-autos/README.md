@@ -49,6 +49,10 @@ pelo id do painel e das chaves de estado (renomear é decisão do empacotamento)
   e do dispositivo (os três chegam fatiados no teto de saída das tools).
   "Pedir ao Claude que leia" submete um prompt (único botão que gasta turno).
 
+Busca do STJ ou da legislação maior que o teto vem paginada (`a_partir`): a
+linha e o painel ganham a etiqueta "resultados 9–16 de 50" lida de
+`resultados_entregues`, para "8 trechos" não parecer o total da pesquisa.
+
 O JSON que o modelo recebe NÃO muda: o mod lê uma cópia do `text` em
 `tool.call` e guarda em `$.state` (`buscas`, `aberto`, `selecionada`,
 `leitura`).

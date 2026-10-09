@@ -31,6 +31,15 @@ Tools de documentos: `search`, `contexto`, `stats`, `list_cases`, `info`,
 `manifesto`, `metadata`, `recommend`, `facet`, `comparar`, `discover`,
 `buscar_cronologico`, `buscar_interseccao`, `buscar_diversificado`.
 
+Teto de saida: nenhuma tool devolve mais que `OUTPUT_CAP_CHARS` (20.000
+caracteres, `format.mjs`, calibrado contra o limite do Claude Code de 50.000
+caracteres ou 25.000 tokens, acima do qual o resultado vira arquivo). O texto
+dos autos nunca e resumido nem partido no meio de um chunk; o que nao cabe vem
+na chamada seguinte: `document`/`contexto` por `from_chunk`, `manifesto` em
+partes (indice por arquivo e folhas no topo, `a_partir` para continuar),
+`metadata` com as listas longas cortadas e lidas por `lista` + `a_partir`,
+`memoria_search` por `a_partir`. Resposta que cabe sai como sempre saiu.
+
 Tool de memoria: `memoria_search` (`memoria.mjs`) — busca dirigida na memoria
 de sessoes do caso via `POST /api/search` do legal-cogmem. Roteada pelo
 diretorio do caso (`repo_path`). Em falha (HTTP nao-ok, status nao-ok, daemon
