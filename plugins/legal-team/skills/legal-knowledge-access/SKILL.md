@@ -50,7 +50,8 @@ as collections `case-{slug}` no Qdrant.
 de qualquer campo), `info`, `list_cases`.
 
 **Busca:** `search` — busca semântica DENSE (batch até 20 queries; filtros
-`peca`, `parent_peca`, `fase`, `documento`, `numero_processo`, `categoria`;
+`peca`, `subtipo`, `parte_peticionante`, `fase`, `documento`,
+`numero_processo`, `categoria`;
 `agrupar=true` diversifica). Especializadas: `buscar_interseccao` (dois temas
 juntos), `buscar_cronologico` (reordena por posição processual),
 `buscar_diversificado` (panorama por documentos), `comparar`
