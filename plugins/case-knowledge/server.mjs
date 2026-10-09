@@ -657,14 +657,20 @@ server.tool(
     "o id do segmento entre <> — endereco de leitura da tool document. " +
     "Expediente de serventia (certidao, mandado, ato ordinatorio) vem colapsado " +
     "numa linha agregada; use expandir_expediente=true para ver item a item. " +
+    "Autos grandes vem em PARTES: a resposta traz no topo o indice das partes " +
+    "(arquivo e folhas de cada uma) e no fim a continuacao manifesto(a_partir: N); " +
+    "leia a primeira e as partes do trecho dos autos que interessa. " +
     "Usar no inicio da sessao para entender a estrutura e a cronologia do caso. " +
     "Requer que 'case-ingest enrich' e 'case-ingest manifesto' tenham sido executados.",
   {
     expandir_expediente: z.boolean().default(false)
       .describe("Lista o expediente de serventia item a item em vez da linha agregada."),
+    a_partir: z.number().int().min(1).default(1)
+      .describe("Entrada do nivel 1 onde comecar (default 1). Use o a_partir do indice das partes " +
+        "ou da linha 'Continua' da resposta anterior, com o mesmo expandir_expediente."),
     caso: z.string().optional().describe(DESC_CASO),
   },
-  async ({ expandir_expediente, caso }) => {
+  async ({ expandir_expediente, a_partir, caso }) => {
     try {
       const alvo = (await sessao()).resolve(caso);
       const yamlPath = join(alvo.dir, "documentos.yaml");
@@ -679,6 +685,7 @@ server.tool(
       // dentro do proprio render — caso ja ingerido nunca perde o manifesto.
       const texto = renderManifesto(yaml.load(bruto), {
         expandirExpediente: expandir_expediente,
+        aPartir: a_partir,
       });
       return { content: [{ type: "text", text: texto }] };
     } catch (err) {

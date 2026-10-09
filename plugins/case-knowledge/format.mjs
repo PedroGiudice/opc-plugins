@@ -751,6 +751,108 @@ function linhaDoc(d, indent) {
   return `${pad}${marca}${nome}${marcaCopiaExterna(d)}  ${fls}${data}${tit}${chunks}${id}`.trimEnd();
 }
 
+/** Linha agregada de uma corrida de expediente colapsado. */
+function linhaExpediente(itens) {
+  const cont = {};
+  for (const e of itens) {
+    const k = e.peca ?? "?";
+    cont[k] = (cont[k] ?? 0) + 1;
+  }
+  return `[+ expediente: ${Object.entries(cont).map(([p, n]) => `${n} ${p}`).join(", ")}]`;
+}
+
+/**
+ * Unidades de leitura do manifesto a partir da entrada `inicio` (0-based): um
+ * ato com os seus anexos, ou uma corrida de expediente colapsado (uma linha so).
+ * `de`/`ate` sao as entradas do nivel 1 cobertas (1-based); `itens`, os
+ * segmentos listados, na ordem. A unidade e o atomo da paginacao: ato e anexo
+ * nunca caem em partes diferentes.
+ */
+function unidadesDoManifesto(docs, expandir, inicio) {
+  const unidades = [];
+  let corrida = null;
+  const fechar = () => {
+    if (!corrida) return;
+    unidades.push({ ...corrida, linhas: [linhaExpediente(corrida.itens)] });
+    corrida = null;
+  };
+  for (let i = inicio; i < docs.length; i++) {
+    const d = docs[i];
+    if (d.peso === PESO_EXPEDIENTE && !expandir) {
+      if (!corrida) corrida = { de: i + 1, ate: i + 1, itens: [] };
+      corrida.ate = i + 1;
+      corrida.itens.push(d);
+      continue;
+    }
+    fechar();
+    const anexos = d.anexos ?? [];
+    unidades.push({
+      de: i + 1,
+      ate: i + 1,
+      linhas: [linhaDoc(d, 0), ...anexos.map((a) => linhaDoc(a, 2))],
+      itens: [d, ...anexos],
+    });
+  }
+  fechar();
+  return unidades;
+}
+
+/** Tamanho das linhas de uma unidade no texto (cada linha leva um "\n"). */
+const tamanhoUnidade = (u) => u.linhas.reduce((n, l) => n + l.length + 1, 0);
+
+/** Prefixo de `unidades` que cabe em `orcamento` chars; sempre >= 1 unidade. */
+function quantasCabem(unidades, orcamento) {
+  let n = 0;
+  let total = 0;
+  for (const u of unidades) {
+    const t = tamanhoUnidade(u);
+    if (n > 0 && total + t > orcamento) break;
+    n++;
+    total += t;
+  }
+  return n;
+}
+
+/** Divide as unidades em partes de ate `orcamento` chars (guloso, em ordem). */
+function partesDoManifesto(unidades, orcamento) {
+  const partes = [];
+  for (let i = 0; i < unidades.length; ) {
+    const n = quantasCabem(unidades.slice(i), orcamento);
+    partes.push(unidades.slice(i, i + n));
+    i += n;
+  }
+  return partes;
+}
+
+/** Arquivo de um segmento: `nome`, ou o prefixo do `segmento_id` (`<arquivo>#pNNNN`). */
+function arquivoDe(d) {
+  if (d.nome) return String(d.nome);
+  const id = d.segmento_id ? String(d.segmento_id) : "";
+  const i = id.lastIndexOf("#p");
+  return i > 0 ? id.slice(0, i) : "?";
+}
+
+/**
+ * Onde uma parte comeca e termina nos autos, por arquivo e folhas — a
+ * coordenada que o advogado cita. Data de juntada nao serve de chave: o
+ * manifesto segue arquivo e folha, e copia de outro processo traz a data de la.
+ */
+function trechoDaParte(unidades) {
+  const primeiro = unidades[0].itens[0];
+  const ultimo = unidades.at(-1).itens.at(-1);
+  const ini = Array.isArray(primeiro.fls) ? primeiro.fls[0] : null;
+  const fim = Array.isArray(ultimo.fls) ? ultimo.fls[1] : null;
+  const a = arquivoDe(primeiro);
+  const b = arquivoDe(ultimo);
+  if (a === b) return ini != null && fim != null ? `${a}, fls. ${ini}-${fim}` : a;
+  const pa = ini != null ? ` fls. ${ini}` : "";
+  const pb = fim != null ? ` fls. ${fim}` : "";
+  return `de ${a}${pa} a ${b}${pb}`;
+}
+
+/** Folga inicial do orcamento do corpo para o cabecalho e o indice das partes. */
+const RESERVA_PARTES = 1_500;
+
 /**
  * Renderiza o manifesto hierarquico do caso.
  *
@@ -760,53 +862,89 @@ function linhaDoc(d, indent) {
  *
  * Manifesto legado (sem `segmento_id`/`peso`) degrada para a lista simples
  * de arquivos — nenhum caso ja ingerido perde o manifesto.
+ *
+ * Autos grandes vem em PARTES (medido em 09/10/2026: falencia com 3.469
+ * segmentos dava 249 mil chars, 13 casos do parque passavam do teto). A
+ * unidade de corte e a entrada do nivel 1 (`documentos[i]`, um ato ou um
+ * expediente), sempre com os seus anexos; a numeracao das entradas nao depende
+ * do colapso do expediente. Cada parte traz no topo o indice de todas as partes
+ * por arquivo e folhas (para ir direto ao trecho dos autos que interessa) e no
+ * fim a continuacao `manifesto(a_partir: N)`. Nada some em silencio: toda entrada
+ * esta em alguma parte, e o indice diz quantas partes existem. Manifesto que
+ * cabe no teto sai identico ao de antes, sem partes.
  */
-export function renderManifesto(manifesto, { expandirExpediente = false } = {}) {
+export function renderManifesto(manifesto, { expandirExpediente = false, aPartir: pedido = 1, globalCap = OUTPUT_CAP_CHARS } = {}) {
+  const aPartir = Number.isInteger(pedido) && pedido > 1 ? pedido : 1;
   const docs = manifesto?.documentos ?? [];
-  const linhas = [
+  const cabecalho = [
     `Caso: ${manifesto?.caso ?? "?"}`,
     `Documentos: ${manifesto?.total_documentos ?? docs.length}`,
-    "",
   ];
-
-  let pendente = [];
-  const drenar = () => {
-    if (!pendente.length) return;
-    const cont = {};
-    for (const e of pendente) {
-      const k = e.peca ?? "?";
-      cont[k] = (cont[k] ?? 0) + 1;
-    }
-    const resumo = Object.entries(cont).map(([p, n]) => `${n} ${p}`).join(", ");
-    linhas.push(`[+ expediente: ${resumo}]`);
-    pendente = [];
-  };
-
-  let temSegmento = false;
-  for (const d of docs) {
-    if (d.segmento_id) temSegmento = true;
-    if (d.peso === PESO_EXPEDIENTE && !expandirExpediente) {
-      pendente.push(d);
-      continue;
-    }
-    drenar();
-    linhas.push(linhaDoc(d, 0));
-    for (const a of d.anexos ?? []) {
-      if (a.segmento_id) temSegmento = true;
-      linhas.push(linhaDoc(a, 2));
-    }
-  }
-  drenar();
-
+  const temSegmento = docs.some((d) => d.segmento_id || (d.anexos ?? []).some((a) => a.segmento_id));
+  const rodape = [];
   if (temSegmento) {
-    linhas.push("");
-    linhas.push(
+    rodape.push("");
+    rodape.push(
       "Leitura de um documento logico: document(segmento: \"<id entre colchetes angulares>\")."
     );
     if (!expandirExpediente) {
-      linhas.push("Expediente colapsado: chame manifesto(expandir_expediente: true) para ver linha a linha.");
+      rodape.push("Expediente colapsado: chame manifesto(expandir_expediente: true) para ver linha a linha.");
     }
   }
 
-  return linhas.join("\n");
+  const todas = unidadesDoManifesto(docs, expandirExpediente, 0);
+  const inteiro = [...cabecalho, "", ...todas.flatMap((u) => u.linhas), ...rodape].join("\n");
+  if (aPartir <= 1 && inteiro.length <= globalCap) return inteiro;
+
+  const total = docs.length;
+  if (aPartir > total) {
+    return [
+      ...cabecalho,
+      "",
+      `Não há a entrada ${aPartir}: o manifesto tem ${total} entradas no nível 1. Comece em manifesto(a_partir: 1).`,
+    ].join("\n");
+  }
+
+  const chamada = (n) => `manifesto(a_partir: ${n}${expandirExpediente ? ", expandir_expediente: true" : ""})`;
+
+  // Texto de uma resposta: `corpo` sao as unidades entregues; `k` e o numero da
+  // parte (0-based) quando o corpo e exatamente uma parte do indice, senao -1.
+  const montar = (partes, corpo, k) => {
+    const de = corpo[0].de;
+    const ate = corpo.at(-1).ate;
+    const situacao = k >= 0
+      ? `Parte ${k + 1} de ${partes.length} (entradas ${de}-${ate} de ${total}; cada entrada é um ato ou expediente do nível 1, com os seus anexos).`
+      : `Entradas ${de}-${ate} de ${total} (cada entrada é um ato ou expediente do nível 1, com os seus anexos).`;
+    const indice = [
+      `Índice das partes (manifesto grande demais para uma resposta só; vá direto a um trecho dos autos com ${chamada("<entrada>")}):`,
+      ...partes.map((p, i) => `  parte ${i + 1}: a_partir ${p[0].de}, ${trechoDaParte(p)}`),
+    ];
+    const continua = ate < total
+      ? `Continua${k >= 0 ? ` na parte ${k + 2}` : ""}: ${chamada(ate + 1)}.`
+      : "Última parte.";
+    return [...cabecalho, situacao, "", ...indice, "", ...corpo.flatMap((u) => u.linhas), "", continua, ...rodape].join("\n");
+  };
+
+  // O indice cresce com o numero de partes, e as partes com o orcamento do
+  // corpo: reduz o orcamento ate a maior parte (cabecalho e indice inclusos)
+  // caber no teto. So uma unidade sozinha acima do teto passa dele.
+  let orcamento = globalCap - RESERVA_PARTES;
+  let partes = partesDoManifesto(todas, orcamento);
+  for (let tentativa = 0; tentativa < 10; tentativa++) {
+    const excesso = Math.max(
+      0,
+      ...partes.map((p, i) => (p.length > 1 ? montar(partes, p, i).length - globalCap : 0))
+    );
+    if (excesso === 0) break;
+    orcamento -= excesso + 50;
+    partes = partesDoManifesto(todas, orcamento);
+  }
+
+  const k = partes.findIndex((p) => p[0].de === aPartir);
+  if (k >= 0) return montar(partes, partes[k], k);
+  // Entrada fora do inicio de uma parte: mesma regra, a partir dela.
+  const us = unidadesDoManifesto(docs, expandirExpediente, aPartir - 1);
+  let n = quantasCabem(us, orcamento);
+  while (n > 1 && montar(partes, us.slice(0, n), -1).length > globalCap) n--;
+  return montar(partes, us.slice(0, n), -1);
 }
