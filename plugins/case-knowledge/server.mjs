@@ -16,6 +16,7 @@ import { join } from "node:path";
 import yaml from "js-yaml";
 import { memoriaSearch } from "./memoria.mjs";
 import {
+  OUTPUT_CAP_CHARS,
   renderLines,
   buildCappedPayload,
   capContextChunks,
@@ -48,10 +49,6 @@ const CASES_BASE = process.env.CASE_KNOWLEDGE_CASES_BASE || defaultCasesBase();
 const REQUEST_TIMEOUT_MS = 60_000;
 const MAX_RETRIES = 3;
 const RETRY_DELAYS = [500, 1500, 3000];
-
-/** Teto de chars do output de tools de retrieval (~19k tokens, sob o
- * limite de 25k tokens de output de tool MCP do Claude Code). */
-const OUTPUT_CAP_CHARS = 60_000;
 
 function degradeNotice(degraded, requestedChars) {
   if (!degraded) return "";

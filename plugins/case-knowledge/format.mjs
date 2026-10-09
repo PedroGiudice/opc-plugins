@@ -6,6 +6,22 @@
  * de output de tool MCP do Claude Code. Preview por default + cap global.
  */
 
+/**
+ * Teto de chars do texto devolvido pelas tools de retrieval.
+ *
+ * O Claude Code grava em arquivo (e entrega ao modelo so o caminho) todo
+ * resultado de texto acima de 50.000 caracteres OU de 25.000 tokens. No
+ * tokenizador da familia Claude 5 o texto de OCR rende 2,14 chars/token na
+ * mediana do parque, mas o enchimento de formulario datilografado
+ * ("x.x.x.x.") e os separadores de e-mail ("~::~:") rendem ~1 char/token:
+ * a pior janela real de leitura medida (09/10/2026) teve 24.245 chars e
+ * 23.899 tokens. Com 20.000 chars o pior caso fica em ~19,8k tokens (20%
+ * abaixo do limite) e o texto tipico em ~9,3k. Teto em tokens estimados foi
+ * descartado: nem regressao por classe de caractere nem estimador pessimista
+ * simples acompanharam o tokenizador (erro de ate 40% para menos).
+ */
+export const OUTPUT_CAP_CHARS = 20_000;
+
 const SUFFIX = " […]";
 /** Maximo de chars que aceitamos recuar procurando fronteira de palavra. */
 const WORD_BOUNDARY_LOOKBACK = 80;
@@ -68,7 +84,7 @@ const DEGRADE_STEPS = [600, 300, 200];
  *   N listas no batch — uma por query — ou no agrupar — uma por grupo).
  * - `render(processedLists)`: reconstroi o texto final no shape original.
  * - `contentChars`: preview por result (0 = integra, nunca trunca content).
- * - `globalCap`: teto de chars do texto final (~60k chars, ~19k tokens).
+ * - `globalCap`: teto de chars do texto final (default OUTPUT_CAP_CHARS).
  *
  * Degrade em duas alavancas, nesta ordem:
  *   1. preview menor (1200 -> 600 -> 300 -> 200) — pulada se contentChars=0;
@@ -79,7 +95,7 @@ const DEGRADE_STEPS = [600, 300, 200];
  * foi reduzido. Se nem o minimo couber, retorna o menor texto produzido
  * (melhor esforco — nunca lanca).
  */
-export function buildCappedPayload({ lists, render, contentChars = 1200, globalCap = 60000 }) {
+export function buildCappedPayload({ lists, render, contentChars = 1200, globalCap = OUTPUT_CAP_CHARS }) {
   const previewSteps = contentChars > 0
     ? [contentChars, ...DEGRADE_STEPS.filter((s) => s < contentChars)]
     : [0];
@@ -122,7 +138,7 @@ export function buildCappedPayload({ lists, render, contentChars = 1200, globalC
  * cap, entrega o prefixo que coube e informa `next_from` para o caller
  * continuar na proxima chamada (fatiamento sequencial, nunca amostra).
  */
-export function renderDocumentChunks(chunks, { fromChunk = 0, globalCap = 60000 } = {}) {
+export function renderDocumentChunks(chunks, { fromChunk = 0, globalCap = OUTPUT_CAP_CHARS } = {}) {
   const OVERHEAD_PER_CHUNK = 40; // separadores "--- chunk N ---"
   const ordered = [...(chunks || [])].sort(
     (a, b) => (a.chunk_index ?? 0) - (b.chunk_index ?? 0)
@@ -134,7 +150,8 @@ export function renderDocumentChunks(chunks, { fromChunk = 0, globalCap = 60000 
   for (const c of eligible) {
     const s = (c.content?.length || 0) + OVERHEAD_PER_CHUNK;
     // O primeiro chunk entra mesmo acima do cap (nunca entregar zero por
-    // causa de um chunk grande; max real de chunk ~32k chars < cap).
+    // causa de um chunk grande; o maior chunk do parque, 41k chars e ~15k
+    // tokens, fica abaixo dos dois limites do Claude Code).
     if (kept.length > 0 && size + s > globalCap) break;
     kept.push(c);
     size += s;
@@ -159,7 +176,7 @@ export function renderDocumentChunks(chunks, { fromChunk = 0, globalCap = 60000 
  * O chunk central nunca e removido nem truncado — a leitura na integra
  * e a razao de existir da tool (citacao exige texto completo).
  */
-export function capContextChunks(chunks, centralIndex, globalCap = 60000) {
+export function capContextChunks(chunks, centralIndex, globalCap = OUTPUT_CAP_CHARS) {
   const OVERHEAD_PER_CHUNK = 40; // separadores "--- chunk N ---"
   const size = (cs) => cs.reduce((a, c) => a + (c.content?.length || 0) + OVERHEAD_PER_CHUNK, 0);
   const kept = [...chunks];
@@ -348,7 +365,7 @@ function renderDoc(state, counterLine) {
  *    independe do degrade client-side (evita dupla contagem).
  *  - degrade client-side: faixas e/ou documentos omitidos para caber no cap.
  */
-function buildAvisos(response, faixasOmitidas, documentosOmitidos) {
+function buildAvisos(response, faixasOmitidas, documentosOmitidos, trechosOmitidos = 0) {
   const avisos = [];
   const responseDocs = (response.documentos || []).length;
   const noRecall =
@@ -369,11 +386,16 @@ function buildAvisos(response, faixasOmitidas, documentosOmitidos) {
       `[aviso: ${documentosOmitidos} documento(s) menos relevante(s) omitido(s) do output para caber no limite de tokens.]`
     );
   }
+  if (trechosOmitidos > 0) {
+    avisos.push(
+      `[aviso: ${trechosOmitidos} trecho(s) localizado(s) menos relevante(s) omitido(s) do output para caber no limite de tokens. Leia o documento inteiro via document.]`
+    );
+  }
   return avisos;
 }
 
 /** Monta o markdown final a partir do estado corrente de degrade. */
-function assemble(response, docStates, faixasOmitidas, documentosOmitidos) {
+function assemble(response, docStates, faixasOmitidas, documentosOmitidos, trechosOmitidos = 0) {
   const rendered = docStates.length;
   const title = `# Reconstrucao: "${response.query ?? ""}"`;
   const meta = `modo ${response.modo ?? ""} · janela ${response.janela ?? ""} · ${rendered} documento(s)`;
@@ -381,7 +403,7 @@ function assemble(response, docStates, faixasOmitidas, documentosOmitidos) {
     renderDoc(s, rendered > 1 ? `Documento ${i + 1} de ${rendered}` : "")
   );
   let text = title + "\n" + meta + "\n\n" + blocks.join("\n\n---\n\n");
-  const avisos = buildAvisos(response, faixasOmitidas, documentosOmitidos);
+  const avisos = buildAvisos(response, faixasOmitidas, documentosOmitidos, trechosOmitidos);
   if (avisos.length > 0) text += "\n\n---\n" + avisos.join("\n");
   return text;
 }
@@ -395,10 +417,12 @@ function assemble(response, docStates, faixasOmitidas, documentosOmitidos) {
  * Cascata (so quando o texto estoura globalCap):
  *   1. reduz faixas por doc (menos relevantes primeiro, mantendo >=1 por doc);
  *   2. reduz documentos (cauda menos relevante, mantendo >=1);
- *   3. best-effort: reduz as faixas remanescentes aos chunks matched. Entrega
- *      o melhor esforco mesmo acima do cap (nunca lanca).
+ *   3. reduz as faixas remanescentes aos chunks matched;
+ *   4. tira os chunks matched de menor score, mantendo >=1 (a elipse do
+ *      buraco sai do proprio renderBody). Um chunk sozinho acima do cap e
+ *      entregue assim mesmo (melhor esforco, nunca lanca).
  */
-export function renderReconstrucao(response, { globalCap = 60000 } = {}) {
+export function renderReconstrucao(response, { globalCap = OUTPUT_CAP_CHARS } = {}) {
   const docsIn = (response && response.documentos) || [];
   if (docsIn.length === 0) {
     return { text: "Nenhum documento reconstruido para essa busca.", degraded: null };
@@ -459,11 +483,31 @@ export function renderReconstrucao(response, { globalCap = 60000 } = {}) {
     });
   }
   text = assemble(response, states, faixasOmitidas, documentosOmitidos);
-  const anyDegrade = faixasOmitidas > 0 || documentosOmitidos > 0 || neighborsDropped > 0;
+
+  // Lever 4: tira o chunk de menor score (empate: o mais ao fim), >=1 no total.
+  let trechosOmitidos = 0;
+  const restantes = () => states.reduce((n, s) => n + s.faixas.reduce((m, f) => m + f.chunks.length, 0), 0);
+  while (text.length > globalCap && restantes() > 1) {
+    let alvo = null; // { s, f, ci, score }
+    for (const s of states) {
+      for (const f of s.faixas) {
+        f.chunks.forEach((c, ci) => {
+          const score = typeof c.score === "number" ? c.score : 0;
+          if (alvo === null || score <= alvo.score) alvo = { s, f, ci, score };
+        });
+      }
+    }
+    alvo.f.chunks = alvo.f.chunks.filter((_, i) => i !== alvo.ci);
+    alvo.s.faixas = alvo.s.faixas.filter((f) => f.chunks.length > 0);
+    trechosOmitidos++;
+    text = assemble(response, states, faixasOmitidas, documentosOmitidos, trechosOmitidos);
+  }
+
+  const anyDegrade = faixasOmitidas > 0 || documentosOmitidos > 0 || neighborsDropped > 0 || trechosOmitidos > 0;
   return {
     text,
     degraded: anyDegrade
-      ? { documentos_omitidos: documentosOmitidos, faixas_omitidas: faixasOmitidas }
+      ? { documentos_omitidos: documentosOmitidos, faixas_omitidas: faixasOmitidas, trechos_omitidos: trechosOmitidos }
       : null,
   };
 }

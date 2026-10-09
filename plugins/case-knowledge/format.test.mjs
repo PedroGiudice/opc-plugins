@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { truncateContent, previewResult, renderLines, buildCappedPayload, capContextChunks, renderDocumentChunks, detectaCollectionAusente, renderCaseSemBase, renderManifesto } from "./format.mjs";
+import { OUTPUT_CAP_CHARS, truncateContent, previewResult, renderLines, buildCappedPayload, capContextChunks, renderDocumentChunks, detectaCollectionAusente, renderCaseSemBase, renderManifesto } from "./format.mjs";
 
 test("truncateContent: content curto retorna intacto", () => {
   const r = truncateContent("texto curto", 1200);
@@ -302,6 +302,103 @@ test("renderDocumentChunks: from_chunk alem do fim retorna vazio sem lancar", ()
   assert.equal(out.delivered_from, null);
   assert.equal(out.next_from, null);
   assert.equal(out.total, 1);
+});
+
+// === Limite de saida de tool MCP do Claude Code (09/10/2026) ===
+//
+// O Claude Code grava em arquivo (e entrega ao modelo so o caminho) todo
+// resultado de texto acima de 50.000 caracteres OU de 25.000 tokens
+// (code.claude.com/docs/en/mcp, "MCP output limits and warnings"). Com o
+// teto antigo de 60k, 6 de 12 leituras da Copia Integral do caso Trilheiros
+// voltaram como arquivo e o modelo gastou 8 Read para recuperar o texto.
+// Razao chars/token medida no parque (contagem oficial da API, tokenizador da
+// familia Claude 5): mediana 2,14 em 461 amostras; pior janela real de leitura
+// 1,01 (24.245 chars = 23.899 tokens, enchimento "x.x.x." de inventario
+// datilografado).
+const LIMITE_CHARS_CLAUDE_CODE = 50_000;
+const LIMITE_TOKENS_CLAUDE_CODE = 25_000;
+const PIOR_CHARS_POR_TOKEN_MEDIDO = 1.01;
+const FOLGA = 0.8;
+
+// Tamanhos reais (so os numeros) dos 107 chunks de
+// "Trilheiros x Salesforce - Copia Integral - 09.10.2026.json".
+const TAMANHOS_COPIA_INTEGRAL = [
+  3179, 4154, 4369, 4513, 4129, 4680, 5186, 10765, 4243, 5480, 5881, 7390, 4243, 5453, 4146,
+  4452, 5296, 5643, 4540, 4198, 4665, 4873, 3525, 3550, 3970, 4369, 5374, 3143, 5918, 5062,
+  5519, 3539, 3859, 3986, 4164, 4859, 4904, 5097, 3268, 5100, 5367, 4908, 4633, 5628, 5585,
+  5639, 6947, 6566, 5871, 4699, 5360, 5012, 4466, 4781, 5358, 4621, 4033, 3751, 4880, 3996,
+  3337, 4211, 4046, 4008, 4132, 4021, 3483, 3326, 3824, 3430, 3717, 4705, 5146, 3723, 4046,
+  5117, 5129, 3858, 5568, 5996, 5749, 6049, 6894, 5785, 5247, 5533, 4147, 5237, 4222, 4376,
+  4563, 4382, 4025, 3549, 4763, 4164, 3277, 4173, 3916, 4035, 4138, 3876, 3483, 3326, 3845,
+  3428, 857,
+];
+
+function copiaIntegral() {
+  // Conteudo distinto por chunk, com marcador de inicio e fim, para provar
+  // que nenhum chunk sai partido.
+  return TAMANHOS_COPIA_INTEGRAL.map((n, i) => {
+    const ini = `<C${i}>`;
+    const fim = `</C${i}>`;
+    return { chunk_index: i, content: ini + "x".repeat(n - ini.length - fim.length) + fim };
+  });
+}
+
+test("OUTPUT_CAP_CHARS cabe nos dois limites do Claude Code, com folga, no texto mais denso medido", () => {
+  assert.ok(
+    OUTPUT_CAP_CHARS <= LIMITE_CHARS_CLAUDE_CODE * FOLGA,
+    `teto ${OUTPUT_CAP_CHARS} passa de ${LIMITE_CHARS_CLAUDE_CODE * FOLGA} chars`,
+  );
+  const piorTokens = OUTPUT_CAP_CHARS / PIOR_CHARS_POR_TOKEN_MEDIDO;
+  assert.ok(
+    piorTokens <= LIMITE_TOKENS_CLAUDE_CODE * FOLGA,
+    `teto ${OUTPUT_CAP_CHARS} chars = ${Math.round(piorTokens)} tokens no pior texto medido`,
+  );
+});
+
+test("renderDocumentChunks: sem globalCap, nenhuma leitura da Copia Integral passa do teto, de qualquer from_chunk", () => {
+  const chunks = copiaIntegral();
+  for (let from = 0; from < chunks.length; from++) {
+    const out = renderDocumentChunks(chunks, { fromChunk: from });
+    assert.ok(out.text.length <= OUTPUT_CAP_CHARS, `from_chunk=${from}: ${out.text.length} chars`);
+  }
+});
+
+test("renderDocumentChunks: leitura sequencial pelo next_from cobre o documento inteiro, sem chunk partido nem repetido", () => {
+  const chunks = copiaIntegral();
+  const lidos = [];
+  let from = 0;
+  let chamadas = 0;
+  while (from !== null) {
+    const out = renderDocumentChunks(chunks, { fromChunk: from });
+    chamadas++;
+    for (let i = out.delivered_from; i <= out.delivered_to; i++) {
+      assert.ok(out.text.includes(chunks[i].content), `chunk ${i} partido`);
+      lidos.push(i);
+    }
+    from = out.next_from;
+  }
+  assert.deepEqual(lidos, chunks.map((c) => c.chunk_index));
+  assert.ok(chamadas > 1, "o documento deveria exigir mais de uma leitura");
+});
+
+test("capContextChunks: sem globalCap, a janela respeita o teto", () => {
+  const chunks = Array.from({ length: 11 }, (_, i) => ({ chunk_index: i, content: "c".repeat(5000) }));
+  const { chunks: out, reduced } = capContextChunks(chunks, 5);
+  assert.equal(reduced, true);
+  const total = out.reduce((a, c) => a + c.content.length, 0);
+  assert.ok(total <= OUTPUT_CAP_CHARS, `total=${total}`);
+  assert.ok(out.some((c) => c.chunk_index === 5), "central removido");
+});
+
+test("buildCappedPayload: sem globalCap, o texto final respeita o teto", () => {
+  const results = Array.from({ length: 10 }, (_, i) => ({ chunk_index: i, content: "s".repeat(5000) }));
+  const { text, degraded } = buildCappedPayload({
+    lists: [results],
+    render: (pls) => renderLines(pls[0]),
+    contentChars: 0,
+  });
+  assert.ok(text.length <= OUTPUT_CAP_CHARS, `len=${text.length}`);
+  assert.ok(degraded !== null, "esperava corte de cauda");
 });
 
 // === CMR-146: caso sem base embedada (casca) ===

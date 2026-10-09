@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { renderReconstrucao } from "./format.mjs";
+import { OUTPUT_CAP_CHARS, renderReconstrucao } from "./format.mjs";
 
 // --- Helpers locais (fixtures do ReconstruirResponse) ---
 // Espelham skip_serializing_if do Rust: campos Option omitidos quando None;
@@ -426,4 +426,43 @@ test("15: dedupe defensivo -> chunk_index repetido nao duplica content", () => {
   const r = renderReconstrucao(makeResp({ documentos: [doc], documentos_no_recall: 1 }));
   const occurrences = r.text.split("REPEATED_UNIQUE_XYZ").length - 1;
   assert.equal(occurrences, 1, r.text);
+});
+
+test("sem globalCap, a reconstrucao respeita o teto de saida do plugin", () => {
+  // 8 documentos de ~5k chars: ~40k, acima do teto e abaixo do antigo 60k.
+  const docs = Array.from({ length: 8 }, (_, d) =>
+    makeDoc({
+      documento: `d${d}.json`,
+      peca: "contestacao",
+      data_juntada: "2024-01-01",
+      total_chunks: 1,
+      score_max: 0.9 - d * 0.05,
+      faixas: [makeFaixa([makeChunk(0, { page_start: 1, page_end: 1, content: `D${d}` + "r".repeat(5000), matched: true, score: 0.9 - d * 0.05 })])],
+    })
+  );
+  const r = renderReconstrucao(makeResp({ documentos: docs, documentos_no_recall: 8 }));
+  assert.ok(r.text.length <= OUTPUT_CAP_CHARS, `len=${r.text.length}`);
+  assert.ok(r.degraded !== null && r.degraded.documentos_omitidos > 0, JSON.stringify(r.degraded));
+});
+
+test("trechos localizados contiguos acima do teto: corta os de menor score, mantem o melhor, nunca parte chunk", () => {
+  // Smoke real (09/10/2026, caso Trilheiros): reconstruir devolveu 27k chars
+  // com o teto em 20k, porque o ultimo degrau so tirava vizinhos nao
+  // localizados e sobrava uma faixa so de trechos localizados.
+  const scores = [0.9, 0.5, 0.95, 0.4, 0.6, 0.3];
+  const chunks = scores.map((score, i) =>
+    makeChunk(10 + i, { page_start: 20 + i, page_end: 20 + i, content: `T${i}_` + "t".repeat(4500) + `_F${i}`, matched: true, score })
+  );
+  const doc = makeDoc({ peca: "contestacao", data_juntada: "2024-01-01", total_chunks: 30, faixas: [makeFaixa(chunks, { gap_antes: 10 })] });
+  const r = renderReconstrucao(makeResp({ documentos: [doc], documentos_no_recall: 1 }));
+  assert.ok(r.text.length <= OUTPUT_CAP_CHARS, `len=${r.text.length}`);
+  assert.ok(r.text.includes(chunks[2].content), "o trecho de maior score saiu");
+  for (const c of chunks) {
+    const ini = r.text.includes(`T${c.chunk_index - 10}_`);
+    assert.equal(ini, r.text.includes(c.content), `chunk ${c.chunk_index} partido`);
+  }
+  assert.ok(!r.text.includes(chunks[5].content), "o de menor score deveria sair primeiro");
+  assert.ok(r.degraded && r.degraded.trechos_omitidos > 0, JSON.stringify(r.degraded));
+  assert.match(r.text, /trecho\(s\) localizado\(s\) menos relevante\(s\) omitido\(s\)/);
+  assert.match(r.text, /\[\.\.\. /, "elipse honesta onde o trecho saiu");
 });
