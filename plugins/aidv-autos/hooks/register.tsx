@@ -297,16 +297,30 @@ function lerLotesAutos(texto: string): Busca['lotes'] {
   return lotes
 }
 
-// STJ e legislação: um único objeto JSON `{ results: [...] }`.
-function resultadosDe(texto: string): Record<string, unknown>[] {
+// STJ e legislação: um único objeto JSON `{ results: [...] }`, às vezes depois
+// de um aviso de uma linha (busca paginada no teto de saída).
+function objetoDe(texto: string): Record<string, unknown> | null {
   const ini = texto.indexOf('{')
-  if (ini < 0) return []
+  if (ini < 0) return null
   try {
-    const o = JSON.parse(texto.slice(ini)) as { results?: unknown }
-    return Array.isArray(o.results) ? (o.results as Record<string, unknown>[]) : []
+    const o = JSON.parse(texto.slice(ini)) as unknown
+    return o && typeof o === 'object' ? (o as Record<string, unknown>) : null
   } catch {
-    return []
+    return null
   }
+}
+
+function resultadosDe(texto: string): Record<string, unknown>[] {
+  const o = objetoDe(texto)
+  return o && Array.isArray(o.results) ? (o.results as Record<string, unknown>[]) : []
+}
+
+// Busca maior que o teto vem em fatias ("9-10 de 12"): sem a etiqueta, "2
+// trechos" leria como se a pesquisa só tivesse achado 2.
+function fatiaDe(fonte: Fonte, texto: string): string | null {
+  if (fonte === 'autos') return null
+  const f = objetoDe(texto)?.resultados_entregues
+  return typeof f === 'string' && f ? `resultados ${f.replace('-', '–')}` : null
 }
 
 function trechoStj(o: Record<string, unknown>): Trecho {
@@ -702,7 +716,17 @@ export const register: Register = on => {
         const texto = 'text' in r && typeof r.text === 'string' ? r.text : ''
         const erro = 'isError' in r && r.isError ? (compacta(texto, 200) || 'A pesquisa falhou.') : null
         await update($, buscas, lista =>
-          lista.map(b => (b.id === nova.id ? { ...b, lotes: erro ? [] : lerLotes(meta.fonte, texto), erro, concluida: true } : b)),
+          lista.map(b => {
+            if (b.id !== nova.id) return b
+            const fatia = erro ? null : fatiaDe(meta.fonte, texto)
+            return {
+              ...b,
+              filtros: fatia ? [...b.filtros, fatia] : b.filtros,
+              lotes: erro ? [] : lerLotes(meta.fonte, texto),
+              erro,
+              concluida: true,
+            }
+          }),
         )
         await update($, selecionada, () => nova.id)
         return r

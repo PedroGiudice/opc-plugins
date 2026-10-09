@@ -169,4 +169,31 @@ for (const surface of SURFACES) {
     expect(t).not.toContain('O julgado continua.')
     expect(pedidos).toEqual([{ doc_id: '1' }, { doc_id: '1', from_chunk: 2 }])
   })
+
+  test(`${surface}: busca do STJ maior que o teto conta a fatia entregue e diz qual é`, async ($, on) => {
+    // Saida do search do stj-vec-tools paginado (saida.mjs::paginarResultados): aviso + JSON.
+    const pagina =
+      '[aviso: resultados da busca maiores que o limite de output — entregues os resultados 9-10 de 12, ' +
+      'inteiros e na ordem da busca. Continue com a_partir=11 (mesma query, filtros e limit).]\n' +
+      JSON.stringify({
+        query_info: { query: 'software empresarial CDC' },
+        resultados_entregues: '9-10 de 12',
+        proximo_a_partir: 11,
+        results: JSON.parse(stjResposta).results,
+      }, null, 2)
+    on('tool.call', { tool: STJ }, () => ({ result: pagina, text: pagina }))
+    const input = { query: 'software empresarial CDC', limit: 12, a_partir: 9 }
+    await $.tool.call({ tool: STJ, tool_use_id: 'f1', ...input })
+    const ui = await $.ui.mount({
+      plugin: PLUGIN,
+      surface,
+      component: 'ToolUse',
+      viewport: { columns: 177, rows: 40 },
+      props: { ...base, tool_use_id: 'f1', tool: STJ, input, output: pagina },
+    })
+    const t = await textos(ui)
+    expect(t).toContain('2 trechos em 2 julgados')
+    expect(t).toContain('resultados 9–10 de 12')
+    expect(await larguraDaLinha(ui)).toBeLessThanOrEqual(177)
+  })
 }
