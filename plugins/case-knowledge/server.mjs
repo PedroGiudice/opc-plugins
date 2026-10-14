@@ -712,7 +712,8 @@ server.tool(
     "dispositivos, resumo; caso não judicial: objeto, contratantes, contratos, documentos, vigência, resumo); " +
     "`valores_envolvidos` = valores copiados literalmente dos contratos e documentos do briefing, cada um com " +
     "o trecho de origem (em caso judicial, o valor da causa vem primeiro); sem soma nem conversão; " +
-    "`fontes` diz o que existia. `briefing: null` = caso sem briefing (ex.: recém-criado sem autos). " +
+    "`fontes` diz o que existia. `autos_ate` = quando o último documento entrou na base do caso (RFC3339 UTC; `null` sem base). " +
+    "`briefing: null` = caso sem briefing (ex.: recém-criado sem autos). " +
     "Ficha grande demais para uma resposta: os campos simples vêm inteiros e cada lista longa vem com os " +
     "primeiros itens; o aviso no topo diz quantos vieram e a chamada que lê o resto (`lista` + `a_partir`).",
   {

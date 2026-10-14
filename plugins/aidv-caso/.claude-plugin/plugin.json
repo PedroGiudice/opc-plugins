@@ -1,0 +1,7 @@
+{
+  "name": "aidv-caso",
+  "version": "0.1.0",
+  "description": "Painel do caso no Claude Code (AiDV): a ficha do caso, o estado das bases (autos, STJ, legislação, memória) e os arquivos gravados na pasta do caso nesta sessão, na gramática do trilho do Claude Desktop.",
+  "author": { "name": "CMR Advogados" },
+  "types": "./types/index.d.ts"
+}

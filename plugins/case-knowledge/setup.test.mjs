@@ -70,7 +70,7 @@ test("SETUP_ENV_VARS: as 3 APIs publicas com Bearer", () => {
 
 // --- lista canonica de plugins (fonte unica; o wizard AiDV le via --print-plugins) ---
 
-test("SETUP_PLUGINS: os 7 plugins do pacote juridico (4 tools + 3 mods), na ordem do onboarding", () => {
+test("SETUP_PLUGINS: os 8 plugins do pacote juridico (4 tools + 4 mods), na ordem do onboarding", () => {
   assert.deepEqual(SETUP_PLUGINS, [
     "case-knowledge",
     "stj-vec-tools",
@@ -79,6 +79,7 @@ test("SETUP_PLUGINS: os 7 plugins do pacote juridico (4 tools + 3 mods), na orde
     "aidv-contexto",
     "aidv-autos",
     "aidv-passos",
+    "aidv-caso",
   ]);
   assert.equal(MARKETPLACE_NAME, "opc-plugins");
 });
@@ -92,6 +93,7 @@ test("pluginRefs: uma referencia <plugin>@<marketplace> por plugin", () => {
     "aidv-contexto@opc-plugins",
     "aidv-autos@opc-plugins",
     "aidv-passos@opc-plugins",
+    "aidv-caso@opc-plugins",
   ]);
 });
 

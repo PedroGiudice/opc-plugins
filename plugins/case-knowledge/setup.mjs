@@ -75,6 +75,7 @@ export const SETUP_PLUGINS = [
   "aidv-contexto",
   "aidv-autos",
   "aidv-passos",
+  "aidv-caso",
 ];
 
 /** `<plugin>@<marketplace>` de cada plugin canonico — argumento do `claude plugin install`. */

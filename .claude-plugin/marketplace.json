@@ -77,6 +77,15 @@
       },
       "source": "./plugins/aidv-passos",
       "category": "productivity"
+    },
+    {
+      "name": "aidv-caso",
+      "description": "Mod (function hooks): painel do caso com três cartões na gramática do trilho do Claude Desktop: a ficha do caso (cliente, polo, natureza, autos até), o estado das bases (autos, STJ, legislação, memória: conectada, sem conexão ou entre de novo) e os arquivos gravados na pasta do caso nesta sessão, com abrir. Exige Claude Code >= 2.1.287.",
+      "author": {
+        "name": "opc"
+      },
+      "source": "./plugins/aidv-caso",
+      "category": "productivity"
     }
   ]
 }
