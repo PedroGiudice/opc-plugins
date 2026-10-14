@@ -691,6 +691,22 @@ export function renderCaseSemBase(caseName) {
   );
 }
 
+/**
+ * Texto do `cross_ref` quando nao ha resultado. Com `citacoes_indexadas:
+ * false` (API >= CMR-294) as citacoes do caso nunca foram extraidas: vazio
+ * nao quer dizer que ninguem cita o item, e afirmar "nenhuma ocorrencia" seria
+ * falso. Sem o campo (API antiga) ou com `true`, o vazio e a resposta.
+ */
+export function textoCrossRefVazio(data, kind, value) {
+  if (data?.citacoes_indexadas === false) {
+    const aviso = typeof data.aviso === "string" ? data.aviso.trim() : "";
+    return aviso ||
+      "Este caso não tem citações indexadas, então o cross_ref não tem como " +
+      "dizer onde o item é citado. Use search com o item citado como consulta.";
+  }
+  return `Nenhuma ocorrencia de ${kind}='${value}' nos autos.`;
+}
+
 // === Manifesto em arvore (spec 2026-08-17: segmento como unidade de acesso) ===
 
 const PESO_EXPEDIENTE = "expediente";

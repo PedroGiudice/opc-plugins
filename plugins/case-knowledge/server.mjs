@@ -29,6 +29,7 @@ import {
   paresMaisSimilares,
   detectaCollectionAusente,
   renderCaseSemBase,
+  textoCrossRefVazio,
 } from "./format.mjs";
 import { requestWithAuth, APP_BASE, loginFlow } from "./auth.mjs";
 import { RootsListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -1037,9 +1038,7 @@ server.tool(
       const data = await apiGet(`/cases/${alvo.name}/cross_ref?${params}`);
       const groups = data.by_documento || [];
       if (groups.length === 0) {
-        return {
-          content: [{ type: "text", text: `Nenhuma ocorrencia de ${kind}='${value}' nos autos.` }],
-        };
+        return { content: [{ type: "text", text: textoCrossRefVazio(data, kind, value) }] };
       }
       const lists = groups.map((g) => g.hits || []);
       const { text, degraded } = buildCappedPayload({
