@@ -29,6 +29,12 @@ const LOCK_PREFIX = "~$";
 const CONFLITO = ".conflito-";
 const OPT_OUT = ".local";
 
+// Minúsculas ASCII, como o `asciiLower` de workdocs.mjs (o `toLowerCase` do JS
+// é Unicode-aware e divergiria do servidor em nomes exóticos).
+function asciiLower(s) {
+  return s.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+}
+
 function basename(rel) {
   const i = rel.lastIndexOf("/");
   return i < 0 ? rel : rel.slice(i + 1);
@@ -61,7 +67,10 @@ export function ehOriginalElegivel(rel) {
   if (typeof rel !== "string" || !tipoDeFormato(rel)) return false;
   if (!isSafeRelPath(rel)) return false;
   const partes = rel.split("/");
-  const nome = partes[partes.length - 1];
+  // Sem caixa, como `isWorkdocPath`: o cliente é NTFS, e `X.CONFLITO-ana.docx`
+  // é cópia de conflito tanto quanto `x.conflito-ana.docx`. Poda idêntica à do
+  // canal, senão o extrator geraria sidecar de arquivo que o canal não circula.
+  const nome = asciiLower(partes[partes.length - 1]);
   if (nome.startsWith(LOCK_PREFIX) || nome.includes(CONFLITO)) return false;
   // `isSafeRelPath` já barra dotdir; o laço fica mesmo assim: a poda de árvores
   // barradas é regra DESTA função, não efeito colateral de outra.
@@ -71,16 +80,28 @@ export function ehOriginalElegivel(rel) {
   return true;
 }
 
-// Escapa como string YAML entre aspas duplas: só `\` e `"` precisam; o resto
-// (acentos, dois-pontos, `#`) é literal dentro das aspas.
+// Escapa como string YAML entre aspas duplas. Além de `\` e `"`, TODO caractere
+// de controle (U+0000-U+001F) é escapado: um `\n` cru quebraria a linha do
+// frontmatter, `lerFrontmatter` devolveria null e o sidecar do próprio extrator
+// passaria a ser tratado como arquivo do usuário (naoTocar) para sempre. Nome
+// de arquivo do Windows e assunto de e-mail podem trazer esses caracteres.
+const ESCAPES_CURTOS = { "\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t" };
+
 function yamlStr(s) {
-  return `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  const esc = String(s).replace(/[\\"\u0000-\u001F]/g, (c) =>
+    ESCAPES_CURTOS[c] ?? `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  return `"${esc}"`;
 }
+
+// Inverso de yamlStr em UMA passada: uma sequência `\\n` (barra literal + n) não
+// pode ser relida como quebra de linha, o que aconteceria com replaces em série.
+const DESFAZ = { n: "\n", r: "\r", t: "\t", '"': '"', "\\": "\\" };
 
 function unYamlStr(s) {
   const m = /^"((?:[^"\\]|\\.)*)"$/.exec(s.trim());
   if (!m) return null;
-  return m[1].replace(/\\(["\\])/g, "$1");
+  return m[1].replace(/\\(?:u([0-9a-fA-F]{4})|(["\\nrt]))/g, (_, hex, c) =>
+    hex !== undefined ? String.fromCharCode(parseInt(hex, 16)) : DESFAZ[c]);
 }
 
 // Serialização própria, não `js-yaml`: o subconjunto é fixo (strings, inteiro,

@@ -1,6 +1,7 @@
 // extracao.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { isWorkdocPath } from "./workdocs.mjs";
 import {
   EXTRATOR_VERSAO,
   tipoDeFormato,
@@ -89,6 +90,40 @@ test("lerFrontmatter: .md do usuário (sem nosso frontmatter) retorna null", () 
   assert.equal(lerFrontmatter("# Minhas notas\n\nsobre o contrato"), null);
   assert.equal(lerFrontmatter("---\ntitle: x\n---\ncorpo"), null);
   assert.equal(lerFrontmatter(""), null);
+});
+
+test("ehOriginalElegivel: ~$ e .conflito- sem caixa, paridade com isWorkdocPath", () => {
+  for (const rel of ["~$X.DOCX", "a.CONFLITO-ana.docx", "b.Conflito-x.xlsx"]) {
+    assert.equal(ehOriginalElegivel(rel), false, rel);
+    // O canal de workdocs também não circula esses nomes: a poda é a mesma.
+    assert.equal(isWorkdocPath(rel), false, rel);
+  }
+});
+
+test("montarSidecar/lerFrontmatter: controles em fonte e avisos fazem ida e volta em uma linha", () => {
+  const casos = [
+    { fonte: "a\r\nb.msg", avisos: ["linha1\nlinha2\ttab"] },
+    { fonte: "a\\nb.docx", avisos: ["barra \\ e \\t literais", 'aspas " e \\"'] },
+    { fonte: "ctl\u0000\u0001\u001f\u007f.eml", avisos: ["\u000b\u000c"] },
+  ];
+  for (const { fonte, avisos } of casos) {
+    const md = montarSidecar({ fonte, md5: "0".repeat(32), bytes: 1, avisos, corpo: "x\n" });
+    const cabecalho = md.slice(0, md.indexOf("\n---\n", 4));
+    // 1 (---) + fonte + md5 + bytes + extrator + "avisos:" + N itens
+    assert.equal(cabecalho.split("\n").length, 6 + avisos.length);
+    const fm = lerFrontmatter(md);
+    assert.ok(fm, "frontmatter legível");
+    assert.equal(fm.fonte, fonte);
+    assert.deepEqual(fm.avisos, avisos);
+  }
+});
+
+test("planejarExtracao: fonte com controles não faz o sidecar virar naoTocar", () => {
+  const rel = "a.docx";
+  const sidecar = montarSidecar({ fonte: "x\ny", md5: "a".repeat(32), bytes: 1, avisos: ["p\nq"], corpo: "x\n" });
+  const p = planejarExtracao({ originais: { [rel]: { md5: "a".repeat(32), bytes: 1 } }, sidecars: { "a.docx.md": sidecar } });
+  assert.deepEqual(p.naoTocar, []);
+  assert.equal(p.pular[0].rel, rel);
 });
 
 const MD5_A = "a".repeat(32);
