@@ -152,21 +152,17 @@ export const register: Register = on => {
     const m: Medida | null = await read($, medida)
     const { Box, Text } = $.ui.resolve(e)
 
-    if (m === null || m.percent === null || m.tokens === null) {
-      const pasta0 = (await $.session.cwd()).replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''
-      return (
-        <Box columnGap={2}>
-          <Text bold>{pasta0}</Text>
-          <Text dimColor>Contexto da sessão: a contagem começa na primeira resposta.</Text>
-        </Box>
-      )
-    }
+    // Antes da primeira medida não há o que separar: a faixa fica vazia. O
+    // percentual global, os tokens e a pasta da sessão saíram da faixa em
+    // 15/10/2026: o Desktop passou a mostrá-los no trilho direito (cartões
+    // Context e Environment). O que fica é só o que o Desktop não separa:
+    // a barra por categoria, o conselho e os limites de uso.
+    if (m === null || m.percent === null || m.tokens === null) return next(e)
 
     const p = m.percent
     const f = faixa(p)
     const largura = Math.max(20, Math.min(50, Math.floor(e.props.bodyColumns * 0.4)))
     const agora = await $.clock.now()
-    const pasta = (await $.session.cwd()).replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''
 
     const segmentos = m.categorias.map(c => ({ ...c, celulas: Math.round((c.tokens / m.window) * largura) }))
     const usadas = segmentos.reduce((s, c) => s + c.celulas, 0)
@@ -178,18 +174,13 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         <Box>
-          <Text bold>{pasta}</Text>
-          <Text dimColor>  </Text>
           {segmentos.map((s, i) => (
             <Text key={`seg-${i}`} color={s.cor} hover={{ scope: `cat-${s.rotulo}`, inverse: true }}>
               {'█'.repeat(s.celulas)}
             </Text>
           ))}
           <Text dimColor>{'░'.repeat(livres)}</Text>
-          <Text> </Text>
-          <Text bold color={f.cor}>{p}%</Text>
-          {f.titulo ? <Text bold> {f.titulo}</Text> : null}
-          <Text dimColor> · {mil(m.tokens)} de {mil(m.window)} tokens</Text>
+          {f.titulo ? <Text bold color={f.cor}> {f.titulo}</Text> : null}
         </Box>
         {segmentos.length > 0 ? (
           <Box columnGap={2}>

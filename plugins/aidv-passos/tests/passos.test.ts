@@ -172,6 +172,64 @@ for (const surface of SURFACES) {
 }
 
 for (const surface of SURFACES) {
+  test(`${surface}: lista de passos e recapitulação do Desktop não contam como operação do grupo`, async ($, on) => {
+    on('ui.render', { component: 'ToolGroup' }, ($, e) => {
+      const { Text } = $.ui.resolve(e)
+      return h(Text, null, 'cabeçalho nativo')
+    })
+    const call = (id: string, tool: string, input: unknown, output?: unknown) => ({
+      ...base,
+      tool_use_id: id,
+      tool,
+      input,
+      output,
+    })
+    const ui = await $.ui.mount({
+      plugin: PLUGIN,
+      surface,
+      component: 'ToolGroup',
+      props: {
+        isActive: false,
+        isExpanded: false,
+        calls: [
+          call('p1', 'mcp__ccd_turn__update_plan', { items: [{ content: 'Ler a contestação', status: 'in_progress' }] }, {}),
+          call('p2', 'Read', { file_path: '/cases/x/CLAUDE.md' }, {}),
+          call('p3', 'mcp__ccd_turn__wrap_up', { recap: 'Contestação lida.' }, {}),
+        ],
+      },
+    })
+    const t = await textos(ui)
+    expect(t).not.toContain('ccd_turn')
+    if (surface === 'terminal') {
+      expect(t).toContain('1 operação')
+      expect(t).toContain('1 leitura')
+    } else {
+      expect(t).toContain('cabeçalho nativo')
+    }
+  })
+
+  test(`${surface}: grupo só com tools do Desktop fica nativo`, async ($, on) => {
+    on('ui.render', { component: 'ToolGroup' }, ($, e) => {
+      const { Text } = $.ui.resolve(e)
+      return h(Text, null, 'cabeçalho nativo')
+    })
+    const ui = await $.ui.mount({
+      plugin: PLUGIN,
+      surface,
+      component: 'ToolGroup',
+      props: {
+        isActive: false,
+        isExpanded: false,
+        calls: [{ ...base, tool_use_id: 'p4', tool: 'mcp__ccd_turn__update_plan', input: { advance: true }, output: {} }],
+      },
+    })
+    const t = await textos(ui)
+    expect(t).toContain('cabeçalho nativo')
+    expect(t).not.toContain('operaç')
+  })
+}
+
+for (const surface of SURFACES) {
   test(`${surface}: tool jurídica fora da busca ganha frase própria`, async $ => {
     const ui = await $.ui.mount({
       plugin: PLUGIN,

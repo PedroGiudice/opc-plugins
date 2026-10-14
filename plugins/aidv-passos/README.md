@@ -54,6 +54,14 @@ o JSON/texto das tools NÃO muda.
 
 ## Gotchas medidos
 
+- **Lista de passos e recapitulação do Desktop** (`mcp__ccd_turn__update_plan`,
+  `mcp__ccd_turn__wrap_up`, Desktop de 10/2026): o Desktop as desenha
+  nativamente (lista fixada sob a mensagem e caixa de próximo passo). O mod não
+  registra render para elas e, no cabeçalho do grupo no terminal, não as conta
+  como operação (0.2.1). Quem decide o texto de cada passo é o modelo sob o
+  output style do caso: a regra "passo = ato jurídico ou entrega, nunca a
+  ferramenta" está nos três styles do `legal-scaffolding`.
+
 - Mod INSTALADO só desenha em sessão LOCAL do Desktop (engine na máquina da
   pessoa). Em sessão hospedada na VM por SSH, a cópia que o Desktop envia vem
   sem `hooks/` e sombreia a instalação local. Desenvolver pelo dev-mods da

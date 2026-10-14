@@ -53,7 +53,7 @@
     },
     {
       "name": "aidv-contexto",
-      "description": "Mod (function hooks): indicador de contexto e de limites de uso da sessao, em portugues, acima do prompt. Exige Claude Code >= 2.1.287.",
+      "description": "Mod (function hooks): contexto da sessao por categoria (autos, jurisprudencia, legislacao, memoria), conselho e limites de uso, em portugues, acima do prompt; o percentual global e a pasta ficam com o trilho do Desktop. Exige Claude Code >= 2.1.287.",
       "author": {
         "name": "opc"
       },

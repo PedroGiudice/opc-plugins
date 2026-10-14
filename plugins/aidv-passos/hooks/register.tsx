@@ -1072,6 +1072,12 @@ const SINGULAR: Record<Categoria, string> = {
   outros: 'outro',
 }
 
+// Tools do próprio Desktop que desenham a lista de passos e a caixa de
+// recapitulação do turno (`update_plan`, `wrap_up`). O Desktop as desenha
+// nativamente; no transcript elas não são operação do advogado e não entram
+// na contagem nem no resumo do grupo.
+const TURNO_DO_DESKTOP = /^mcp__ccd_turn__/
+
 function resumoDoGrupo(calls: ReadonlyArray<{ tool: string; input: unknown; output?: unknown }>): string {
   const contagem = new Map<Categoria, number>()
   for (const c of calls) {
@@ -1198,7 +1204,7 @@ export const register: Register = on => {
   // `isExpanded` por botão apaga as linhas. Lá o grupo fica inteiro nativo.
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
     const { Box, Text } = $.ui.resolve(e)
-    const calls = e.props.calls
+    const calls = e.props.calls.filter(c => !TURNO_DO_DESKTOP.test(c.tool))
     if (e.surface !== 'terminal' || calls.length === 0 || e.props.isExpanded) return next(e)
 
     const falhas = calls.filter(c => c.isErrored).length
