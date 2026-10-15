@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, rmSyn
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { pararExtracoesManuais, tokens, recall, resolverCaminho, montarRelatorio } from "./benchmark-extracao.mjs";
+import { pararExtracoesManuais, pararExtracoesManuaisStream, tokens, recall, resolverCaminho, montarRelatorio } from "./benchmark-extracao.mjs";
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "benchmark-extracao.mjs");
 
@@ -165,6 +165,63 @@ test("CLI: compara JSONL com o arquivo em disco, grava só o relatório e nenhum
     const md = readFileSync(saida, "utf-8");
     assert.match(md, /\| 100\.0% \|/);
     assert.match(md, /Arquivos comparados: 1; abaixo de 99%: 0; citados no JSONL mas ausentes no disco: 1; maior tempo de extração: \d+ ms/);
+  } finally {
+    rmSync(raiz, { recursive: true, force: true });
+  }
+});
+
+test("pararExtracoesManuais: && e || não entram no caminho; segundo caminho depois do && é achado", () => {
+  const pares = pararExtracoesManuais([
+    uso("q1", "cd /c/Users/pedro/cases/caso-x && python ler.py contrato.docx"),
+    res("q1", "x"),
+    uso("q2", "cd C:\\Users\\pedro\\cases\\caso-x || python ler.py contrato.docx"),
+    res("q2", "x"),
+    uso("q3", "cd /c/Users/pedro/cases/caso-x && python ler.py /c/Users/pedro/cases/caso-x/contrato.docx"),
+    res("q3", "texto"),
+  ]);
+  assert.equal(pares.length, 1);
+  assert.equal(pares[0].arquivo, "/c/Users/pedro/cases/caso-x/contrato.docx");
+});
+
+test("pararExtracoesManuaisStream: iterável assíncrono, linha vazia e não-JSON sem erro", async () => {
+  async function* gerar() {
+    yield "";
+    yield "isto nao e json";
+    yield uso("z1", "type C:\\Users\\pedro\\cases\\c\\a.docx");
+    yield "";
+    yield res("z1", "texto a");
+  }
+  const pares = await pararExtracoesManuaisStream(gerar());
+  assert.deepEqual(pares.map((p) => p.resultado), ["texto a"]);
+});
+
+test("CLI: arquivo com linha vazia e não-JSON (CRLF) não derruba; ausente em grafias diferentes conta uma vez", () => {
+  const raiz = mkdtempSync(join(tmpdir(), "bench-"));
+  try {
+    const cases = join(raiz, "cases");
+    mkdirSync(join(cases, "caso-x"), { recursive: true });
+    const eml = join(cases, "caso-x", "msg.eml");
+    writeFileSync(eml, "From: Ana <ana@x.com>\r\nTo: bob@x.com\r\nSubject: Contrato\r\nDate: Mon, 05 Oct 2026 10:00:00 +0000\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nSegue a minuta do contrato revisada.\r\n");
+    const projects = join(raiz, "projects", "p1");
+    mkdirSync(projects, { recursive: true });
+    const jsonl = [
+      "",
+      "lixo { nao json",
+      uso("c1", `python ler.py ${eml}`),
+      "",
+      res("c1", "Segue a minuta do contrato revisada."),
+      uso("c2", "python ler.py /c/Users/pedro/cases/caso-x/sumiu.msg", "PowerShell"),
+      res("c2", "x"),
+      uso("c3", "python ler.py C:\\Users\\pedro\\cases\\caso-x\\Sumiu.msg"),
+      res("c3", "x"),
+      uso("c4", "python ler.py ~/cases/caso-x/sumiu.msg"),
+      res("c4", "x"),
+    ].join("\r\n");
+    writeFileSync(join(projects, "s.jsonl"), jsonl);
+    const saida = join(raiz, "rel.md");
+    execFileSync(process.execPath, [SCRIPT, "--projects", join(raiz, "projects"), "--cases", cases, "--saida", saida], { encoding: "utf-8" });
+    const md = readFileSync(saida, "utf-8");
+    assert.match(md, /Arquivos comparados: 1; abaixo de 99%: 0; citados no JSONL mas ausentes no disco: 1;/);
   } finally {
     rmSync(raiz, { recursive: true, force: true });
   }

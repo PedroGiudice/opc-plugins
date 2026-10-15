@@ -11,7 +11,8 @@
  *
  *   node scripts/benchmark-extracao.mjs --projects <dir dos JSONL> --cases <pasta de casos> --saida <relatorio.md>
  */
-import { readdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, existsSync, writeFileSync, createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
@@ -27,10 +28,12 @@ const LIMIAR = 0.99;
 // usaram: `C:\Users\...`, `/c/Users/...` (Git Bash), `~/cases/...`. O prefixo
 // não aceita espaço (o caminho começa numa palavra do comando); o resto aceita
 // (nomes de arquivo têm espaço), mas não atravessa separador de comando
-// (`;`, `|`, `<`, `>`) nem curinga. O lookahead recusa `a.docx.md` (leitura do
-// sidecar, não extração manual) e extensão maior (`.docxfoo`).
+// (`;`, `|`, `&` — logo `&&` e `||` —, `<`, `>`) nem curinga; nome de arquivo
+// com `&` é raro e cai fora como o `cd` + caminho
+// relativo. O lookahead recusa `a.docx.md` (leitura do sidecar, não extração
+// manual) e extensão maior (`.docxfoo`).
 const RE_ARQUIVO =
-  /((?:[A-Za-z]:|~)?[\\/][^\s"'`|;<>*?]*?cases[\\/][^"'`|;<>*?\n\r]*?\.(?:docx|docm|xlsx|xlsm|msg|eml))(?![A-Za-z0-9_]|\.md\b)/i;
+  /((?:[A-Za-z]:|~)?[\\/][^\s"'`|;&<>*?]*?cases[\\/][^"'`|;&<>*?\n\r]*?\.(?:docx|docm|xlsx|xlsm|msg|eml))(?![A-Za-z0-9_]|\.md\b)/i;
 
 function textoDeResultado(content) {
   if (typeof content === "string") return content;
@@ -38,21 +41,16 @@ function textoDeResultado(content) {
   return "";
 }
 
-/**
- * Pares {arquivo, comando, resultado}: tool_use Bash/PowerShell cujo comando
- * cita um arquivo suportado sob `cases` + o tool_result de mesmo
- * `tool_use_id` (que pode vir em linha bem posterior). `arquivo` fica como
- * achado no comando (a CLI é quem resolve para um caminho existente).
- * Resultado de erro (`is_error`) não é extração: descarta o par.
- */
-export function pararExtracoesManuais(linhas) {
+// Máquina de pareamento incremental: alimentada linha a linha (array na versão
+// síncrona, stream na assíncrona) com o mesmo comportamento nas duas.
+function criarPareador() {
   const pendentes = new Map();
   const pares = [];
-  for (const linha of linhas) {
+  const linha = (texto) => {
     let obj;
-    try { obj = JSON.parse(linha); } catch { continue; }
+    try { obj = JSON.parse(texto); } catch { return; }
     const content = obj?.message?.content;
-    if (!Array.isArray(content)) continue;
+    if (!Array.isArray(content)) return;
     for (const c of content) {
       if (c?.type === "tool_use" && (c.name === "Bash" || c.name === "PowerShell")) {
         const cmd = String(c.input?.command ?? "");
@@ -66,7 +64,28 @@ export function pararExtracoesManuais(linhas) {
         pares.push({ ...p, resultado: textoDeResultado(c.content) });
       }
     }
-  }
+  };
+  return { linha, pares };
+}
+
+/**
+ * Pares {arquivo, comando, resultado}: tool_use Bash/PowerShell cujo comando
+ * cita um arquivo suportado sob `cases` + o tool_result de mesmo
+ * `tool_use_id` (que pode vir em linha bem posterior). `arquivo` fica como
+ * achado no comando (a CLI é quem resolve para um caminho existente).
+ * Resultado de erro (`is_error`) não é extração: descarta o par.
+ * `linhas`: qualquer iterável de linhas JSONL.
+ */
+export function pararExtracoesManuais(linhas) {
+  const { linha, pares } = criarPareador();
+  for (const l of linhas) linha(l);
+  return pares;
+}
+
+/** Igual a `pararExtracoesManuais`, sobre iterável assíncrono (stream de linhas). */
+export async function pararExtracoesManuaisStream(linhas) {
+  const { linha, pares } = criarPareador();
+  for await (const l of linhas) linha(l);
   return pares;
 }
 
@@ -111,6 +130,16 @@ async function extrairEmMemoria(abs) {
     case "msg": return { md: renderEmail(lerMsg(buf)), bytes: buf.length };
     default: return { md: null, bytes: buf.length };
   }
+}
+
+// Identidade de um caminho para deduplicar: mesma máquina, grafias diferentes
+// (`/c/Users/..`, `C:\Users\..`, `~/..`) viram a mesma chave.
+function chaveDeCaminho(arquivo, home = HOME_PADRAO) {
+  let p = arquivo;
+  const posix = /^\/([A-Za-z])\/(.*)$/.exec(p);
+  if (posix) p = `${posix[1]}:/${posix[2]}`;
+  else if (p.startsWith("~")) p = home + p.slice(1);
+  return p.replaceAll("\\", "/").toLowerCase();
 }
 
 const celula = (s) => String(s).replace(/\r?\n/g, " ").replaceAll("|", "\\|");
@@ -160,16 +189,18 @@ async function main() {
     console.error("uso: node scripts/benchmark-extracao.mjs --projects <dir dos JSONL> [--cases <pasta de casos>] [--saida <relatorio.md>]");
     process.exit(2);
   }
-  // Um arquivo pode aparecer em várias sessões e grafias: chave = caminho resolvido
-  // (ou a grafia achada, se ausente). Guarda o resultado manual MAIS LONGO
+  // Um arquivo pode aparecer em várias sessões e grafias: chave = identidade
+  // normalizada do caminho (resolvido, ou o achado se ausente; vale também
+  // para a contagem de ausentes). Guarda o resultado manual MAIS LONGO
   // (extrações parciais com head/grep são subconjuntos do completo).
   const porArquivo = new Map();
   for (const f of listarJsonl(projects)) {
     let pares;
-    try { pares = pararExtracoesManuais(readFileSync(f, "utf-8").split("\n")); } catch (err) { console.error(`aviso: ${f} ilegível (${err.message})`); continue; }
+    // em stream: sessões chegam a centenas de MB e o diretório a GB
+    try { pares = await pararExtracoesManuaisStream(createInterface({ input: createReadStream(f, { encoding: "utf-8" }), crlfDelay: Infinity })); } catch (err) { console.error(`aviso: ${f} ilegível (${err.message})`); continue; }
     for (const p of pares) {
       const abs = resolverCaminho(p.arquivo, { cases });
-      const k = (abs ?? p.arquivo).toLowerCase();
+      const k = chaveDeCaminho(abs ?? p.arquivo);
       const atual = porArquivo.get(k);
       if (!atual || atual.resultado.length < p.resultado.length) porArquivo.set(k, { ...p, abs });
     }
