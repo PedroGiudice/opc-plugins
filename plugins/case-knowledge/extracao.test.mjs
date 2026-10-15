@@ -12,6 +12,7 @@ import {
   planejarExtracao,
   acharPlaceholders,
   renderDocx,
+  renderXlsx,
 } from "./extracao.mjs";
 
 test("tipoDeFormato: extensão sem caixa define o leitor", () => {
@@ -281,4 +282,16 @@ test("renderDocx: marca e placeholder que só existem em tabela entram na radiog
   assert.ok(md.includes("- Marcas de revisão: 0 inserções e 1 exclusão de 1 revisor (Ana: 1 exclusão)"));
   assert.ok(md.includes("- Placeholders no texto aceito: [●] ×1"));
   assert.ok(md.includes("| R$ [●] {--100--}[Ana] |"));
+});
+
+test("renderXlsx: uma seção por aba visível, cabeçalho = primeira linha não vazia, pipe escapado", () => {
+  const md = renderXlsx({
+    abas: [
+      { nome: "Dados", oculta: false, linhas: [["", ""], ["Item", "Valor"], ["a|b", "1"]], cortadas: 0 },
+      { nome: "Oculta", oculta: true, linhas: [], cortadas: 0 },
+      { nome: "Vazia", oculta: false, linhas: [], cortadas: 0 },
+    ],
+    avisos: [],
+  });
+  assert.equal(md, "## Aba: Dados\n\n| Item | Valor |\n| --- | --- |\n| a\\|b | 1 |\n\n## Aba: Vazia\n\n(aba vazia)\n");
 });

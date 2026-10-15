@@ -359,3 +359,27 @@ export function renderDocx(d) {
   }
   return linhas.join("\n");
 }
+
+/**
+ * .xlsx -> Markdown: uma seção por aba visível, com tabela cujo cabeçalho é a
+ * primeira linha não vazia (linhas vazias iniciais são só margem da planilha).
+ * Aba oculta não é renderizada; o leitor já a registrou nos avisos.
+ */
+export function renderXlsx(d) {
+  const linhas = [];
+  for (const aba of d.abas) {
+    if (aba.oculta) continue;
+    linhas.push(`## Aba: ${aba.nome}`, "");
+    const inicio = aba.linhas.findIndex((l) => l.some((c) => c !== ""));
+    if (inicio < 0) { linhas.push("(aba vazia)", ""); continue; }
+    const uteis = aba.linhas.slice(inicio);
+    // mesma razão do renderDocx: tabela Markdown exige o mesmo número de colunas em toda linha
+    const largura = Math.max(...uteis.map((l) => l.length));
+    const norm = uteis.map((l) => [...l, ...Array(largura - l.length).fill("")]);
+    linhas.push(`| ${norm[0].map(escaparCelula).join(" | ")} |`);
+    linhas.push(`| ${norm[0].map(() => "---").join(" | ")} |`);
+    for (const l of norm.slice(1)) linhas.push(`| ${l.map(escaparCelula).join(" | ")} |`);
+    linhas.push("");
+  }
+  return linhas.join("\n");
+}

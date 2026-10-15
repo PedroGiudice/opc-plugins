@@ -1,0 +1,120 @@
+// extracao/xlsx.test.mjs
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import ExcelJS from "exceljs";
+import { lerXlsx } from "./xlsx.mjs";
+
+async function planilha(montar) {
+  const wb = new ExcelJS.Workbook();
+  await montar(wb);
+  return Buffer.from(await wb.xlsx.writeBuffer());
+}
+
+test("lerXlsx: valores em texto: número, string, data ISO, booleano, rich text, hyperlink", async () => {
+  const buf = await planilha(async (wb) => {
+    const ws = wb.addWorksheet("Dados");
+    ws.addRow(["Item", "Valor", "Data", "Ok"]);
+    ws.addRow(["Taxa", 1234.5, new Date(Date.UTC(2026, 8, 1)), true]);
+    ws.getCell("A3").value = { richText: [{ text: "Rich " }, { text: "Text" }] };
+    ws.getCell("B3").value = { text: "site", hyperlink: "https://x" };
+    ws.getCell("C3").value = new Date(Date.UTC(2026, 8, 1, 10, 30));
+  });
+  const d = await lerXlsx(buf);
+  assert.equal(d.abas.length, 1);
+  assert.equal(d.abas[0].nome, "Dados");
+  assert.deepEqual(d.abas[0].linhas, [
+    ["Item", "Valor", "Data", "Ok"],
+    ["Taxa", "1234.5", "2026-09-01", "VERDADEIRO"],
+    ["Rich Text", "site", "2026-09-01T10:30:00", ""],
+  ]);
+  assert.deepEqual(d.avisos, []);
+});
+
+test("lerXlsx: fórmula com cache usa o resultado; sem cache vira vazio e aviso", async () => {
+  const buf = await planilha(async (wb) => {
+    const ws = wb.addWorksheet("Calc");
+    ws.getCell("A1").value = 2;
+    ws.getCell("B1").value = { formula: "A1*2", result: 4 };
+    ws.getCell("C1").value = { formula: "A1*3" };
+  });
+  const d = await lerXlsx(buf);
+  assert.deepEqual(d.abas[0].linhas, [["2", "4", ""]]);
+  assert.deepEqual(d.avisos, ["Calc: 1 fórmula sem valor em cache (C1); abra e salve no Excel para preencher"]);
+});
+
+test("lerXlsx: aba oculta listada com oculta=true, sem linhas, e em aviso", async () => {
+  const buf = await planilha(async (wb) => {
+    wb.addWorksheet("Visível").addRow(["a"]);
+    const h = wb.addWorksheet("Oculta");
+    h.addRow(["segredo"]);
+    h.state = "hidden";
+  });
+  const d = await lerXlsx(buf);
+  assert.deepEqual(d.abas.map((a) => [a.nome, a.oculta, a.linhas.length]), [["Visível", false, 1], ["Oculta", true, 0]]);
+  assert.deepEqual(d.avisos, ["aba oculta não renderizada: Oculta"]);
+});
+
+test("lerXlsx: teto de linhas corta e registra cortadas + aviso", async () => {
+  const buf = await planilha(async (wb) => {
+    const ws = wb.addWorksheet("Grande");
+    for (let i = 1; i <= 2500; i++) ws.addRow([i]);
+  });
+  const d = await lerXlsx(buf, { maxLinhasPorAba: 2000 });
+  assert.equal(d.abas[0].linhas.length, 2000);
+  assert.equal(d.abas[0].cortadas, 500);
+  assert.deepEqual(d.avisos, ["Grande: 500 linhas além do teto de 2000 ficaram de fora"]);
+});
+
+test("lerXlsx: célula mesclada: valor na primeira, demais vazias; linhas com buracos preservam colunas", async () => {
+  const buf = await planilha(async (wb) => {
+    const ws = wb.addWorksheet("M");
+    ws.getCell("A1").value = "Título";
+    ws.mergeCells("A1:C1");
+    ws.getCell("A2").value = "a";
+    ws.getCell("C2").value = "c";
+  });
+  const d = await lerXlsx(buf);
+  assert.deepEqual(d.abas[0].linhas, [["Título", "", ""], ["a", "", "c"]]);
+});
+
+test("lerXlsx: buffer inválido vira aviso e zero abas", async () => {
+  const d = await lerXlsx(Buffer.from("não é xlsx"));
+  assert.deepEqual(d.abas, []);
+  assert.match(d.avisos[0], /não foi possível abrir/i);
+});
+
+test("lerXlsx: apara linhas e colunas vazias do fim, preserva as do meio", async () => {
+  const buf = await planilha(async (wb) => {
+    const ws = wb.addWorksheet("Aparar");
+    ws.getCell("A1").value = "a";
+    ws.getCell("B1").value = "b";
+    ws.getCell("A3").value = "c";
+    // células com valor vazio e estilo alargam o intervalo usado sem conteúdo
+    ws.getCell("E5").value = "";
+    ws.getCell("D6").value = null;
+    ws.getCell("D6").font = { bold: true };
+  });
+  const d = await lerXlsx(buf);
+  assert.deepEqual(d.abas[0].linhas, [["a", "b"], ["", ""], ["c", ""]]);
+});
+
+test("lerXlsx: aba só com vazios fica sem linhas e sem aviso", async () => {
+  const buf = await planilha(async (wb) => {
+    const ws = wb.addWorksheet("Nada");
+    ws.getCell("C3").font = { bold: true };
+  });
+  const d = await lerXlsx(buf);
+  assert.deepEqual(d.abas, [{ nome: "Nada", oculta: false, linhas: [], cortadas: 0 }]);
+  assert.deepEqual(d.avisos, []);
+});
+
+test("lerXlsx: erro de célula devolve o código; fórmula de data usa o resultado", async () => {
+  const buf = await planilha(async (wb) => {
+    const ws = wb.addWorksheet("E");
+    ws.getCell("A1").value = { error: "#REF!" };
+    ws.getCell("B1").value = { formula: "TODAY()", result: new Date(Date.UTC(2026, 9, 15)) };
+  });
+  const d = await lerXlsx(buf);
+  assert.deepEqual(d.abas[0].linhas, [["#REF!", "2026-10-15"]]);
+  assert.deepEqual(d.avisos, []);
+});
