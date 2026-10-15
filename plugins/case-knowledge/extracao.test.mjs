@@ -10,6 +10,10 @@ import {
   lerFrontmatter,
   montarSidecar,
   planejarExtracao,
+  EXTRACOES_DIR,
+  dirDeAnexos,
+  semEspelho,
+  originalDoSidecarAntigo,
   acharPlaceholders,
   renderDocx,
   renderXlsx,
@@ -30,14 +34,52 @@ test("tipoDeFormato: extensão sem caixa define o leitor", () => {
   assert.equal(tipoDeFormato("semextensao"), null);
 });
 
-test("nomeSidecar: basename + .md, no mesmo diretório", () => {
-  assert.equal(nomeSidecar("contrato.docx"), "contrato.docx.md");
-  assert.equal(nomeSidecar("emails/RE proposta.msg"), "emails/RE proposta.msg.md");
+test("nomeSidecar: sidecar vai para extracoes/, espelhando a árvore do caso", () => {
+  assert.equal(EXTRACOES_DIR, "extracoes");
+  assert.equal(nomeSidecar("contrato.docx"), "extracoes/contrato.docx.md");
+  assert.equal(nomeSidecar("emails/RE proposta.msg"), "extracoes/emails/RE proposta.msg.md");
 });
 
-test("nomeSidecar: original com opt-out .local gera sidecar .local.md", () => {
-  assert.equal(nomeSidecar("x.local.docx"), "x.local.docx.local.md");
-  assert.equal(nomeSidecar("sub/y.LOCAL.xlsx"), "sub/y.LOCAL.xlsx.local.md");
+test("nomeSidecar: original com opt-out .local gera sidecar .local.md dentro de extracoes/", () => {
+  assert.equal(nomeSidecar("x.local.docx"), "extracoes/x.local.docx.local.md");
+  assert.equal(nomeSidecar("sub/y.LOCAL.xlsx"), "extracoes/sub/y.LOCAL.xlsx.local.md");
+});
+
+test("nomeSidecar: anexo (já dentro de extracoes/) ganha o sidecar ao lado, sem espelhar de novo", () => {
+  assert.equal(nomeSidecar("extracoes/a/m.msg.anexos/Minuta.docx"), "extracoes/a/m.msg.anexos/Minuta.docx.md");
+  assert.equal(nomeSidecar("extracoes/m.msg.anexos/x.local.docx"), "extracoes/m.msg.anexos/x.local.docx.local.md");
+  // NTFS: `Extracoes/` é a mesma pasta
+  assert.equal(nomeSidecar("Extracoes/m.msg.anexos/x.docx"), "Extracoes/m.msg.anexos/x.docx.md");
+});
+
+test("dirDeAnexos e semEspelho: anexos de e-mail moram em extracoes/; o caminho lógico tira o prefixo", () => {
+  assert.equal(dirDeAnexos("a/m.msg"), "extracoes/a/m.msg.anexos");
+  assert.equal(dirDeAnexos("extracoes/m.msg.anexos/interno.eml"), "extracoes/m.msg.anexos/interno.eml.anexos");
+  assert.equal(semEspelho("extracoes/a/m.msg.anexos/x.docx"), "a/m.msg.anexos/x.docx");
+  assert.equal(semEspelho("Extracoes/x.docx.md"), "x.docx.md");
+  assert.equal(semEspelho("a/x.docx"), "a/x.docx");
+});
+
+test("ehOriginalElegivel: dentro de extracoes/ só o que está numa pasta .anexos/", () => {
+  assert.equal(ehOriginalElegivel("extracoes/x.docx"), false);
+  assert.equal(ehOriginalElegivel("extracoes/a/x.docx"), false);
+  assert.equal(ehOriginalElegivel("EXTRACOES/a/x.docx"), false);
+  assert.equal(ehOriginalElegivel("extracoes/m.msg.anexos/x.docx"), true);
+  assert.equal(ehOriginalElegivel("extracoes/a/m.msg.anexos/interno.eml"), true);
+  // pasta do usuário com o mesmo nome fora da raiz não é o espelho
+  assert.equal(ehOriginalElegivel("a/extracoes/x.docx"), true);
+});
+
+test("originalDoSidecarAntigo: reconhece pelo nome o sidecar do layout 0.29 (ao lado do original)", () => {
+  assert.equal(originalDoSidecarAntigo("contrato.docx.md"), "contrato.docx");
+  assert.equal(originalDoSidecarAntigo("a/RE.msg.md"), "a/RE.msg");
+  assert.equal(originalDoSidecarAntigo("a/X.DOCX.MD"), "a/X.DOCX");
+  assert.equal(originalDoSidecarAntigo("x.local.docx.local.md"), "x.local.docx");
+  // nomes que o 0.29 nunca escreveria
+  assert.equal(originalDoSidecarAntigo("x.local.docx.md"), null);
+  assert.equal(originalDoSidecarAntigo("x.docx.local.md"), null);
+  assert.equal(originalDoSidecarAntigo("notas.md"), null);
+  assert.equal(originalDoSidecarAntigo("laudo.pdf.md"), null);
 });
 
 test("ehOriginalElegivel: aceita formatos suportados em qualquer profundidade segura", () => {
@@ -127,7 +169,7 @@ test("montarSidecar/lerFrontmatter: controles em fonte e avisos fazem ida e volt
 test("planejarExtracao: fonte com controles não faz o sidecar virar naoTocar", () => {
   const rel = "a.docx";
   const sidecar = montarSidecar({ fonte: "x\ny", md5: "a".repeat(32), bytes: 1, avisos: ["p\nq"], corpo: "x\n" });
-  const p = planejarExtracao({ originais: { [rel]: { md5: "a".repeat(32), bytes: 1 } }, sidecars: { "a.docx.md": sidecar } });
+  const p = planejarExtracao({ originais: { [rel]: { md5: "a".repeat(32), bytes: 1 } }, sidecars: { "extracoes/a.docx.md": sidecar } });
   assert.deepEqual(p.naoTocar, []);
   assert.equal(p.pular[0].rel, rel);
 });
@@ -140,7 +182,7 @@ const sidecarDe = (fonte, md5, versao = EXTRATOR_VERSAO) =>
 
 test("planejarExtracao: original sem sidecar entra em extrair", () => {
   const p = planejarExtracao({ originais: { "contrato.docx": { md5: MD5_A, bytes: 10 } }, sidecars: {} });
-  assert.deepEqual(p.extrair, [{ rel: "contrato.docx", sidecar: "contrato.docx.md", motivo: "sem sidecar" }]);
+  assert.deepEqual(p.extrair, [{ rel: "contrato.docx", sidecar: "extracoes/contrato.docx.md", motivo: "sem sidecar" }]);
   assert.deepEqual(p.pular, []);
   assert.deepEqual(p.naoTocar, []);
 });
@@ -148,7 +190,7 @@ test("planejarExtracao: original sem sidecar entra em extrair", () => {
 test("planejarExtracao: sidecar com md5 e versão iguais pula", () => {
   const p = planejarExtracao({
     originais: { "contrato.docx": { md5: MD5_A, bytes: 10 } },
-    sidecars: { "contrato.docx.md": sidecarDe("contrato.docx", MD5_A) },
+    sidecars: { "extracoes/contrato.docx.md": sidecarDe("contrato.docx", MD5_A) },
   });
   assert.deepEqual(p.extrair, []);
   assert.equal(p.pular[0].rel, "contrato.docx");
@@ -157,7 +199,7 @@ test("planejarExtracao: sidecar com md5 e versão iguais pula", () => {
 test("planejarExtracao: md5 diferente reextrai (original mudou)", () => {
   const p = planejarExtracao({
     originais: { "contrato.docx": { md5: MD5_B, bytes: 10 } },
-    sidecars: { "contrato.docx.md": sidecarDe("contrato.docx", MD5_A) },
+    sidecars: { "extracoes/contrato.docx.md": sidecarDe("contrato.docx", MD5_A) },
   });
   assert.equal(p.extrair[0].motivo, "original mudou");
 });
@@ -165,7 +207,7 @@ test("planejarExtracao: md5 diferente reextrai (original mudou)", () => {
 test("planejarExtracao: versão do extrator menor reextrai", () => {
   const p = planejarExtracao({
     originais: { "contrato.docx": { md5: MD5_A, bytes: 10 } },
-    sidecars: { "contrato.docx.md": sidecarDe("contrato.docx", MD5_A, EXTRATOR_VERSAO - 1) },
+    sidecars: { "extracoes/contrato.docx.md": sidecarDe("contrato.docx", MD5_A, EXTRATOR_VERSAO - 1) },
   });
   assert.equal(p.extrair[0].motivo, "extrator desatualizado");
 });
@@ -173,10 +215,22 @@ test("planejarExtracao: versão do extrator menor reextrai", () => {
 test("planejarExtracao: sidecar sem nosso frontmatter é do usuário e não é tocado", () => {
   const p = planejarExtracao({
     originais: { "contrato.docx": { md5: MD5_A, bytes: 10 } },
-    sidecars: { "contrato.docx.md": "# Notas minhas\n" },
+    sidecars: { "extracoes/contrato.docx.md": "# Notas minhas\n" },
   });
   assert.deepEqual(p.extrair, []);
-  assert.equal(p.naoTocar[0].sidecar, "contrato.docx.md");
+  assert.equal(p.naoTocar[0].sidecar, "extracoes/contrato.docx.md");
+});
+
+test("planejarExtracao: o sidecar é procurado em extracoes/; um .md ao lado do original não conta", () => {
+  const p = planejarExtracao({
+    originais: { "a/contrato.docx": { md5: MD5_A, bytes: 10 }, "extracoes/a/m.msg.anexos/x.docx": { md5: MD5_A, bytes: 10 } },
+    sidecars: {
+      "a/contrato.docx.md": sidecarDe("contrato.docx", MD5_A),
+      "extracoes/a/m.msg.anexos/x.docx.md": sidecarDe("x.docx", MD5_A),
+    },
+  });
+  assert.deepEqual(p.extrair, [{ rel: "a/contrato.docx", sidecar: "extracoes/a/contrato.docx.md", motivo: "sem sidecar" }]);
+  assert.deepEqual(p.pular.map((x) => x.rel), ["extracoes/a/m.msg.anexos/x.docx"]);
 });
 
 test("planejarExtracao: ignora original não elegível e ordena por path", () => {

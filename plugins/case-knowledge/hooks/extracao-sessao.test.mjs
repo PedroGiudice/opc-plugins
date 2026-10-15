@@ -49,7 +49,7 @@ test("hook: stdout recebe só a linha JSON, mesmo com console.* chamado durante 
   const linhas = r.stdout.split("\n").filter(Boolean);
   assert.equal(linhas.length, 1, r.stdout);
   const out = JSON.parse(linhas[0]);
-  assert.ok(out.hookSpecificOutput.additionalContext.includes("a.eml.md"));
+  assert.ok(out.hookSpecificOutput.additionalContext.includes("- extracoes/a.eml.md ("), out.hookSpecificOutput.additionalContext);
 });
 
 test("resolverSaidaHook: na raiz de ~/cases devolve {} (não é pasta de caso)", async () => {

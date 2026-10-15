@@ -29,15 +29,20 @@
  * Determinismo: nada que dependa de hora ou de máquina chega ao sidecar, e todo
  * caminho relativo usa `/` (também no Windows), para que a segunda rodada sobre
  * o mesmo original produza o mesmo arquivo byte a byte e o pool não o recircule.
+ *
+ * Layout (0.30.0): sidecars e anexos de e-mail moram em `extracoes/`, que
+ * espelha a árvore do caso (regra em extracao.mjs, `EXTRACOES_DIR`). O layout
+ * 0.29 (sidecar ao lado do original) é migrado por `migrarLayout` no início de
+ * cada extrairCaso e, no hub, por `--migrar`.
  */
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync, statSync, lstatSync, writeFileSync, renameSync, unlinkSync, mkdirSync, existsSync, mkdtempSync, rmSync } from "node:fs";
-import { join, basename, relative, sep } from "node:path";
+import { readdirSync, readFileSync, statSync, lstatSync, writeFileSync, renameSync, unlinkSync, mkdirSync, existsSync, mkdtempSync, rmSync, rmdirSync } from "node:fs";
+import { join, basename, dirname, relative, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { isExcludedDirName, WORKDOC_MAX_DEPTH } from "./workdocs.mjs";
-import { planejarExtracao, nomeSidecar, tipoDeFormato, ehOriginalElegivel, montarSidecar, renderDocx, renderXlsx, renderEmail, tamanhoLegivel, sanitizarNomeAnexo } from "./extracao.mjs";
+import { planejarExtracao, nomeSidecar, dirDeAnexos, semEspelho, originalDoSidecarAntigo, EXTRACOES_DIR, tipoDeFormato, ehOriginalElegivel, lerFrontmatter, montarSidecar, renderDocx, renderXlsx, renderEmail, tamanhoLegivel, sanitizarNomeAnexo } from "./extracao.mjs";
 
 export const MAX_ORIGINAL_BYTES = 50 * 1024 * 1024;
 export const MAX_ANEXO_BYTES = 20 * 1024 * 1024;
@@ -94,8 +99,9 @@ function escreverAtomico(path, conteudo) {
 export { sanitizarNomeAnexo };
 
 /**
- * Varre o caso: originais elegíveis {rel: {md5, bytes}}, os textos dos
- * sidecars que existem ao lado deles e os originais acima do teto de 50 MiB
+ * Varre o caso, `extracoes/` incluída (é lá que estão os sidecars e os anexos):
+ * originais elegíveis {rel: {md5, bytes}}, os textos dos sidecars que existem
+ * para eles e os originais acima do teto de 50 MiB
  * (`grandes`, só com tamanho e mtime: não são lidos). Só o .md que é sidecar
  * de um original é lido (o caso pode ter centenas de notas .md que não
  * interessam aqui). Os bytes dos originais NÃO ficam em memória: só o md5.
@@ -121,7 +127,11 @@ function varrer(caseDir, { maxOriginalBytes }) {
       const rel = prefixo ? `${prefixo}/${e.name}` : e.name;
       const abs = join(dir, e.name);
       if (e.isDirectory()) {
-        if (!isExcludedDirName(e.name)) walk(abs, rel, prof + 1);
+        // O espelho tem a mesma profundidade do caso: `extracoes/` na raiz não
+        // conta nível, senão o sidecar de um original no último nível ficaria
+        // fora da varredura e o original seria reextraído a cada rodada.
+        const espelho = prefixo === "" && asciiLower(e.name) === EXTRACOES_DIR;
+        if (!isExcludedDirName(e.name)) walk(abs, rel, espelho ? prof : prof + 1);
         continue;
       }
       if (!e.isFile()) continue;
@@ -162,7 +172,8 @@ function varrer(caseDir, { maxOriginalBytes }) {
   return { originais, sidecars, grandes, erros };
 }
 
-// Cada diretório terminado em `.anexos` no caminho é um nível de anexo.
+// Cada diretório terminado em `.anexos` no caminho é um nível de anexo. O
+// prefixo `extracoes/` não termina em `.anexos` e não conta.
 function nivelDeAnexo(rel) {
   return rel.split("/").slice(0, -1).filter((d) => d.endsWith(SUFIXO_ANEXOS)).length;
 }
@@ -184,6 +195,12 @@ function destinoSeguro(caseDir, rel) {
 
 function plural(n, um, varios) {
   return `${n} ${n === 1 ? um : varios}`;
+}
+
+// Mesma regra do asciiLower de extracao.mjs/workdocs.mjs (o toLowerCase do JS é
+// Unicode-aware); aqui só para reconhecer `extracoes/` sem caixa (NTFS).
+function asciiLower(s) {
+  return s.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
 }
 
 // Teto de saída do .xlsx: tira abas inteiras do fim e, se a última que sobrou
@@ -272,7 +289,7 @@ async function extrairUm(caseDir, rel, buf, limites) {
     }
     if (e.ilegivel) throw naoLido(e.motivo);
     avisos = e.avisos;
-    const dirAnexos = `${rel}${SUFIXO_ANEXOS}`;
+    const dirAnexos = dirDeAnexos(rel);
     const nivelDosAnexos = nivelDeAnexo(rel) + 1;
     // conta o que de fato vai ter (ou já tem) sidecar, não o que foi só gravado
     let extraiveis = 0;
@@ -313,8 +330,12 @@ async function extrairUm(caseDir, rel, buf, limites) {
       a.nomeFinal = unico(a.nome, ocupado([usados]));
       usados.add(a.nomeFinal.toLowerCase());
     }
+    // nome (sem pasta) do sidecar de cada anexo extraível; nomeSidecar recebe o
+    // caminho inteiro, que já está no espelho e não ganha outro prefixo
     const sidecarsDeAnexos = new Set(
-      candidatos.filter((a) => ehOriginalElegivel(`${dirAnexos}/${a.nomeFinal}`)).map((a) => nomeSidecar(a.nomeFinal).toLowerCase()),
+      candidatos
+        .filter((a) => ehOriginalElegivel(`${dirAnexos}/${a.nomeFinal}`))
+        .map((a) => basename(nomeSidecar(`${dirAnexos}/${a.nomeFinal}`)).toLowerCase()),
     );
     for (const a of candidatos) {
       if (!sidecarsDeAnexos.has(a.nomeFinal.toLowerCase())) continue;
@@ -339,7 +360,11 @@ async function extrairUm(caseDir, rel, buf, limites) {
         avisos.push(`anexo ${a.nome} não gravado (${err.code || err.message})`);
         continue;
       }
-      a.caminho = relAnexo;
+      // No sidecar o caminho é o do caso (relativo a `extracoes/`), não o do
+      // disco: assim o sidecar sai byte a byte igual ao do 0.29, o migrado
+      // continua em dia e o EXTRATOR_VERSAO não precisa subir (o que custaria
+      // reextrair o parque inteiro só para trocar o lugar dos arquivos).
+      a.caminho = semEspelho(relAnexo);
       if (!ehOriginalElegivel(relAnexo)) continue;
       if (nivelDosAnexos > MAX_NIVEL_ANEXO) {
         avisos.push(`anexo ${a.nome} de e-mail aninhado não extraído (só um nível)`);
@@ -361,6 +386,7 @@ async function extrairUm(caseDir, rel, buf, limites) {
   const destino = destinoSeguro(caseDir, nomeSidecar(rel));
   if (!destino) throw new Error("caminho do sidecar passa por symlink");
   try {
+    mkdirSync(dirname(destino), { recursive: true });
     escreverAtomico(destino, md);
   } catch (err) {
     throw transitorio(err);
@@ -401,7 +427,7 @@ function limparTemporarios(caseDir, rel, pid) {
     // não havia
   }
   try {
-    const dir = join(caseDir, `${rel}${SUFIXO_ANEXOS}`);
+    const dir = join(caseDir, dirDeAnexos(rel));
     for (const n of readdirSync(dir)) if (n.endsWith(suf)) unlinkSync(join(dir, n));
   } catch {
     // sem pasta de anexos
@@ -527,8 +553,199 @@ export function gravarFalhas(casesBase, falhas) {
   escreverAtomico(path, texto);
 }
 
+// ---------- migração do layout 0.29 (sidecar ao lado do original) ----------
+
+function migracaoVazia() {
+  return { movidos: [], mesclados: [], removidos: [], erros: [] };
+}
+
+// Entrada do caminho sem seguir symlink (existsSync segue).
+function existe(p) {
+  try {
+    lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Só e-mail grava `.anexos/`: uma pasta `fotos.anexos/` do advogado não é nossa
+// e fica onde está.
+function ehPastaDeAnexosDeEmail(nome) {
+  if (!asciiLower(nome).endsWith(SUFIXO_ANEXOS)) return false;
+  const t = tipoDeFormato(nome.slice(0, -SUFIXO_ANEXOS.length));
+  return t === "msg" || t === "eml";
+}
+
+/** Para onde a migração leva `rel` (sidecar antigo ou pasta `.anexos/`). */
+function destinoDaMigracao(rel) {
+  const original = originalDoSidecarAntigo(rel);
+  return original ? nomeSidecar(original) : `${EXTRACOES_DIR}/${rel}`;
+}
+
+function erroDeMigracao(m, rel, err) {
+  m.erros.push({ rel, erro: err.code || err.message });
+}
+
+// Sidecar antigo: só o que tem o NOSSO frontmatter sai do lugar; `.md` do
+// usuário com nome parecido nunca é tocado. Destino já existente vence, seja
+// igual (o pool re-baixou o antigo) ou diferente (o destino foi escrito pelo
+// 0.30 a partir do original atual, ou é do usuário): o antigo só é apagado, sem
+// comparar conteúdo, porque os dois casos terminam igual. Se o original tiver
+// mudado desde então, a extração desta mesma rodada vê o md5 diferente e
+// regrava o destino.
+function migrarSidecar(caseDir, rel, m) {
+  const abs = join(caseDir, ...rel.split("/"));
+  try {
+    if (!lerFrontmatter(readFileSync(abs, "utf-8"))) return;
+    const dest = destinoSeguro(caseDir, destinoDaMigracao(rel));
+    if (!dest) {
+      m.erros.push({ rel, erro: "destino passa por symlink" });
+      return;
+    }
+    if (existe(dest)) {
+      unlinkSync(abs);
+      m.removidos.push(rel);
+      return;
+    }
+    mkdirSync(dirname(dest), { recursive: true });
+    renameSync(abs, dest);
+    m.movidos.push(rel);
+  } catch (err) {
+    erroDeMigracao(m, rel, err);
+  }
+}
+
+// Mescla arquivo a arquivo; o que já existe no destino vence (o anexo é
+// derivado do e-mail e o destino foi gravado pelo 0.30). Devolve sem lançar.
+function mesclarPasta(src, dest, rel, m) {
+  let entradas;
+  try {
+    entradas = readdirSync(src, { withFileTypes: true });
+  } catch (err) {
+    erroDeMigracao(m, rel, err);
+    return;
+  }
+  for (const e of entradas) {
+    const s = join(src, e.name);
+    const d = join(dest, e.name);
+    const r = `${rel}/${e.name}`;
+    try {
+      if (e.isDirectory()) {
+        if (!existe(d)) renameSync(s, d);
+        else if (lstatSync(d).isDirectory()) {
+          mesclarPasta(s, d, r, m);
+          rmdirSync(s);
+        } else m.erros.push({ rel: r, erro: "destino existe e não é pasta" });
+      } else if (e.isFile()) {
+        if (existe(d)) unlinkSync(s);
+        else renameSync(s, d);
+      } else m.erros.push({ rel: r, erro: "não é arquivo comum; não migrado" });
+    } catch (err) {
+      // pasta que não esvaziou já tem o erro do que ficou dentro dela
+      if (err.code !== "ENOTEMPTY") erroDeMigracao(m, r, err);
+    }
+  }
+}
+
+function migrarPastaDeAnexos(caseDir, rel, m) {
+  const src = join(caseDir, ...rel.split("/"));
+  const dest = destinoSeguro(caseDir, destinoDaMigracao(rel));
+  if (!dest) {
+    m.erros.push({ rel, erro: "destino passa por symlink" });
+    return;
+  }
+  try {
+    if (!existe(dest)) {
+      mkdirSync(dirname(dest), { recursive: true });
+      renameSync(src, dest);
+      m.movidos.push(rel);
+      return;
+    }
+    if (!lstatSync(dest).isDirectory()) {
+      m.erros.push({ rel, erro: "destino existe e não é pasta" });
+      return;
+    }
+  } catch (err) {
+    erroDeMigracao(m, rel, err);
+    return;
+  }
+  mesclarPasta(src, dest, rel, m);
+  m.mesclados.push(rel);
+  try {
+    rmdirSync(src);
+  } catch (err) {
+    if (err.code !== "ENOTEMPTY") erroDeMigracao(m, rel, err);
+  }
+}
+
+/**
+ * Leva o layout 0.29 (sidecar `x.docx.md` ao lado do original, anexos em
+ * `m.msg.anexos/` ao lado do e-mail) para `extracoes/`. Idempotente e barata:
+ * sem nada a migrar, custa uma varredura de nomes (só o `.md` com nome de
+ * sidecar é lido, para conferir o frontmatter). Nunca lança: cada falha vira um
+ * item de `erros` e o resto segue. Devolve {movidos, mesclados, removidos, erros}
+ * com os caminhos ANTIGOS.
+ *
+ * Por que idempotente, e por que o hub migra à parte: o pool de workdocs
+ * RE-BAIXA o `.md` que some localmente enquanto o hub ainda o tem (deleção local
+ * não propaga; workdocs.mjs, `planejar`, ramo `l === undefined`). Então, até o
+ * hub ser migrado (o CEO/CTO roda `extrair.mjs --migrar <casesBase>` na VM logo
+ * após o push, mesmo código), cada tick pode receber de volta o sidecar no
+ * caminho antigo, e o tick seguinte o move (ou o apaga, se o destino já
+ * existe) de novo. Uma máquina ainda no 0.29 também continua gravando ao lado
+ * até atualizar. O custo de errar é esse ir e vir de arquivos, não perda: o
+ * sidecar é derivado do original.
+ *
+ * O espelho (`extracoes/` na raiz) não é varrido: já é o destino. Pastas
+ * `.anexos/` de e-mail vão inteiras (com os sidecars dos anexos e os anexos de
+ * e-mail aninhado dentro); dentro delas nada é procurado à parte.
+ */
+export function migrarLayout(caseDir) {
+  const m = migracaoVazia();
+  try {
+    const sidecars = [];
+    const pastas = [];
+    const walk = (dir, prefixo, prof) => {
+      if (prof > WORKDOC_MAX_DEPTH) return;
+      let entradas;
+      try {
+        entradas = readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const e of entradas) {
+        if (e.name.startsWith(".")) continue;
+        const rel = prefixo ? `${prefixo}/${e.name}` : e.name;
+        if (e.isDirectory()) {
+          if (prefixo === "" && asciiLower(e.name) === EXTRACOES_DIR) continue;
+          if (isExcludedDirName(e.name)) continue;
+          if (ehPastaDeAnexosDeEmail(e.name)) pastas.push(rel);
+          else walk(join(dir, e.name), rel, prof + 1);
+          continue;
+        }
+        if (e.isFile() && originalDoSidecarAntigo(rel)) sidecars.push(rel);
+      }
+    };
+    walk(caseDir, "", 0);
+    for (const rel of sidecars) migrarSidecar(caseDir, rel, m);
+    for (const rel of pastas) migrarPastaDeAnexos(caseDir, rel, m);
+  } catch (err) {
+    m.erros.push({ rel: ".", erro: err.message });
+  }
+  for (const k of ["movidos", "mesclados", "removidos"]) m[k].sort();
+  return m;
+}
+
+/** migrarLayout em todos os casos de casesBase, sem extrair (modo `--migrar`, o do hub). */
+export function migrarTodos(casesBase) {
+  const porCaso = {};
+  for (const nome of listarCasos(casesBase) ?? []) porCaso[nome] = migrarLayout(join(casesBase, nome));
+  return { porCaso };
+}
+
 function resumoVazio() {
-  return { extraidos: [], adiados: [], grandes: [], pulados: 0, naoTocados: [], erros: [], falhasNovas: {}, falhasMantidas: [] };
+  return { extraidos: [], adiados: [], grandes: [], pulados: 0, naoTocados: [], erros: [], falhasNovas: {}, falhasMantidas: [], migracao: migracaoVazia() };
 }
 
 /**
@@ -537,7 +754,8 @@ function resumoVazio() {
  * acima de 5 MiB: fica para o tick), `falhas` (o cache negativo carregado por
  * quem chama; as entradas novas voltam em `resumo.falhasNovas` e as que
  * continuam valendo em `resumo.falhasMantidas`), `caso` (prefixo das chaves do
- * cache; padrão: o nome da pasta). Só para testes: `emProcesso` (extrai no
+ * cache; padrão: o nome da pasta). O resumo traz também `migracao`, o
+ * resultado de migrarLayout, que roda antes da varredura. Só para testes: `emProcesso` (extrai no
  * próprio processo, para injetar `agora()` no orçamento), `spawn` e
  * `maxHeapFilhoMb`.
  */
@@ -580,6 +798,13 @@ export async function extrairCaso(caseDir, opts = {}) {
   let dirResultados = null;
   try {
     const inicio = agora();
+    // Antes da varredura, sempre: um sidecar do 0.29 ao lado do original vai
+    // para o espelho e é achado em dia por ESTA rodada (sem reextrair).
+    resumo.migracao = migrarLayout(caseDir);
+    for (const k of ["movidos", "mesclados", "removidos"]) {
+      for (const rel of resumo.migracao[k]) log(`migração: ${rel} -> ${destinoDaMigracao(rel)}${k === "movidos" ? "" : ` (${k === "mesclados" ? "mesclado" : "removido, o destino já existia"})`}`);
+    }
+    for (const e of resumo.migracao.erros) log(`migração: ${e.rel} erro (${e.erro})`);
     const varredura = varrer(caseDir, { maxOriginalBytes });
     resumo.erros.push(...varredura.erros);
     for (const e of varredura.erros) log(`erro ${e.rel}: ${e.erro}`);
@@ -591,10 +816,12 @@ export async function extrairCaso(caseDir, opts = {}) {
     const plano = planejarExtracao({ originais: varredura.originais, sidecars: varredura.sidecars });
     resumo.pulados = plano.pular.length;
     for (const { rel, sidecar } of plano.naoTocar) naoTocado(rel, sidecar, varredura.sidecars[sidecar]);
-    // Fila em ordem de path: o e-mail vem antes da sua pasta `.anexos/`, então
-    // um anexo que a varredura já viu (de rodada anterior) e que o e-mail acaba
-    // de regravar é o mesmo item da fila — nunca extraído duas vezes. O filho
-    // relê o arquivo do disco, então o item pendente já pega a versão nova.
+    // Fila em ordem de caminho LÓGICO (sem o prefixo `extracoes/`): o e-mail
+    // vem antes da sua pasta `.anexos/` mesmo quando o nome dele ordena depois
+    // de `extracoes` (`zz.eml`), então um anexo que a varredura já viu (de
+    // rodada anterior) e que o e-mail acaba de regravar é o mesmo item da fila
+    // — nunca extraído duas vezes. O filho relê o arquivo do disco, então o
+    // item pendente já pega a versão nova.
     const fila = [];
     const naFila = new Map();
     const enfileirar = (rel, md5, bytes) => {
@@ -612,7 +839,9 @@ export async function extrairCaso(caseDir, opts = {}) {
       fila.push(item);
       naFila.set(rel, item);
     };
-    for (const e of plano.extrair) enfileirar(e.rel, varredura.originais[e.rel].md5, varredura.originais[e.rel].bytes);
+    const logico = (e) => semEspelho(e.rel);
+    const ordem = [...plano.extrair].sort((a, b) => (logico(a) < logico(b) ? -1 : logico(a) > logico(b) ? 1 : 0));
+    for (const e of ordem) enfileirar(e.rel, varredura.originais[e.rel].md5, varredura.originais[e.rel].bytes);
     while (fila.length) {
       const item = fila.shift();
       naFila.delete(item.rel);
@@ -685,6 +914,18 @@ export async function extrairCaso(caseDir, opts = {}) {
 
 const TOPO_IGNORADOS = new Set(["_archive", "_template", "scripts"]);
 
+/** Subpastas diretas de casesBase que são caso; null quando a base não abre. */
+function listarCasos(casesBase) {
+  try {
+    return readdirSync(casesBase, { withFileTypes: true })
+      .filter((x) => x.isDirectory() && !x.name.startsWith(".") && !TOPO_IGNORADOS.has(x.name))
+      .map((x) => x.name)
+      .sort();
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Todos os casos (subpastas diretas de casesBase), com o orçamento
  * compartilhado. Carrega e grava o cache negativo uma vez por chamada: o novo
@@ -694,16 +935,9 @@ const TOPO_IGNORADOS = new Set(["_archive", "_template", "scripts"]);
 export async function extrairTodos(casesBase, opts = {}) {
   const porCaso = {};
   const { orcamentoMs = Infinity, agora = Date.now } = opts;
-  let casos;
-  try {
-    casos = readdirSync(casesBase, { withFileTypes: true })
-      .filter((x) => x.isDirectory() && !x.name.startsWith(".") && !TOPO_IGNORADOS.has(x.name))
-      .map((x) => x.name)
-      .sort();
-  } catch {
-    // casesBase ausente ou ilegível: nada a extrair
-    return { porCaso };
-  }
+  const casos = listarCasos(casesBase);
+  // casesBase ausente ou ilegível: nada a extrair
+  if (!casos) return { porCaso };
   const falhas = opts.falhas ?? carregarFalhas(casesBase);
   const proximas = {};
   const inicio = agora();
@@ -761,7 +995,7 @@ function repartir(tamanhos, total) {
  */
 export function formatarResumo(r) {
   const listas = [
-    ["Textos extraídos nesta pasta (leia o .md ao lado do original):", r.extraidos.map((e) => `- ${e.sidecar} (${e.detalhe})`)],
+    ["Textos extraídos nesta pasta (leia o .md em extracoes/, que espelha a pasta do caso):", r.extraidos.map((e) => `- ${e.sidecar} (${e.detalhe})`)],
     ["Ficou para o sincronizador (não extraído agora):", r.adiados.map((a) => `- ${a.rel}: ${a.motivo}`)],
     ["Não foi possível extrair (leia o original):", r.erros.map((e) => `- ${e.rel}: ${e.erro}`)],
     ["Grandes demais para o extrator (leia o original):", (r.grandes ?? []).map((g) => `- ${g.rel} (${tamanhoLegivel(g.bytes)})`)],
@@ -839,8 +1073,18 @@ async function main() {
       }
     } else if (val("--todos")) {
       await extrairTodos(val("--todos"), opts);
+    } else if (val("--migrar")) {
+      // O hub (VM) roda isto logo após o push do 0.30.0: ele não extrai, mas
+      // guarda os sidecars no lugar antigo e o pool os re-baixaria nas máquinas.
+      const { porCaso } = migrarTodos(val("--migrar"));
+      const casos = Object.entries(porCaso);
+      if (!casos.length) console.log(`nenhum caso em ${val("--migrar")}`);
+      for (const [caso, m] of casos) {
+        console.log(`${caso}: ${m.movidos.length} movido(s), ${m.mesclados.length} mesclado(s), ${m.removidos.length} removido(s), ${m.erros.length} erro(s)`);
+        for (const e of m.erros) console.log(`${caso}: erro ${e.rel}: ${e.erro}`);
+      }
     } else {
-      console.log("uso: extrair.mjs --caso <dir> [--orcamento <s>] [--resumo] | --todos <casesBase> [--orcamento <s>]");
+      console.log("uso: extrair.mjs --caso <dir> [--orcamento <s>] [--resumo] | --todos <casesBase> [--orcamento <s>] | --migrar <casesBase>");
     }
   } catch (err) {
     console.log(`erro fatal: ${err.message}`);

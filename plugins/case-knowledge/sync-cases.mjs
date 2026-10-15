@@ -2869,13 +2869,15 @@ async function main() {
     appendLog(casesBase, `deps: erro inesperado: ${err.message}`);
   }
 
-  // CMR-303: extrai o texto dos workdocs (.docx/.xlsx/.msg/.eml) para um .md ao
-  // lado do original. A fase é LOCAL (não fala com a VM), então roda antes da
-  // busca do manifest: máquina offline também extrai (o `return` por falha do
-  // manifest pularia a fase). Fica antes do syncWorkdocs, como a spec pede: o
-  // arquivo que nasceu nesta máquina é extraído e sobe no mesmo tick; o .docx
-  // que desceu do hub é extraído no tick seguinte. Orçamento de 120 s (a tarefa
-  // do Windows tem ExecutionTimeLimit de 5 min).
+  // CMR-303: extrai o texto dos workdocs (.docx/.xlsx/.msg/.eml) para um .md em
+  // `extracoes/` (espelho da árvore do caso, desde 0.30.0; o layout antigo, .md
+  // ao lado do original, é migrado no início de cada caso). A fase é LOCAL (não
+  // fala com a VM), então roda antes da busca do manifest: máquina offline
+  // também extrai (o `return` por falha do manifest pularia a fase). Fica antes
+  // do syncWorkdocs, como a spec pede: o arquivo que nasceu nesta máquina é
+  // extraído e sobe no mesmo tick; o .docx que desceu do hub é extraído no tick
+  // seguinte. Orçamento de 120 s (a tarefa do Windows tem ExecutionTimeLimit de
+  // 5 min).
   //
   // Import DINÂMICO de propósito (ver o teste C1 em sync-cases.test.mjs): o
   // extrator puxa deps que o clone pode ainda não ter; import estático
@@ -2894,6 +2896,13 @@ async function main() {
       try {
         const { porCaso } = await extrairTodos(casesBase, { orcamentoMs: 120_000 });
         for (const [caso, r] of Object.entries(porCaso)) {
+          // Migração do layout 0.29: enquanto o hub não for migrado, o pool
+          // re-baixa o sidecar antigo e esta linha volta a cada tick.
+          const mig = r.migracao;
+          if (mig && mig.movidos.length + mig.mesclados.length + mig.removidos.length) {
+            appendLog(casesBase, `extracao ${caso}: migração: ${mig.movidos.length} movido(s), ${mig.mesclados.length} mesclado(s), ${mig.removidos.length} removido(s) para extracoes/`);
+          }
+          for (const x of mig?.erros ?? []) appendLog(casesBase, `extracao ${caso}: migração: ${x.rel} erro (${x.erro})`);
           for (const e of r.extraidos) appendLog(casesBase, `extracao ${caso}: ${e.rel} -> ${e.sidecar}`);
           for (const a of r.adiados) if (a.motivo !== "orçamento de tempo esgotado") appendLog(casesBase, `extracao ${caso}: ${a.rel} adiado (${a.motivo})`);
           for (const x of r.erros) appendLog(casesBase, `extracao ${caso}: ${x.rel} erro (${x.erro})`);

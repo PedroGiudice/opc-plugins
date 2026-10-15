@@ -59,14 +59,68 @@ function temOptOut(rel) {
   return stem.toLowerCase().endsWith(OPT_OUT);
 }
 
+// Pasta-espelho dos textos extraídos (0.30.0): o CEO viu a pasta do caso com
+// um .md ao lado de cada documento e decidiu que a pasta do advogado fica só
+// com os documentos dele. Sem acento de propósito: acento em nome de pasta
+// quebra pandoc, Copy-Item e caminho UNC. O sidecar de `a/b/x.docx` mora em
+// `extracoes/a/b/x.docx.md`; os anexos de `a/m.msg`, em
+// `extracoes/a/m.msg.anexos/`, com o sidecar de cada anexo ao lado dele (já
+// estão no espelho: não se espelha de novo).
+export const EXTRACOES_DIR = "extracoes";
+const ANEXOS = ".anexos";
+
+// O espelho é só a pasta `extracoes/` na RAIZ do caso, comparada sem caixa (no
+// NTFS `Extracoes/` é a mesma pasta; o readdir devolve a caixa de quem a criou).
+function noEspelho(rel) {
+  const i = rel.indexOf("/");
+  return i > 0 && asciiLower(rel.slice(0, i)) === EXTRACOES_DIR;
+}
+
+/** Caminho lógico (o do caso) de um caminho do espelho; fora dele, o próprio. */
+export function semEspelho(rel) {
+  return noEspelho(rel) ? rel.slice(rel.indexOf("/") + 1) : rel;
+}
+
+function espelhar(rel) {
+  return noEspelho(rel) ? rel : `${EXTRACOES_DIR}/${rel}`;
+}
+
 export function nomeSidecar(rel) {
-  return temOptOut(rel) ? `${rel}${OPT_OUT}.md` : `${rel}.md`;
+  const r = espelhar(rel);
+  return temOptOut(rel) ? `${r}${OPT_OUT}.md` : `${r}.md`;
+}
+
+/** Pasta onde os anexos do e-mail `rel` são gravados (sempre dentro do espelho). */
+export function dirDeAnexos(rel) {
+  return `${espelhar(rel)}${ANEXOS}`;
+}
+
+/**
+ * Inverso do nome de sidecar do layout 0.29 (ao lado do original): devolve o
+ * original de `x.docx.md` / `x.local.docx.local.md`, ou null quando o nome não
+ * é um que o 0.29 escreveria. Só o NOME: quem migra ainda confere o frontmatter.
+ */
+export function originalDoSidecarAntigo(rel) {
+  if (typeof rel !== "string") return null;
+  const lower = asciiLower(rel);
+  if (lower.endsWith(`${OPT_OUT}.md`)) {
+    const c = rel.slice(0, -`${OPT_OUT}.md`.length);
+    if (tipoDeFormato(c) && temOptOut(c)) return c;
+  }
+  if (lower.endsWith(".md")) {
+    const c = rel.slice(0, -3);
+    if (tipoDeFormato(c) && !temOptOut(c)) return c;
+  }
+  return null;
 }
 
 export function ehOriginalElegivel(rel) {
   if (typeof rel !== "string" || !tipoDeFormato(rel)) return false;
   if (!isSafeRelPath(rel)) return false;
   const partes = rel.split("/");
+  // No espelho só é original o anexo de e-mail (dentro de uma pasta `.anexos/`);
+  // todo o resto ali é saída do extrator (ou do usuário) e não se extrai de novo.
+  if (noEspelho(rel) && !partes.slice(1, -1).some((d) => asciiLower(d).endsWith(ANEXOS))) return false;
   // Sem caixa, como `isWorkdocPath`: o cliente é NTFS, e `X.CONFLITO-ana.docx`
   // é cópia de conflito tanto quanto `x.conflito-ana.docx`. Poda idêntica à do
   // canal, senão o extrator geraria sidecar de arquivo que o canal não circula.
@@ -180,7 +234,8 @@ export function lerFrontmatter(texto) {
 /**
  * Decide, para cada original elegível, se extrai, pula ou não toca.
  * `originais`: {rel: {md5, bytes}}; `sidecars`: {rel: textoDoMd} (só os .md
- * que o wiring achou ao lado de um original). Ordem de saída por path, para o
+ * que o wiring achou no lugar de sidecar de um original, `nomeSidecar`, dentro
+ * de `extracoes/`). Ordem de saída por path, para o
  * log e o resumo serem estáveis.
  */
 export function planejarExtracao({ originais = {}, sidecars = {} } = {}) {
@@ -480,8 +535,9 @@ export function tamanhoLegivel(bytes) {
 /**
  * E-mail -> Markdown: cabeçalhos em lista, corpo, anexos. Cc só aparece
  * quando há. Cada anexo mostra o caminho do arquivo extraído quando o wiring
- * o gravou em disco (`caminho`); sem ele, "não extraído", para quem lê o
- * sidecar saber que o anexo existe e não está ao lado. Anexo inline (imagem
+ * o gravou em disco (`caminho`, relativo a `extracoes/`: o mesmo texto do
+ * layout 0.29, ver extrairUm); sem ele, "não extraído", para quem lê o
+ * sidecar saber que o anexo existe e não foi gravado. Anexo inline (imagem
  * do corpo, anexo oculto do Outlook) é listado e nunca gravado.
  */
 export function renderEmail(e) {
