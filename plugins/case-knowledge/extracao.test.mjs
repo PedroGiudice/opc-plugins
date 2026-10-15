@@ -13,6 +13,9 @@ import {
   acharPlaceholders,
   renderDocx,
   renderXlsx,
+  htmlParaTexto,
+  tamanhoLegivel,
+  renderEmail,
 } from "./extracao.mjs";
 
 test("tipoDeFormato: extensão sem caixa define o leitor", () => {
@@ -294,4 +297,45 @@ test("renderXlsx: uma seção por aba visível, cabeçalho = primeira linha não
     avisos: [],
   });
   assert.equal(md, "## Aba: Dados\n\n| Item | Valor |\n| --- | --- |\n| a\\|b | 1 |\n\n## Aba: Vazia\n\n(aba vazia)\n");
+});
+
+test("htmlParaTexto: quebras de bloco viram linhas, tags somem, entidades decodificam, script/style somem", () => {
+  const html = `<html><head><style>p{}</style><script>x()</script></head><body><p>Ol&aacute; <b>mundo</b>&nbsp;&amp; cia</p><div>linha 2<br>linha 3</div><ul><li>a</li><li>b</li></ul><table><tr><td>c1</td><td>c2</td></tr></table></body></html>`;
+  assert.equal(htmlParaTexto(html), "Olá mundo & cia\nlinha 2\nlinha 3\na\nb\nc1\tc2");
+});
+
+test("htmlParaTexto: entidades numéricas e colapso de linhas em branco", () => {
+  assert.equal(htmlParaTexto("<p>&#231;&#xE3;o</p><p></p><p></p><p>fim</p>"), "ção\n\nfim");
+});
+
+test("htmlParaTexto: quebra de linha do fonte HTML é espaço, não linha; nbsp literal é espaço", () => {
+  assert.equal(htmlParaTexto("<p class=MsoNormal>Segue a\r\nproposta   revisada.</p>\r\n<p> </p>\r\n<p>Att.</p>"), "Segue a proposta revisada.\n\nAtt.");
+});
+
+test("renderEmail: cabeçalhos em lista, corpo, anexos com tamanho e caminho quando houver", () => {
+  const md = renderEmail({
+    cabecalhos: { de: "Ana <a@x>", para: ["Bruno <b@y>"], cc: [], data: "2026-09-01T10:30:00Z", assunto: "RE: Proposta" },
+    corpo: "Segue.\n\nAtt.",
+    anexos: [{ nome: "Proposta.docx", bytes: 184322, caminho: "RE Proposta.msg.anexos/Proposta.docx" }, { nome: "grande.zip", bytes: 30 * 1024 * 1024 }],
+    avisos: [],
+  });
+  assert.equal(md, "## Cabeçalhos\n\n- De: Ana <a@x>\n- Para: Bruno <b@y>\n- Data: 2026-09-01T10:30:00Z\n- Assunto: RE: Proposta\n\n## Corpo\n\nSegue.\n\nAtt.\n\n## Anexos\n\n- Proposta.docx (180,0 KiB) -> RE Proposta.msg.anexos/Proposta.docx\n- grande.zip (30,0 MiB) -> não extraído\n");
+});
+
+test("renderEmail: sem cc omite a linha; sem anexos escreve (nenhum)", () => {
+  const md = renderEmail({ cabecalhos: { de: "a", para: [], cc: [], data: "", assunto: "" }, corpo: "", anexos: [], avisos: [] });
+  assert.equal(md, "## Cabeçalhos\n\n- De: a\n- Para: \n- Data: \n- Assunto: \n\n## Corpo\n\n\n\n## Anexos\n\n(nenhum)\n");
+});
+
+test("renderEmail: cc presente vira linha própria, na ordem da fonte", () => {
+  const md = renderEmail({ cabecalhos: { de: "a", para: ["b"], cc: ["c", "d"], data: "", assunto: "s" }, corpo: "x", anexos: [], avisos: [] });
+  assert.match(md, /^- Para: b\n- Cc: c, d\n- Data: /m);
+});
+
+test("tamanhoLegivel: bytes, KiB e MiB com vírgula decimal", () => {
+  assert.equal(tamanhoLegivel(0), "0 B");
+  assert.equal(tamanhoLegivel(1023), "1023 B");
+  assert.equal(tamanhoLegivel(1024), "1,0 KiB");
+  assert.equal(tamanhoLegivel(1536), "1,5 KiB");
+  assert.equal(tamanhoLegivel(1024 * 1024), "1,0 MiB");
 });

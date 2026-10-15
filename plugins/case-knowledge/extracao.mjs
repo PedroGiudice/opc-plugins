@@ -383,3 +383,59 @@ export function renderXlsx(d) {
   }
   return linhas.join("\n");
 }
+
+const ENTIDADES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", aacute: "á", agrave: "à", atilde: "ã", acirc: "â", eacute: "é", ecirc: "ê", iacute: "í", oacute: "ó", otilde: "õ", ocirc: "ô", uacute: "ú", ccedil: "ç", Aacute: "Á", Agrave: "À", Atilde: "Ã", Acirc: "Â", Eacute: "É", Ecirc: "Ê", Iacute: "Í", Oacute: "Ó", Otilde: "Õ", Ocirc: "Ô", Uacute: "Ú", Ccedil: "Ç", uuml: "ü", ndash: "–", mdash: "—", laquo: "«", raquo: "»", hellip: "…", bull: "•", euro: "€" };
+
+/**
+ * HTML de corpo de e-mail -> texto. Sem parser de DOM de propósito: o corpo
+ * só precisa virar texto legível e determinístico, e a dependência a mais não
+ * se paga. Blocos (p, div, li, tr, h1-h6...) e <br> viram quebra de linha,
+ * células vizinhas viram tabulação, script/style/comentários somem.
+ * Quebra de linha e espaço do FONTE HTML não são texto (o Outlook quebra a
+ * linha do fonte no meio da frase): colapsam em um espaço antes de as tags
+ * virarem quebras, como faz o navegador.
+ */
+export function htmlParaTexto(html) {
+  let s = String(html ?? "");
+  s = s.replace(/<(script|style)\b[\s\S]*?<\/\1>/gi, "");
+  s = s.replace(/<!--[\s\S]*?-->/g, "");
+  s = s.replace(/[ \t\r\n\f]+/g, " ");
+  s = s.replace(/<br\s*\/?>/gi, "\n");
+  s = s.replace(/<\/(p|div|tr|li|h[1-6]|blockquote|pre)\s*>/gi, "\n");
+  s = s.replace(/<\/t[dh]\s*>\s*<t[dh]\b[^>]*>/gi, "\t");
+  s = s.replace(/<[^>]+>/g, "");
+  s = s.replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)));
+  s = s.replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)));
+  s = s.replace(/&([a-zA-Z]+);/g, (m, n) => ENTIDADES[n] ?? m);
+  // nbsp literal (UTF-8 ou cp1252 0xA0 vindo do RTF) conta como espaço: senão
+  // um parágrafo "vazio" do Outlook (<p>&nbsp;</p>) não colapsa
+  s = s.replace(/ /g, " ");
+  s = s.split("\n").map((l) => l.replace(/^[ \t]+|[ \t]+$/g, "")).join("\n");
+  s = s.replace(/\n{3,}/g, "\n\n");
+  return s.trim();
+}
+
+/** Tamanho em B, KiB ou MiB com uma casa e vírgula decimal (pt-BR fixo, não o locale da máquina). */
+export function tamanhoLegivel(bytes) {
+  const fmt = (v) => v.toFixed(1).replace(".", ",");
+  if (bytes >= 1024 * 1024) return `${fmt(bytes / (1024 * 1024))} MiB`;
+  if (bytes >= 1024) return `${fmt(bytes / 1024)} KiB`;
+  return `${bytes} B`;
+}
+
+/**
+ * E-mail -> Markdown: cabeçalhos em lista, corpo, anexos. Cc só aparece
+ * quando há. Cada anexo mostra o caminho do arquivo extraído quando o wiring
+ * o gravou em disco (`caminho`); sem ele, "não extraído", para quem lê o
+ * sidecar saber que o anexo existe e não está ao lado.
+ */
+export function renderEmail(e) {
+  const c = e.cabecalhos;
+  const linhas = ["## Cabeçalhos", "", `- De: ${c.de}`, `- Para: ${c.para.join(", ")}`];
+  if (c.cc.length) linhas.push(`- Cc: ${c.cc.join(", ")}`);
+  linhas.push(`- Data: ${c.data}`, `- Assunto: ${c.assunto}`, "", "## Corpo", "", e.corpo, "", "## Anexos", "");
+  if (!e.anexos.length) linhas.push("(nenhum)");
+  for (const a of e.anexos) linhas.push(`- ${a.nome} (${tamanhoLegivel(a.bytes)}) -> ${a.caminho ?? "não extraído"}`);
+  linhas.push("");
+  return linhas.join("\n");
+}
