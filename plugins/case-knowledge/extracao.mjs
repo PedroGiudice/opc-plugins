@@ -386,6 +386,14 @@ export function renderXlsx(d) {
 
 const ENTIDADES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", aacute: "á", agrave: "à", atilde: "ã", acirc: "â", eacute: "é", ecirc: "ê", iacute: "í", oacute: "ó", otilde: "õ", ocirc: "ô", uacute: "ú", ccedil: "ç", Aacute: "Á", Agrave: "À", Atilde: "Ã", Acirc: "Â", Eacute: "É", Ecirc: "Ê", Iacute: "Í", Oacute: "Ó", Otilde: "Õ", Ocirc: "Ô", Uacute: "Ú", Ccedil: "Ç", uuml: "ü", ndash: "–", mdash: "—", laquo: "«", raquo: "»", hellip: "…", bull: "•", euro: "€" };
 
+// entidade numérica fora do Unicode (acima de 0x10FFFF), surrogate isolado ou
+// zero fica como está no texto: String.fromCodePoint lançaria, e uma função
+// pura de texto não pode derrubar a leitura do e-mail por HTML malformado
+function codePointOuLiteral(cp, literal) {
+  const valido = Number.isInteger(cp) && cp > 0 && cp <= 0x10ffff && !(cp >= 0xd800 && cp <= 0xdfff);
+  return valido ? String.fromCodePoint(cp) : literal;
+}
+
 /**
  * HTML de corpo de e-mail -> texto. Sem parser de DOM de propósito: o corpo
  * só precisa virar texto legível e determinístico, e a dependência a mais não
@@ -404,8 +412,8 @@ export function htmlParaTexto(html) {
   s = s.replace(/<\/(p|div|tr|li|h[1-6]|blockquote|pre)\s*>/gi, "\n");
   s = s.replace(/<\/t[dh]\s*>\s*<t[dh]\b[^>]*>/gi, "\t");
   s = s.replace(/<[^>]+>/g, "");
-  s = s.replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)));
-  s = s.replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)));
+  s = s.replace(/&#x([0-9a-f]+);/gi, (m, h) => codePointOuLiteral(parseInt(h, 16), m));
+  s = s.replace(/&#(\d+);/g, (m, d) => codePointOuLiteral(Number(d), m));
   s = s.replace(/&([a-zA-Z]+);/g, (m, n) => ENTIDADES[n] ?? m);
   // nbsp literal (UTF-8 ou cp1252 0xA0 vindo do RTF) conta como espaço: senão
   // um parágrafo "vazio" do Outlook (<p>&nbsp;</p>) não colapsa

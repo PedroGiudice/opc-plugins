@@ -53,6 +53,13 @@ test("lerEml: versão texto tem preferência sobre HTML; sem corpo nenhum vira a
   assert.deepEqual(vazio.avisos, ["e-mail sem corpo legível (nem texto nem HTML)"]);
 });
 
+test("lerEml: grupo de destinatários vira seus membros em ordem; grupo vazio vira o nome do grupo", async () => {
+  const eml = "From: a@a\r\nTo: Equipe: x@x, Yara <y@y>;, Vazio:;, z@z\r\nCc: Outros: w@w;\r\nSubject: s\r\n\r\ncorpo\r\n";
+  const e = await lerEml(Buffer.from(eml));
+  assert.deepEqual(e.cabecalhos.para, ["x@x", "Yara <y@y>", "Vazio", "z@z"]);
+  assert.deepEqual(e.cabecalhos.cc, ["w@w"]);
+});
+
 test("normalizarMsg: campos do msgreader viram cabeçalhos; body em texto tem preferência", () => {
   const fileData = {
     subject: "RE: Proposta",

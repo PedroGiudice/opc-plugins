@@ -339,3 +339,7 @@ test("tamanhoLegivel: bytes, KiB e MiB com vírgula decimal", () => {
   assert.equal(tamanhoLegivel(1536), "1,5 KiB");
   assert.equal(tamanhoLegivel(1024 * 1024), "1,0 MiB");
 });
+
+test("htmlParaTexto: entidade numérica fora do Unicode fica literal (não lança); válida decodifica", () => {
+  assert.equal(htmlParaTexto("<p>&#99999999; &#x110000; &#xD800; &#0; &#231;</p>"), "&#99999999; &#x110000; &#xD800; &#0; ç");
+});

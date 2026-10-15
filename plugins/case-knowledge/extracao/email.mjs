@@ -44,7 +44,12 @@ function corpoDe(texto, html, avisos) {
 export async function lerEml(buffer) {
   const avisos = [];
   const m = await PostalMime.parse(new Uint8Array(buffer));
-  const lista = (xs) => (xs ?? []).map((a) => endereco(a.name, a.address));
+  // grupo (RFC 5322, "Equipe: x@x, y@y;") vira seus membros na ordem da fonte;
+  // grupo vazio ("Undisclosed recipients:;") fica pelo nome, senão sumiria
+  const lista = (xs) =>
+    (xs ?? []).flatMap((a) =>
+      Array.isArray(a.group) ? (a.group.length ? a.group.map((g) => endereco(g.name, g.address)) : [endereco(a.name, "")]) : [endereco(a.name, a.address)],
+    );
   return {
     cabecalhos: { de: endereco(m.from?.name, m.from?.address), para: lista(m.to), cc: lista(m.cc), data: dataIso(m.date), assunto: m.subject ?? "" },
     corpo: corpoDe(m.text, m.html, avisos),
