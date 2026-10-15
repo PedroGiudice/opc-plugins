@@ -16,7 +16,10 @@ function textoDeValor(v, semCache) {
   if (v === null || v === undefined) return "";
   if (v instanceof Date) return Number.isNaN(v.getTime()) ? "" : dataIso(v);
   switch (typeof v) {
-    case "number": return Number.isFinite(v) ? String(v) : "";
+    // 15 dígitos significativos, como o Excel exibe: o double 4899.44 gravado
+    // como 4899.4400000000005 não pode virar ruído no texto. Vale também para
+    // resultado de fórmula, que cai neste mesmo ramo.
+    case "number": return Number.isFinite(v) ? String(Number(v.toPrecision(15))) : "";
     case "boolean": return v ? "VERDADEIRO" : "FALSO";
     case "string": return v;
     case "object":

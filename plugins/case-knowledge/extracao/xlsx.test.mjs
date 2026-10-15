@@ -133,3 +133,19 @@ test("lerXlsx: fórmula com resultado em cache 0 ou FALSO não é 'sem cache'", 
   assert.deepEqual(d.abas[0].linhas, [["5", "0", "FALSO"], ["", "", ""], ["0", "FALSO", ""]]);
   assert.deepEqual(d.avisos, []);
 });
+
+test("lerXlsx: números sem ruído de ponto flutuante (15 dígitos, como o Excel), em valor e em resultado de fórmula", async () => {
+  const buf = await planilha(async (wb) => {
+    const ws = wb.addWorksheet("N");
+    ws.getCell("A1").value = 4899.4400000000005;
+    ws.getCell("B1").value = 16232.439999999999;
+    ws.getCell("C1").value = 0.1 + 0.2;
+    ws.getCell("D1").value = 1234567;
+    ws.getCell("E1").value = 1e21;
+    ws.getCell("F1").value = { formula: "A1*1", result: 4899.4400000000005 };
+    ws.getCell("G1").value = -0.30000000000000004;
+  });
+  const d = await lerXlsx(buf);
+  assert.deepEqual(d.abas[0].linhas, [["4899.44", "16232.44", "0.3", "1234567", "1e+21", "4899.44", "-0.3"]]);
+  assert.deepEqual(d.avisos, []);
+});
