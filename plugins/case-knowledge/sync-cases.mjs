@@ -2741,26 +2741,63 @@ export function updatePluginCaches(scriptDir, deps = {}) {
  * Prefere o npm ao lado do node em execução: a tarefa agendada nem sempre herda
  * um PATH com o npm, e o npm irmão é o da mesma instalação do node.
  *
- * Devolve {faltavam, ok, saida}; nunca lança (o tick não pode morrer aqui).
+ * Devolve {faltavam, ok, saida} (mais `aguardandoMin` no backoff e
+ * `pacoteIlegivel`); nunca lança (o tick não pode morrer aqui).
  */
 export function garantirDependencias(pluginDir, deps = {}) {
   const exists = deps.exists || existsSync;
   const readFile = deps.readFile || ((p) => readFileSync(p, "utf-8"));
-  const spawn = deps.spawn || spawnSync;
-  const win = (deps.platform || process.platform) === "win32";
+  const agora = deps.agora || Date.now;
+  const primeiraLinha = (s) => String(s || "").trim().split("\n")[0].trim();
+  let erroPacote = null;
   const faltando = () => {
     try {
       const pkg = JSON.parse(readFile(join(pluginDir, "package.json")));
       return Object.keys(pkg.dependencies || {})
         .sort()
         .filter((nome) => !exists(join(pluginDir, "node_modules", nome, "package.json")));
-    } catch {
+    } catch (err) {
+      erroPacote = primeiraLinha(err.message);
       return null;
     }
   };
   const faltavam = faltando();
-  if (faltavam === null) return { faltavam: [], ok: false, saida: "package.json ilegível" };
+  if (faltavam === null) return { faltavam: [], ok: false, saida: `package.json ilegível (${erroPacote})`, pacoteIlegivel: true };
   if (faltavam.length === 0) return { faltavam, ok: true, saida: "" };
+  // Backoff (R24a): sem rede ou com o npm quebrado, cada tick de 5 min rodaria
+  // um npm install de até 180 s, sempre falhando. Falha registrada há menos de
+  // 30 min espera; sucesso grava ok:true e zera a espera.
+  const estadoPath = deps.casesBase ? join(deps.casesBase, DEPS_ESTADO) : null;
+  if (estadoPath) {
+    try {
+      const e = JSON.parse(readFile(estadoPath));
+      const quando = Date.parse(e.ultimaTentativa);
+      if (e.ok === false && Number.isFinite(quando) && agora() - quando < DEPS_BACKOFF_MS) {
+        const min = Math.floor((agora() - quando) / 60_000);
+        return { faltavam, ok: false, saida: `aguardando nova tentativa (última falha há ${min} min)`, aguardandoMin: min };
+      }
+    } catch {
+      // sem estado (ou ilegível): tenta
+    }
+  }
+  const r = instalarDependencias(pluginDir, faltavam, faltando, deps);
+  if (estadoPath) {
+    try {
+      (deps.writeFile || writeAtomic)(estadoPath, `${JSON.stringify({ ultimaTentativa: new Date(agora()).toISOString(), ok: r.ok, faltavam }, null, 2)}\n`);
+    } catch {
+      // sem o estado, o pior caso é tentar de novo no próximo tick
+    }
+  }
+  return r;
+}
+
+export const DEPS_ESTADO = ".deps-state.json";
+const DEPS_BACKOFF_MS = 30 * 60_000;
+
+function instalarDependencias(pluginDir, faltavam, faltando, deps) {
+  const exists = deps.exists || existsSync;
+  const spawn = deps.spawn || spawnSync;
+  const win = (deps.platform || process.platform) === "win32";
   const primeiraLinha = (s) => String(s || "").trim().split("\n")[0].trim();
   try {
     // separador pela plataforma alvo, não pela do processo (o teste simula o Windows)
@@ -2822,9 +2859,10 @@ async function main() {
   // (o self-update não roda npm install). Silencioso quando nada falta.
   let depsOk = true;
   try {
-    const d = garantirDependencias(dirname(fileURLToPath(import.meta.url)));
+    const d = garantirDependencias(dirname(fileURLToPath(import.meta.url)), { casesBase });
     depsOk = d.ok;
-    if (d.faltavam.length) {
+    if (d.aguardandoMin !== undefined || d.pacoteIlegivel) appendLog(casesBase, `deps: ${d.saida}`);
+    else if (d.faltavam.length) {
       appendLog(casesBase, d.ok ? `deps: instalou ${d.faltavam.join(", ")}` : `deps: npm install falhou (${d.saida})`);
     }
   } catch (err) {

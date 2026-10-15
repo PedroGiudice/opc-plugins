@@ -3394,9 +3394,12 @@ const DEPS_ANTIGAS = new Set(["@modelcontextprotocol/sdk", "@napi-rs/keyring", "
 
 function importsEstaticos(texto) {
   const alvos = [];
-  // `import x from "y"`, `import {a,\n b} from "y"`, `export ... from "y"`, `import "y"`.
-  // Linha que começa com `*` ou `//` é comentário e não casa (âncora em ^\s*import).
-  const reFrom = /^\s*(?:import|export)\s[^;"'`]*?\sfrom\s*["']([^"']+)["']/gm;
+  // `import x from "y"`, `import {a,\n b} from "y"`, `export ... from "y"`, `import "y"`,
+  // e as formas sem espaço que um minificador produz (`import{x}from"y"`, `import"y"`):
+  // fronteira de palavra (\b) em vez de espaço obrigatório. `import(` dinâmico não
+  // casa (o parêntese não é seguido de `from` antes da aspa). Linha que começa com
+  // `*` ou `//` é comentário e não casa (âncora em ^\s*import).
+  const reFrom = /^\s*(?:import|export)\b[^;"'`(]*?\bfrom\s*["']([^"']+)["']/gm;
   const reNu = /^\s*import\s*["']([^"']+)["']/gm;
   for (const re of [reFrom, reNu]) for (const m of texto.matchAll(re)) alvos.push(m[1]);
   return alvos;
@@ -3430,6 +3433,19 @@ test("C1: imports estáticos alcançáveis do tick e dos hooks são builtin, loc
   }
   assert.ok(vistos.has(join(raiz, "hooks", "extracao-sessao.mjs")));
   assert.deepEqual(proibidos, []);
+});
+
+test("C1: o detector de import estático pega as formas sem espaço e ignora o dinâmico", () => {
+  const texto = [
+    'import{unzipSync}from"fflate";',
+    'import"exceljs";',
+    "import x,{y}from'postal-mime'",
+    'export{a}from"iconv-lite";',
+    'import * as z from "@xmldom/xmldom";',
+    'const m = await import("rtf-stream-parser");',
+    ' * import nada from "comentario";',
+  ].join("\n");
+  assert.deepEqual(importsEstaticos(texto).sort(), ["@xmldom/xmldom", "exceljs", "fflate", "iconv-lite", "postal-mime"]);
 });
 
 test("C1: o extrator também não pode ser alcançado por import estático (só dinâmico)", () => {
@@ -3505,4 +3521,47 @@ test("garantirDependencias: nunca lança (spawn que lança, package.json ausente
   assert.deepEqual([r3.ok, r3.saida], [false, "ainda faltam: fflate"]);
   const r4 = garantirDependencias(dir, { spawn: () => ({ error: Object.assign(new Error("spawnSync npm ETIMEDOUT"), { code: "ETIMEDOUT" }), status: null }) });
   assert.deepEqual([r4.ok, r4.saida], [false, "spawnSync npm ETIMEDOUT"]);
+});
+
+// ---------- R24a: backoff do npm install ----------
+
+test("garantirDependencias: falha recente (< 30 min) não roda npm de novo; depois, tenta; sucesso zera", async () => {
+  const { garantirDependencias, DEPS_ESTADO } = await import("./sync-cases.mjs");
+  const dir = pluginComDeps({ fflate: "^0.8" }, []);
+  const base = mkdtempSync(join(tmpdir(), "deps-base-"));
+  let t = Date.parse("2026-10-15T10:00:00Z");
+  const agora = () => t;
+  let chamadas = 0;
+  const falha = () => { chamadas++; return { status: 1, stderr: "npm ERR! network" }; };
+  const r1 = garantirDependencias(dir, { spawn: falha, casesBase: base, agora });
+  assert.deepEqual([r1.ok, chamadas], [false, 1]);
+  assert.deepEqual(JSON.parse(readFileSync(join(base, DEPS_ESTADO), "utf-8")), { ultimaTentativa: "2026-10-15T10:00:00.000Z", ok: false, faltavam: ["fflate"] });
+  t += 12 * 60_000;
+  const r2 = garantirDependencias(dir, { spawn: falha, casesBase: base, agora });
+  assert.deepEqual([r2.ok, r2.aguardandoMin, chamadas], [false, 12, 1]);
+  t += 19 * 60_000; // 31 min depois da falha
+  const instala = () => {
+    chamadas++;
+    mkdirSync(join(dir, "node_modules", "fflate"), { recursive: true });
+    writeFileSync(join(dir, "node_modules", "fflate", "package.json"), "{}");
+    return { status: 0, stdout: "added 1 package" };
+  };
+  const r3 = garantirDependencias(dir, { spawn: instala, casesBase: base, agora });
+  assert.deepEqual([r3.ok, chamadas], [true, 2]);
+  assert.equal(JSON.parse(readFileSync(join(base, DEPS_ESTADO), "utf-8")).ok, true);
+  // com o sucesso registrado, uma dep que volte a faltar é tentada na hora
+  rmSync(join(dir, "node_modules", "fflate"), { recursive: true });
+  t += 60_000;
+  garantirDependencias(dir, { spawn: falha, casesBase: base, agora });
+  assert.equal(chamadas, 3);
+});
+
+test("garantirDependencias: package.json ilegível diz por quê (vira linha de log no tick)", async () => {
+  const { garantirDependencias } = await import("./sync-cases.mjs");
+  const dir = mkdtempSync(join(tmpdir(), "deps-"));
+  writeFileSync(join(dir, "package.json"), "{ quebrado");
+  const r = garantirDependencias(dir, { spawn: () => { throw new Error("não deveria rodar"); } });
+  assert.equal(r.ok, false);
+  assert.equal(r.pacoteIlegivel, true);
+  assert.match(r.saida, /^package\.json ilegível \(/);
 });

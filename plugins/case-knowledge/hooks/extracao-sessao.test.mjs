@@ -26,13 +26,26 @@ test("hook: stdout recebe só a linha JSON, mesmo com console.* chamado durante 
   const dir = mkdtempSync(join(tmpdir(), "hook-"));
   const caso = join(dir, "caso");
   mkdirSync(caso);
-  // .eml inválido o bastante para o leitor reclamar não pode sujar a saída
   writeFileSync(join(caso, "a.eml"), "From: a@a\r\nTo: b@b\r\nSubject: s\r\n\r\ncorpo\r\n");
-  const r = spawnSync(process.execPath, ["--import", "data:text/javascript,setTimeout(()=>console.log('ruido'),0)", fileURLToPath(new URL("./extracao-sessao.mjs", import.meta.url))], {
+  // O ruído sai de DENTRO da fase de extração (a varredura chama readdirSync),
+  // depois de pastaDoCaso, como faria uma lib barulhenta: é esse o caminho que
+  // o silêncio do console cobre. Um setTimeout(0) num --import (a versão
+  // anterior deste teste) dispara durante a carga assíncrona do grafo de
+  // módulos, ANTES de main(); no Windows, com leitura de módulo mais lenta, ele
+  // vazava. Em produção nada roda antes do hook, então não era buraco do hook.
+  const preload = [
+    'import fs from "node:fs";',
+    'import { syncBuiltinESMExports } from "node:module";',
+    "const original = fs.readdirSync;",
+    'fs.readdirSync = function (...a) { console.log("ruido"); process.stderr.write("ruido-disparado\\n"); return original.apply(this, a); };',
+    "syncBuiltinESMExports();",
+  ].join("\n");
+  const r = spawnSync(process.execPath, ["--import", `data:text/javascript,${encodeURIComponent(preload)}`, fileURLToPath(new URL("./extracao-sessao.mjs", import.meta.url))], {
     input: JSON.stringify({ cwd: caso }),
     env: { ...process.env, CASE_KNOWLEDGE_CASES_BASE: dir },
     encoding: "utf-8",
   });
+  assert.ok(r.stderr.includes("ruido-disparado"), `o ruído precisa ter sido disparado: ${r.stderr}`);
   const linhas = r.stdout.split("\n").filter(Boolean);
   assert.equal(linhas.length, 1, r.stdout);
   const out = JSON.parse(linhas[0]);
