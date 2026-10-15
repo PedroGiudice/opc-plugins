@@ -5,12 +5,14 @@ import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, rmSyn
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { pararExtracoesManuais, pararExtracoesManuaisStream, tokens, recall, resolverCaminho, montarRelatorio } from "./benchmark-extracao.mjs";
+import { pararExtracoesManuais, pararExtracoesManuaisStream, filtrarPares, tokens, recall, recallSub, resolverCaminho, montarRelatorio } from "./benchmark-extracao.mjs";
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "benchmark-extracao.mjs");
 
-const uso = (id, command, name = "Bash") =>
-  JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id, name, input: { command, description: "x" } }] } });
+const uso = (id, command, name = "Bash", description = "Extrair o texto do arquivo") =>
+  JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id, name, input: { command, description } }] } });
+// resultado de extração "de verdade": passa do mínimo de 300 caracteres do filtro
+const CORPO = "Segue a minuta do contrato revisada. ".repeat(10);
 const res = (id, content, extra = {}) =>
   JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content, ...extra }] } });
 
@@ -124,22 +126,23 @@ test("resolverCaminho: como está, /c/ -> C:\\, ~ -> home e relativo à pasta de
 test("montarRelatorio: tabela com Bytes e ms, linha de resumo com o maior ms", () => {
   const md = montarRelatorio({
     linhas: [
-      { arquivo: "C:\\a|b.docx", bytes: 1000, ms: 12.4, recall: 1, tokensManuais: 10, faltantes: [] },
-      { arquivo: "C:\\c.xlsx", bytes: 2048, ms: 340.6, recall: 0.5, tokensManuais: 4, faltantes: ["aa", "bb"] },
+      { arquivo: "C:\\a|b.docx", bytes: 1000, ms: 12.4, recall: 0.9, recallSub: 1, tokensManuais: 10, faltantes: [] },
+      { arquivo: "C:\\c.xlsx", bytes: 2048, ms: 340.6, recall: 0.5, recallSub: 0.5, tokensManuais: 4, faltantes: ["aaaa", "bbbb"] },
       { arquivo: "C:\\d.eml", bytes: 5, ms: 1, erro: "falhou\nfeio" },
     ],
     ausentes: 2,
+    descartados: { porDescricao: 7, porResultado: 3 },
   });
-  assert.match(md, /\| Arquivo \| Bytes \| ms \| Recall \| Tokens manuais \| Faltantes \(amostra\) \|/);
-  assert.match(md, /\| C:\\a\\\|b\.docx \| 1000 \| 12 \| 100\.0% \| 10 \|  \|/);
-  assert.match(md, /\| C:\\c\.xlsx \| 2048 \| 341 \| 50\.0% \| 4 \| aa, bb \|/);
-  assert.match(md, /\| C:\\d\.eml \| 5 \| 1 \| ERRO \| \| falhou feio \|/);
-  assert.match(md, /Arquivos comparados: 3; abaixo de 99%: 2; citados no JSONL mas ausentes no disco: 2; maior tempo de extração: 341 ms \(C:\\c\.xlsx\)\./);
+  assert.match(md, /\| Arquivo \| Bytes \| ms \| Recall \| Recall\(sub\) \| Tokens manuais \| Faltantes \(amostra\) \|/);
+  assert.match(md, /\| C:\\a\\\|b\.docx \| 1000 \| 12 \| 90\.0% \| 100\.0% \| 10 \|  \|/);
+  assert.match(md, /\| C:\\c\.xlsx \| 2048 \| 341 \| 50\.0% \| 50\.0% \| 4 \| aaaa, bbbb \|/);
+  assert.match(md, /\| C:\\d\.eml \| 5 \| 1 \| ERRO \| \| \| falhou feio \|/);
+  assert.match(md, /Arquivos comparados: 3; abaixo de 99%: 2; citados no JSONL mas ausentes no disco: 2; maior tempo de extração: 341 ms \(C:\\c\.xlsx\); descartados: 7 por descrição, 3 por resultado\./);
 });
 
 test("montarRelatorio: sem arquivos comparados", () => {
   const md = montarRelatorio({ linhas: [], ausentes: 1 });
-  assert.match(md, /Arquivos comparados: 0; abaixo de 99%: 0; citados no JSONL mas ausentes no disco: 1; maior tempo de extração: n\/d\./);
+  assert.match(md, /Arquivos comparados: 0; abaixo de 99%: 0; citados no JSONL mas ausentes no disco: 1; maior tempo de extração: n\/d; descartados: 0 por descrição, 0 por resultado\./);
 });
 
 test("CLI: compara JSONL com o arquivo em disco, grava só o relatório e nenhum sidecar", () => {
@@ -148,14 +151,14 @@ test("CLI: compara JSONL com o arquivo em disco, grava só o relatório e nenhum
     const cases = join(raiz, "cases");
     mkdirSync(join(cases, "caso-x"), { recursive: true });
     const eml = join(cases, "caso-x", "msg.eml");
-    writeFileSync(eml, "From: Ana <ana@x.com>\r\nTo: bob@x.com\r\nSubject: Contrato\r\nDate: Mon, 05 Oct 2026 10:00:00 +0000\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nSegue a minuta do contrato revisada.\r\n");
+    writeFileSync(eml, `From: Ana <ana@x.com>\r\nTo: bob@x.com\r\nSubject: Contrato\r\nDate: Mon, 05 Oct 2026 10:00:00 +0000\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${CORPO}\r\n`);
     const projects = join(raiz, "projects", "p1");
     mkdirSync(projects, { recursive: true });
     const jsonl = [
       uso("c1", `python ler.py ${eml}`),
-      res("c1", "Segue a minuta do contrato revisada."),
+      res("c1", CORPO),
       uso("c2", "python ler.py /c/Users/pedro/cases/caso-x/sumiu.msg", "PowerShell"),
-      res("c2", "x"),
+      res("c2", CORPO),
     ].join("\n");
     writeFileSync(join(projects, "s.jsonl"), jsonl);
     const antes = readdirSync(join(cases, "caso-x")).sort();
@@ -163,7 +166,7 @@ test("CLI: compara JSONL com o arquivo em disco, grava só o relatório e nenhum
     execFileSync(process.execPath, [SCRIPT, "--projects", join(raiz, "projects"), "--cases", cases, "--saida", saida], { encoding: "utf-8" });
     assert.deepEqual(readdirSync(join(cases, "caso-x")).sort(), antes);
     const md = readFileSync(saida, "utf-8");
-    assert.match(md, /\| 100\.0% \|/);
+    assert.match(md, /\| 100\.0% \| 100\.0% \|/);
     assert.match(md, /Arquivos comparados: 1; abaixo de 99%: 0; citados no JSONL mas ausentes no disco: 1; maior tempo de extração: \d+ ms/);
   } finally {
     rmSync(raiz, { recursive: true, force: true });
@@ -201,7 +204,7 @@ test("CLI: arquivo com linha vazia e não-JSON (CRLF) não derruba; ausente em g
     const cases = join(raiz, "cases");
     mkdirSync(join(cases, "caso-x"), { recursive: true });
     const eml = join(cases, "caso-x", "msg.eml");
-    writeFileSync(eml, "From: Ana <ana@x.com>\r\nTo: bob@x.com\r\nSubject: Contrato\r\nDate: Mon, 05 Oct 2026 10:00:00 +0000\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nSegue a minuta do contrato revisada.\r\n");
+    writeFileSync(eml, `From: Ana <ana@x.com>\r\nTo: bob@x.com\r\nSubject: Contrato\r\nDate: Mon, 05 Oct 2026 10:00:00 +0000\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${CORPO}\r\n`);
     const projects = join(raiz, "projects", "p1");
     mkdirSync(projects, { recursive: true });
     const jsonl = [
@@ -209,19 +212,108 @@ test("CLI: arquivo com linha vazia e não-JSON (CRLF) não derruba; ausente em g
       "lixo { nao json",
       uso("c1", `python ler.py ${eml}`),
       "",
-      res("c1", "Segue a minuta do contrato revisada."),
+      res("c1", CORPO),
       uso("c2", "python ler.py /c/Users/pedro/cases/caso-x/sumiu.msg", "PowerShell"),
-      res("c2", "x"),
+      res("c2", CORPO),
       uso("c3", "python ler.py C:\\Users\\pedro\\cases\\caso-x\\Sumiu.msg"),
-      res("c3", "x"),
+      res("c3", CORPO),
       uso("c4", "python ler.py ~/cases/caso-x/sumiu.msg"),
-      res("c4", "x"),
+      res("c4", CORPO),
     ].join("\r\n");
     writeFileSync(join(projects, "s.jsonl"), jsonl);
     const saida = join(raiz, "rel.md");
     execFileSync(process.execPath, [SCRIPT, "--projects", join(raiz, "projects"), "--cases", cases, "--saida", saida], { encoding: "utf-8" });
     const md = readFileSync(saida, "utf-8");
     assert.match(md, /Arquivos comparados: 1; abaixo de 99%: 0; citados no JSONL mas ausentes no disco: 1;/);
+  } finally {
+    rmSync(raiz, { recursive: true, force: true });
+  }
+});
+
+test("pararExtracoesManuais: basename vazio (cases/x/.docx) não é arquivo; guarda a descrição do tool_use", () => {
+  const pares = pararExtracoesManuais([
+    uso("v1", "ls C:\\Users\\pedro\\cases\\x\\.docx"),
+    res("v1", "x"),
+    uso("v2", "cat C:\\Users\\pedro\\cases\\x\\a.docx", "Bash", "Ler o contrato"),
+    res("v2", "y"),
+  ]);
+  assert.equal(pares.length, 1);
+  assert.equal(pares[0].arquivo, "C:\\Users\\pedro\\cases\\x\\a.docx");
+  assert.equal(pares[0].descricao, "Ler o contrato");
+});
+
+test("filtrarPares: descrição precisa incluir extração e não excluir; resultado não pode ser ruído ou curto", () => {
+  const par = (descricao, resultado, comando = "python x.py C:\\cases\\a.docx") => ({ arquivo: "a", comando, descricao, resultado });
+  const bom = CORPO;
+  const { mantidos, porDescricao, porResultado } = filtrarPares([
+    par("Extrair o texto do contrato", bom),
+    par("Imprimir conteúdo da planilha", bom),
+    par("Lendo o arquivo (leitura)", bom),
+    par("Gerar a minuta e salvar", bom), // exclui: gerar/salvar
+    par("Listar a pasta do caso", bom), // exclui: listar
+    par("Comparar duas versões e extrair o texto", bom), // inclui mas exclui compar
+    par("Abrir o arquivo", bom), // nada que inclua
+    par("", bom, "python -c \"print(open('C:\\cases\\a.docx'))\""), // sem descrição: vale o comando
+    par("Extrair o texto", "Traceback (most recent call last)\n" + bom),
+    par("Extrair o texto", "drwxr-xr-x 2 pedro " + bom),
+    par("Extrair o texto", "EISDIR: illegal operation " + bom),
+    par("Extrair o texto", "Errno 2 " + bom),
+    par("Extrair o texto", "error: " + bom),
+    par("Extrair o texto", "curto demais"),
+    par("Extrair o texto", "a".repeat(299)),
+    par("Extrair o texto", "a".repeat(300)),
+  ]);
+  // mantidos: 3 primeiros + comando sem descrição + o de 300 caracteres
+  assert.equal(mantidos.length, 5);
+  assert.equal(porDescricao, 4);
+  assert.equal(porResultado, 7);
+});
+
+test("recallSub: substring absorve mojibake e colagem; ignora tokens curtos; só confere o que o token exato não achou", () => {
+  // manual tem "recomposi" + "ção" quebrados e "pedro" (5) dentro de "pedrosa" no sidecar
+  const sidecar = "A recomposição do patrimônio, Pedrosa e Silva, contratação";
+  const manual = "recomposi ção patrim nio pedro contrata";
+  const sub = recallSub(manual, sidecar);
+  // "ção" (3) ignorado; recomposi, patrim, pedro, contrata são substrings (nio tem 3 -> ignorado)
+  assert.equal(sub.recall, 1);
+  assert.deepEqual(sub.faltantes, []);
+  assert.ok(recall(manual, sidecar).recall < 1);
+  const sub2 = recallSub("cláusula quarta inexistente", "cláusula quarta");
+  assert.equal(sub2.recall, 2 / 3);
+  assert.deepEqual(sub2.faltantes, ["inexistente"]);
+  assert.deepEqual(recallSub("a bc def", "qualquer"), { recall: 1, faltantes: [] });
+});
+
+test("recallSub: não casa através de fronteira de token", () => {
+  assert.equal(recallSub("abcd", "ab cd").recall, 0);
+});
+
+test("CLI: descarta por descrição e por resultado (contagem no resumo) e --detalhe grava manual e extrator", () => {
+  const raiz = mkdtempSync(join(tmpdir(), "bench-"));
+  try {
+    const cases = join(raiz, "cases");
+    mkdirSync(join(cases, "caso-x"), { recursive: true });
+    const eml = join(cases, "caso-x", "msg.eml");
+    writeFileSync(eml, `From: Ana <ana@x.com>\r\nTo: bob@x.com\r\nSubject: Contrato\r\nDate: Mon, 05 Oct 2026 10:00:00 +0000\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${CORPO}\r\n`);
+    const projects = join(raiz, "projects", "p1");
+    mkdirSync(projects, { recursive: true });
+    writeFileSync(join(projects, "s.jsonl"), [
+      uso("d1", `python ler.py ${eml}`, "Bash", "Gerar relatório e salvar"), // descartado por descrição
+      res("d1", CORPO),
+      uso("d2", `python ler.py ${eml}`), // descartado por resultado (curto)
+      res("d2", "curto"),
+      uso("d3", `python ler.py ${eml}`, "Bash", "Extrair o texto do e-mail"), // mantido
+      res("d3", CORPO),
+    ].join("\n"));
+    const saida = join(raiz, "rel.md");
+    execFileSync(process.execPath, [SCRIPT, "--projects", join(raiz, "projects"), "--cases", cases, "--saida", saida, "--detalhe", "CASO-X/msg"], { encoding: "utf-8" });
+    const md = readFileSync(saida, "utf-8");
+    assert.match(md, /Arquivos comparados: 1;.*descartados: 1 por descrição, 1 por resultado\./);
+    const detalhe = readFileSync(`${saida}.1.detalhe.md`, "utf-8");
+    assert.match(detalhe, /## Manual\n\nSegue a minuta/);
+    assert.match(detalhe, /## Extrator\n\n## Cabeçalhos/);
+    assert.ok(detalhe.indexOf("## Manual") < detalhe.indexOf("## Extrator"));
+    assert.equal(readdirSync(raiz).filter((n) => n.endsWith(".detalhe.md")).length, 1);
   } finally {
     rmSync(raiz, { recursive: true, force: true });
   }
