@@ -33,6 +33,17 @@ function textoDeValor(v, semCache) {
   }
 }
 
+// Valor bruto da célula. Para fórmula, `cell.value` passa por
+// FormulaValue._copyModel do exceljs, que descarta resultado falsy: um cache
+// 0 ou FALSO chegaria como "sem resultado" e viraria célula vazia com aviso
+// falso. `cell.result` lê o modelo cru e preserva 0 e false. Limite conhecido
+// e aceito: cache "" (`<v></v>`, ex.: IF(x;"";y)) ainda chega como undefined
+// também pelo `cell.result`, então essas fórmulas seguem gerando o aviso.
+function valorDaCelula(cell) {
+  if (cell.type === ExcelJS.ValueType.Formula) return { formula: cell.formula ?? "", result: cell.result };
+  return cell.value;
+}
+
 // Uma linha da aba em texto. `conteudo[c]` é true quando a célula tem texto OU
 // é fórmula sem cache: esta última não tem texto, mas é informação que o aviso
 // precisa reportar, então não pode ser aparada como se fosse vazia.
@@ -46,7 +57,7 @@ function lerLinha(ws, r, colunas) {
     let sem = false;
     // célula mesclada que não é a mestre: o exceljs devolve o valor da mestre; queremos vazio
     const escrava = cell.isMerged && cell.master.address !== cell.address;
-    const t = escrava ? "" : textoDeValor(cell.value, () => { sem = true; });
+    const t = escrava ? "" : textoDeValor(valorDaCelula(cell), () => { sem = true; });
     cels.push(t);
     conteudo.push(t !== "" || sem);
     if (sem) semCache.push(cell.address);

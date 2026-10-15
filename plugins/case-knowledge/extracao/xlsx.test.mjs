@@ -118,3 +118,18 @@ test("lerXlsx: erro de célula devolve o código; fórmula de data usa o resulta
   assert.deepEqual(d.abas[0].linhas, [["#REF!", "2026-10-15"]]);
   assert.deepEqual(d.avisos, []);
 });
+
+test("lerXlsx: fórmula com resultado em cache 0 ou FALSO não é 'sem cache'", async () => {
+  const buf = await planilha(async (wb) => {
+    const ws = wb.addWorksheet("Z");
+    ws.getCell("A1").value = 5;
+    ws.getCell("B1").value = { formula: "A1*0", result: 0 };
+    ws.getCell("C1").value = { formula: "1=2", result: false };
+    // a última linha só tem fórmulas de resultado falsy: tem de sobreviver ao aparo
+    ws.getCell("A3").value = { formula: "A1*0", result: 0 };
+    ws.getCell("B3").value = { formula: "1=2", result: false };
+  });
+  const d = await lerXlsx(buf);
+  assert.deepEqual(d.abas[0].linhas, [["5", "0", "FALSO"], ["", "", ""], ["0", "FALSO", ""]]);
+  assert.deepEqual(d.avisos, []);
+});
