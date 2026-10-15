@@ -127,7 +127,14 @@ test("extrairCaso: anexo de anexo (nível 2) é gravado mas não extraído", asy
   assert.deepEqual(sidecars, ["fwd.eml.anexos/interno.eml.md", "fwd.eml.md"]);
   assert.ok(existsSync(join(dir, "fwd.eml.anexos", "interno.eml.anexos", "Minuta.docx")));
   assert.ok(!existsSync(join(dir, "fwd.eml.anexos", "interno.eml.anexos", "Minuta.docx.md")));
-  assert.ok(r.adiados.some((a) => a.rel.endsWith("Minuta.docx") && /nível/.test(a.motivo)));
+  // R12: o nível 2 vira aviso no sidecar do e-mail interno, nunca adiado
+  assert.deepEqual(r.adiados, []);
+  const fm = lerFrontmatter(readFileSync(join(dir, "fwd.eml.anexos", "interno.eml.md"), "utf-8"));
+  assert.ok(fm.avisos.includes("anexo Minuta.docx de e-mail aninhado não extraído (só um nível)"));
+  assert.equal(r.extraidos.find((e) => e.rel === "fwd.eml.anexos/interno.eml").detalhe, "1 anexo, 0 extraídos");
+  // segunda rodada: o anexo de nível 2 no disco não é original, nada a reportar
+  const r2 = await extrairCaso(dir);
+  assert.deepEqual([r2.extraidos, r2.adiados, r2.erros, r2.naoTocados], [[], [], [], []]);
 });
 
 test("extrairCaso: orçamento esgotado adia o restante em ordem de path", async () => {
@@ -261,4 +268,58 @@ test("extrairCaso: .md do usuário com outra caixa conta como o sidecar (NTFS) e
   const r = await extrairCaso(dir);
   assert.deepEqual(r.extraidos, []);
   assert.deepEqual(r.naoTocados, [{ rel: "A.docx", sidecar: "A.docx.md" }]);
+});
+
+test("formatarResumo: erros viram a terceira lista; só erros já não é vazio", () => {
+  const base = { extraidos: [], adiados: [], pulados: 0, naoTocados: [], erros: [] };
+  assert.equal(
+    formatarResumo({ ...base, extraidos: [{ rel: "a.docx", sidecar: "a.docx.md", detalhe: "0 revisores, 0 comentários" }], erros: [{ rel: "x.eml", erro: "Maximum MIME nesting depth of 256 levels exceeded" }] }),
+    "Textos extraídos nesta pasta (leia o .md ao lado do original):\n- a.docx.md (0 revisores, 0 comentários)\nNão foi possível extrair (leia o original):\n- x.eml: Maximum MIME nesting depth of 256 levels exceeded",
+  );
+  assert.equal(formatarResumo({ ...base, erros: [{ rel: "t.docx", erro: "ilegível (EACCES)" }] }), "Não foi possível extrair (leia o original):\n- t.docx: ilegível (EACCES)");
+});
+
+test("extrairCaso: sidecar acima do teto do pool ganha aviso e é determinístico", async () => {
+  const dir = casoTemp();
+  writeFileSync(join(dir, "longo.docx"), construirDocx({ documentXml: documento(paragrafo("y".repeat(4000))) }));
+  const r = await extrairCaso(dir, { poolMaxSidecarBytes: 2048 });
+  assert.equal(r.extraidos.length, 1);
+  const md = readFileSync(join(dir, "longo.docx.md"), "utf-8");
+  assert.ok(lerFrontmatter(md).avisos.includes("sidecar acima de 2 MiB: não circula pelo pool de workdocs"));
+  // sem o override, o mesmo original fica abaixo do teto e não leva o aviso
+  const dir2 = casoTemp();
+  writeFileSync(join(dir2, "longo.docx"), construirDocx({ documentXml: documento(paragrafo("y".repeat(4000))) }));
+  await extrairCaso(dir2);
+  assert.deepEqual(lerFrontmatter(readFileSync(join(dir2, "longo.docx.md"), "utf-8")).avisos, []);
+  const r2 = await extrairCaso(dir, { poolMaxSidecarBytes: 2048 });
+  assert.equal(r2.pulados, 1);
+  assert.equal(readFileSync(join(dir, "longo.docx.md"), "utf-8"), md);
+});
+
+test("extrairCaso: falha ao gravar anexo não custa o sidecar do e-mail", async () => {
+  const dir = casoTemp();
+  writeFileSync(join(dir, "RE Proposta.eml"), EML_COM_DOCX);
+  writeFileSync(join(dir, "RE Proposta.eml.anexos"), "sou um arquivo, não uma pasta");
+  const r = await extrairCaso(dir);
+  assert.deepEqual(r.erros, []);
+  assert.deepEqual(r.extraidos.map((e) => e.sidecar), ["RE Proposta.eml.md"]);
+  assert.equal(r.extraidos[0].detalhe, "1 anexo, 0 extraídos");
+  const md = readFileSync(join(dir, "RE Proposta.eml.md"), "utf-8");
+  assert.ok(md.includes("- Minuta.docx (") && md.includes("-> não extraído"));
+  assert.ok(lerFrontmatter(md).avisos.some((a) => /^anexo Minuta\.docx não gravado \((ENOTDIR|EEXIST)\)$/.test(a)));
+});
+
+test("extrairCaso: detalhe do e-mail conta só anexos que vão ter sidecar", async () => {
+  const dir = casoTemp();
+  const eml = [
+    "From: a@a", "To: b@b", "Subject: Dois", 'Content-Type: multipart/mixed; boundary="B"', "",
+    "--B", "Content-Type: text/plain", "", "dois anexos",
+    "--B", 'Content-Type: application/octet-stream; name="Minuta.docx"', "Content-Transfer-Encoding: base64", 'Content-Disposition: attachment; filename="Minuta.docx"', "", DOCX.toString("base64"),
+    "--B", 'Content-Type: application/pdf; name="Laudo.pdf"', "Content-Transfer-Encoding: base64", 'Content-Disposition: attachment; filename="Laudo.pdf"', "", Buffer.from("%PDF-1.4").toString("base64"),
+    "--B--", "",
+  ].join("\r\n");
+  writeFileSync(join(dir, "dois.eml"), eml);
+  const r = await extrairCaso(dir);
+  assert.equal(r.extraidos.find((e) => e.rel === "dois.eml").detalhe, "2 anexos, 1 extraído");
+  assert.ok(existsSync(join(dir, "dois.eml.anexos", "Laudo.pdf")));
 });

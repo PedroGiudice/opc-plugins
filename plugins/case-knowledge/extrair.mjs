@@ -29,6 +29,9 @@ export const MAX_ORIGINAL_BYTES = 50 * 1024 * 1024;
 export const MAX_ANEXO_BYTES = 20 * 1024 * 1024;
 export const MAX_SAIDA_BYTES = Math.floor(1.5 * 1024 * 1024);
 export const MAX_NIVEL_ANEXO = 1;
+// Teto por arquivo do pool de workdocs (WORKDOC_MAX_FILE_BYTES em workdocs.mjs):
+// sidecar acima disso fica só nesta máquina, e quem lê precisa saber.
+export const POOL_MAX_SIDECAR_BYTES = 2 * 1024 * 1024;
 const SUFIXO_ANEXOS = ".anexos";
 const RESERVADOS_WIN = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
 // Nome de anexo pode ser o assunto inteiro do e-mail (.msg aninhado): sem teto,
@@ -122,7 +125,9 @@ function varrer(caseDir, { maxOriginalBytes }) {
         mds.set(rel.toLowerCase(), rel);
         continue;
       }
-      if (!ehOriginalElegivel(rel)) continue;
+      // Anexo além do nível permitido não é original: o sidecar do e-mail que o
+      // gravou já traz o aviso, e reportá-lo aqui repetiria o item a cada rodada.
+      if (!ehOriginalElegivel(rel) || nivelDeAnexo(rel) > MAX_NIVEL_ANEXO) continue;
       try {
         const tamanho = statSync(abs).size;
         if (tamanho > maxOriginalBytes) {
@@ -232,9 +237,10 @@ async function extrairUm(caseDir, rel, buf, limites) {
     const e = tipo === "eml" ? await lerEml(buf) : lerMsg(buf);
     avisos = e.avisos;
     const dirAnexos = `${rel}${SUFIXO_ANEXOS}`;
-    const nivel = nivelDeAnexo(rel) + 1;
+    const nivelDosAnexos = nivelDeAnexo(rel) + 1;
     const usados = new Set();
-    let gravados = 0;
+    // conta o que de fato vai ter (ou já tem) sidecar, não o que foi só gravado
+    let extraiveis = 0;
     for (const a of e.anexos) {
       // nome cru veio do remetente: o sidecar nunca mostra `../x`
       const nomeCru = a.nome;
@@ -258,17 +264,35 @@ async function extrairUm(caseDir, rel, buf, limites) {
         avisos.push(`anexo ${a.nome} não gravado: caminho passa por symlink`);
         continue;
       }
-      mkdirSync(join(caseDir, dirAnexos), { recursive: true });
-      // só grava se mudou: reescrever bytes iguais mudaria o mtime e acordaria o pool à toa
-      if (!existsSync(destino) || !readFileSync(destino).equals(a.conteudo)) escreverAtomico(destino, a.conteudo);
+      // falha ao gravar UM anexo (pasta .anexos que é arquivo, disco cheio,
+      // destino aberto no Windows) não pode custar o sidecar do e-mail
+      try {
+        mkdirSync(join(caseDir, dirAnexos), { recursive: true });
+        // só grava se mudou: reescrever bytes iguais mudaria o mtime e acordaria o pool à toa
+        if (!existsSync(destino) || !readFileSync(destino).equals(a.conteudo)) escreverAtomico(destino, a.conteudo);
+      } catch (err) {
+        avisos.push(`anexo ${a.nome} não gravado (${err.code || err.message})`);
+        continue;
+      }
       a.caminho = relAnexo;
-      gravados += 1;
-      if (ehOriginalElegivel(relAnexo)) anexosGravados.push({ rel: relAnexo, nivel, buf: a.conteudo });
+      if (!ehOriginalElegivel(relAnexo)) continue;
+      if (nivelDosAnexos > MAX_NIVEL_ANEXO) {
+        avisos.push(`anexo ${a.nome} de e-mail aninhado não extraído (só um nível)`);
+        continue;
+      }
+      extraiveis += 1;
+      anexosGravados.push({ rel: relAnexo, buf: a.conteudo });
     }
     corpo = renderEmail(e);
-    detalhe = `${plural(e.anexos.length, "anexo", "anexos")}, ${plural(gravados, "extraído", "extraídos")}`;
+    detalhe = `${plural(e.anexos.length, "anexo", "anexos")}, ${plural(extraiveis, "extraído", "extraídos")}`;
   }
-  const md = montarSidecar({ fonte, md5: md5hex(buf), bytes: buf.length, avisos, corpo });
+  let md = montarSidecar({ fonte, md5: md5hex(buf), bytes: buf.length, avisos, corpo });
+  if (Buffer.byteLength(md) > limites.poolMaxSidecarBytes) {
+    // o aviso tem que estar NO sidecar: monta de novo com ele (determinístico,
+    // o resultado só depende do original)
+    avisos.push("sidecar acima de 2 MiB: não circula pelo pool de workdocs");
+    md = montarSidecar({ fonte, md5: md5hex(buf), bytes: buf.length, avisos, corpo });
+  }
   const destino = destinoSeguro(caseDir, nomeSidecar(rel));
   if (!destino) throw new Error("caminho do sidecar passa por symlink");
   escreverAtomico(destino, md);
@@ -287,8 +311,9 @@ export async function extrairCaso(caseDir, opts = {}) {
     maxOriginalBytes = MAX_ORIGINAL_BYTES,
     maxAnexoBytes = MAX_ANEXO_BYTES,
     maxSaidaBytes = MAX_SAIDA_BYTES,
+    poolMaxSidecarBytes = POOL_MAX_SIDECAR_BYTES, // só o teste muda: o teto é do pool
   } = opts;
-  const limites = { maxAnexoBytes, maxSaidaBytes };
+  const limites = { maxAnexoBytes, maxSaidaBytes, poolMaxSidecarBytes };
   const resumo = resumoVazio();
   try {
     const inicio = agora();
@@ -302,15 +327,11 @@ export async function extrairCaso(caseDir, opts = {}) {
     // Fila em ordem de path: o e-mail vem antes da sua pasta `.anexos/`, então
     // um anexo que a varredura já viu (de rodada anterior) e que o e-mail acaba
     // de regravar é o mesmo item da fila, atualizado — nunca extraído duas vezes.
-    const fila = plano.extrair.map((e) => ({ rel: e.rel, nivel: nivelDeAnexo(e.rel), buf: null }));
+    const fila = plano.extrair.map((e) => ({ rel: e.rel, buf: null }));
     const naFila = new Map(fila.map((i) => [i.rel, i]));
     while (fila.length) {
       const item = fila.shift();
       naFila.delete(item.rel);
-      if (item.nivel > MAX_NIVEL_ANEXO) {
-        resumo.adiados.push({ rel: item.rel, motivo: `anexo de nível ${item.nivel}: só um nível de anexo é extraído` });
-        continue;
-      }
       if (agora() - inicio >= orcamentoMs) {
         resumo.adiados.push({ rel: item.rel, motivo: "orçamento de tempo esgotado" });
         continue;
@@ -373,9 +394,12 @@ export async function extrairTodos(casesBase, opts = {}) {
   return { porCaso };
 }
 
-/** Texto do hook: o que foi extraído e o que ficou para o sincronizador; "" quando nenhum dos dois. */
+/**
+ * Texto do hook: o que foi extraído, o que ficou para o sincronizador e o que
+ * falhou (para quem lê ir ao original); "" quando as três listas estão vazias.
+ */
 export function formatarResumo(r) {
-  if (!r.extraidos.length && !r.adiados.length) return "";
+  if (!r.extraidos.length && !r.adiados.length && !r.erros.length) return "";
   const linhas = [];
   if (r.extraidos.length) {
     linhas.push("Textos extraídos nesta pasta (leia o .md ao lado do original):");
@@ -384,6 +408,10 @@ export function formatarResumo(r) {
   if (r.adiados.length) {
     linhas.push("Ficou para o sincronizador (não extraído agora):");
     for (const a of r.adiados) linhas.push(`- ${a.rel}: ${a.motivo}`);
+  }
+  if (r.erros.length) {
+    linhas.push("Não foi possível extrair (leia o original):");
+    for (const e of r.erros) linhas.push(`- ${e.rel}: ${e.erro}`);
   }
   return linhas.join("\n");
 }
