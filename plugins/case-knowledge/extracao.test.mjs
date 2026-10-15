@@ -10,6 +10,8 @@ import {
   lerFrontmatter,
   montarSidecar,
   planejarExtracao,
+  acharPlaceholders,
+  renderDocx,
 } from "./extracao.mjs";
 
 test("tipoDeFormato: extensão sem caixa define o leitor", () => {
@@ -184,4 +186,76 @@ test("planejarExtracao: ignora original não elegível e ordena por path", () =>
     sidecars: {},
   });
   assert.deepEqual(p.extrair.map((e) => e.rel), ["a/b.xlsx", "z.docx"]);
+});
+
+// ---------- .docx: placeholders e render ----------
+
+test("acharPlaceholders: conta os quatro padrões e omite os ausentes", () => {
+  assert.deepEqual(acharPlaceholders("valor de R$ XXXX em [●] parcelas; ___ e ( ) e XXXXXX"), { "XXXX": 2, "[●]": 1, "___": 1, "( )": 1 });
+  assert.deepEqual(acharPlaceholders("sem nada (x) _ XX"), {});
+});
+
+test("renderDocx: radiografia resume marcas por autor, comentários, placeholders e numeração", () => {
+  const md = renderDocx({
+    blocos: [
+      { tipo: "paragrafo", numero: "1.", segmentos: [{ texto: "Pagar ", marca: null }, { texto: "XXXX", marca: "del", autor: "Ana" }, { texto: "100", marca: "ins", autor: "Ana" }, { texto: "", marca: null, comentarios: ["3"] }] },
+      { tipo: "paragrafo", numero: "1.1.", segmentos: [{ texto: "Em [●] dias", marca: null }, { texto: "", marca: null, nota: "1" }] },
+      { tipo: "paragrafo", numero: null, segmentos: [{ texto: "x", marca: "ins", autor: "Bruno" }] },
+      { tipo: "tabela", linhas: [["Item", "Valor"], ["a | b", "R$ 1"]] },
+    ],
+    comentarios: [{ id: "3", autor: "Ana", data: "2026-09-01T10:00:00Z", texto: "Conferir." }],
+    notas: [{ id: "1", texto: "Nota." }],
+    cabecalhoRodape: ["CONFIDENCIAL"],
+    avisos: [],
+    temNumeracao: true,
+    niveisNumeracao: 2,
+  });
+  assert.equal(
+    md,
+    [
+      "## Radiografia",
+      "",
+      "- Marcas de revisão: 2 inserções e 1 exclusão de 2 revisores (Ana: 1 inserção, 1 exclusão; Bruno: 1 inserção)",
+      "- Comentários: 1 (Ana: 1)",
+      "- Placeholders no texto aceito: [●] ×1",
+      "- Numeração automática: sim (2 níveis)",
+      "",
+      "## Texto",
+      "",
+      "1. Pagar {--XXXX--}[Ana]{++100++}[Ana][^c3]",
+      "",
+      "1.1. Em [●] dias[^n1]",
+      "",
+      "{++x++}[Bruno]",
+      "",
+      "| Item | Valor |",
+      "| --- | --- |",
+      "| a \\| b | R$ 1 |",
+      "",
+      "## Comentários",
+      "",
+      "[^c3]: **Ana** (2026-09-01T10:00:00Z): Conferir.",
+      "",
+      "## Notas",
+      "",
+      "[^n1]: Nota.",
+      "",
+      "## Cabeçalho e rodapé",
+      "",
+      "CONFIDENCIAL",
+      "",
+    ].join("\n"),
+  );
+});
+
+test("renderDocx: sem marcas, comentários, placeholders nem numeração, radiografia é uma linha e seções opcionais somem", () => {
+  const md = renderDocx({ blocos: [{ tipo: "paragrafo", numero: null, segmentos: [{ texto: "Só texto.", marca: null }] }], comentarios: [], notas: [], cabecalhoRodape: [], avisos: [], temNumeracao: false, niveisNumeracao: 0 });
+  assert.equal(md, "## Radiografia\n\n- Sem marcas de revisão, sem comentários, sem placeholders, sem numeração automática.\n\n## Texto\n\nSó texto.\n");
+});
+
+test("renderDocx: placeholders dentro de exclusão não contam (texto aceito); quebra de linha interna vira linha nova", () => {
+  const md = renderDocx({ blocos: [{ tipo: "paragrafo", numero: null, segmentos: [{ texto: "XXXX", marca: "del", autor: "A" }, { texto: "a\nb", marca: null }] }], comentarios: [], notas: [], cabecalhoRodape: [], avisos: [], temNumeracao: false, niveisNumeracao: 0 });
+  assert.ok(md.includes("- Marcas de revisão: 0 inserções e 1 exclusão de 1 revisor (A: 1 exclusão)"));
+  assert.ok(!md.includes("Placeholders"));
+  assert.ok(md.includes("{--XXXX--}[A]a\nb\n"));
 });

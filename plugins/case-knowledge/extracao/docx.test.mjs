@@ -175,3 +175,129 @@ test("lerDocx: numIds do mesmo abstractNum sem startOverride continuam a lista",
   const d = lerDocx(construirDocx({ documentXml: xml, numberingXml: num }));
   assert.deepEqual(d.blocos.map((b) => b.numero), ["1.", "2.", "3.", "4."]);
 });
+
+// ---------- marcas de revisão, comentários, notas, cabeçalho e avisos ----------
+
+const RUN = (t) => `<w:r><w:t xml:space="preserve">${t}</w:t></w:r>`;
+const DEL = (t, autor) => `<w:del w:id="9" w:author="${autor}" w:date="2026-09-01T10:00:00Z"><w:r><w:delText xml:space="preserve">${t}</w:delText></w:r></w:del>`;
+const INS = (inner, autor) => `<w:ins w:id="8" w:author="${autor}" w:date="2026-09-01T10:00:00Z">${inner}</w:ins>`;
+
+test("lerDocx: inserção e exclusão viram segmentos com marca e autor; texto normal sem marca", () => {
+  const xml = documento(`<w:p>${RUN("O CONTRATANTE ")}${DEL("pagará", "Ana")}${INS(RUN("deverá pagar"), "Ana")}${RUN(" em 30 dias.")}</w:p>`);
+  const d = lerDocx(construirDocx({ documentXml: xml }));
+  assert.deepEqual(d.blocos[0].segmentos, [
+    { texto: "O CONTRATANTE ", marca: null },
+    { texto: "pagará", marca: "del", autor: "Ana" },
+    { texto: "deverá pagar", marca: "ins", autor: "Ana" },
+    { texto: " em 30 dias.", marca: null },
+  ]);
+});
+
+test("lerDocx: inserção de um revisor excluída por outro (ins dentro de del) sai como del do segundo", () => {
+  // Ana inseriu "X"; Bruno excluiu a inserção de Ana: w:del(Bruno) > w:ins(Ana) > w:r > w:delText
+  const xml = documento(`<w:p>${RUN("a ")}<w:del w:id="1" w:author="Bruno" w:date="2026-09-02T10:00:00Z"><w:ins w:id="2" w:author="Ana" w:date="2026-09-01T10:00:00Z"><w:r><w:delText>X</w:delText></w:r></w:ins></w:del>${RUN(" b")}</w:p>`);
+  const d = lerDocx(construirDocx({ documentXml: xml }));
+  assert.deepEqual(d.blocos[0].segmentos[1], { texto: "X", marca: "del", autor: "Bruno" });
+});
+
+test("lerDocx: moveFrom conta como del e moveTo como ins", () => {
+  const xml = documento(`<w:p><w:moveFrom w:id="1" w:author="Ana" w:date="2026-09-01T10:00:00Z"><w:r><w:delText>fora</w:delText></w:r></w:moveFrom><w:moveTo w:id="2" w:author="Ana" w:date="2026-09-01T10:00:00Z">${RUN("dentro")}</w:moveTo></w:p>`);
+  const d = lerDocx(construirDocx({ documentXml: xml }));
+  assert.deepEqual(d.blocos[0].segmentos.map((s) => [s.texto, s.marca]), [["fora", "del"], ["dentro", "ins"]]);
+});
+
+test("lerDocx: comentário ancorado no fim do range, com autor, data e texto", () => {
+  const comments = `<?xml version="1.0"?><w:comments ${W}><w:comment w:id="3" w:author="Ana" w:date="2026-09-01T10:00:00Z"><w:p><w:r><w:t>Conferir </w:t></w:r><w:r><w:t>prazo.</w:t></w:r></w:p><w:p><w:r><w:t>Segunda linha.</w:t></w:r></w:p></w:comment></w:comments>`;
+  const xml = documento(`<w:p>${RUN("Prazo de ")}<w:commentRangeStart w:id="3"/>${RUN("30 dias")}<w:commentRangeEnd w:id="3"/><w:r><w:commentReference w:id="3"/></w:r>${RUN(".")}</w:p>`);
+  const d = lerDocx(construirDocx({ documentXml: xml, commentsXml: comments }));
+  assert.deepEqual(d.blocos[0].segmentos, [
+    { texto: "Prazo de ", marca: null },
+    { texto: "30 dias", marca: null },
+    { texto: "", marca: null, comentarios: ["3"] },
+    { texto: ".", marca: null },
+  ]);
+  assert.deepEqual(d.comentarios, [{ id: "3", autor: "Ana", data: "2026-09-01T10:00:00Z", texto: "Conferir prazo.\nSegunda linha." }]);
+});
+
+test("lerDocx: nota de rodapé referenciada vira segmento-nota e entra em notas (separador/continuação ignorados)", () => {
+  const footnotes = `<?xml version="1.0"?><w:footnotes ${W}><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:id="1"><w:p><w:r><w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> Texto da nota.</w:t></w:r></w:p></w:footnote></w:footnotes>`;
+  const xml = documento(`<w:p>${RUN("Cláusula")}<w:r><w:footnoteReference w:id="1"/></w:r>${RUN(" segue.")}</w:p>`);
+  const d = lerDocx(construirDocx({ documentXml: xml, footnotesXml: footnotes }));
+  assert.deepEqual(d.blocos[0].segmentos[1], { texto: "", marca: null, nota: "1" });
+  assert.deepEqual(d.notas, [{ id: "1", texto: "Texto da nota." }]);
+});
+
+test("lerDocx: cabeçalho e rodapé com texto entram em cabecalhoRodape; vazios não", () => {
+  const header = `<?xml version="1.0"?><w:hdr ${W}><w:p><w:r><w:t>CONFIDENCIAL</w:t></w:r></w:p></w:hdr>`;
+  const footer = `<?xml version="1.0"?><w:ftr ${W}><w:p/></w:ftr>`;
+  const d = lerDocx(construirDocx({ documentXml: documento(paragrafo("x")), headerXml: header, footerXml: footer }));
+  assert.deepEqual(d.cabecalhoRodape, ["CONFIDENCIAL"]);
+});
+
+test("lerDocx: imagem, objeto, caixa de texto e equação viram avisos com o parágrafo; texto segue", () => {
+  const xml = documento(
+    `<w:p>${RUN("Assinatura:")}<w:r><w:drawing><wp:inline xmlns:wp="x"/></w:drawing></w:r></w:p>` +
+      `<w:p>${RUN("meio")}</w:p>` +
+      `<w:p><w:r><w:pict><v:shape xmlns:v="y"><v:textbox><w:txbxContent><w:p>${RUN("dentro da caixa")}</w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r>${RUN("fim")}</w:p>` +
+      `<w:p><m:oMathPara xmlns:m="z"><m:oMath/></m:oMathPara>${RUN("eq")}</w:p>` +
+      `<w:p><w:r><w:object/></w:r></w:p>`,
+  );
+  const d = lerDocx(construirDocx({ documentXml: xml }));
+  assert.deepEqual(d.blocos.map((b) => b.segmentos.map((s) => s.texto).join("")), ["Assinatura:", "meio", "fim", "eq"]);
+  assert.deepEqual(d.avisos, [
+    "1 imagem não renderizada (parágrafo 1)",
+    "1 caixa de texto ignorada (parágrafo 3)",
+    "1 equação não renderizada (parágrafo 4)",
+    "1 objeto embutido não renderizado (parágrafo 5)",
+  ]);
+});
+
+test("lerDocx: duas imagens em parágrafos distintos agregam num aviso só", () => {
+  const xml = documento(`<w:p><w:r><w:drawing/></w:r>${RUN("a")}</w:p><w:p>${RUN("b")}</w:p><w:p><w:r><w:drawing/></w:r>${RUN("c")}</w:p>`);
+  const d = lerDocx(construirDocx({ documentXml: xml }));
+  assert.deepEqual(d.avisos, ["2 imagens não renderizadas (parágrafos 1, 3)"]);
+});
+
+test("lerDocx: mc:AlternateContent lê só o Choice; caixa de texto com Fallback VML gera um aviso e nenhum texto", () => {
+  const caixa = `<w:txbxContent><w:p>${RUN("CAIXA")}</w:p></w:txbxContent>`;
+  const xml = documento(
+    `<w:p>${RUN("antes ")}<w:r><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">` +
+      `<mc:Choice Requires="wps"><w:drawing><wps:wsp xmlns:wps="w"><wps:txbx>${caixa}</wps:txbx></wps:wsp></w:drawing></mc:Choice>` +
+      `<mc:Fallback><w:pict><v:shape xmlns:v="y"><v:textbox>${caixa}</v:textbox></v:shape></w:pict></mc:Fallback>` +
+      `</mc:AlternateContent></w:r>${RUN("depois")}</w:p>`,
+  );
+  const d = lerDocx(construirDocx({ documentXml: xml }));
+  assert.deepEqual(d.blocos.map(textoDe), ["antes depois"]);
+  assert.deepEqual(d.avisos, ["1 caixa de texto ignorada (parágrafo 1)"]);
+});
+
+test("lerDocx: comentário só com commentReference (sem range) ganha âncora e entra em comentarios", () => {
+  const comments = `<?xml version="1.0"?><w:comments ${W}><w:comment w:id="5" w:author="Bruno" w:date="2026-09-03T10:00:00Z"><w:p>${RUN("Ver.")}</w:p></w:comment></w:comments>`;
+  const xml = documento(`<w:p>${RUN("Multa")}<w:r><w:commentReference w:id="5"/></w:r></w:p>`);
+  const d = lerDocx(construirDocx({ documentXml: xml, commentsXml: comments }));
+  assert.deepEqual(d.blocos[0].segmentos, [{ texto: "Multa", marca: null }, { texto: "", marca: null, comentarios: ["5"] }]);
+  assert.deepEqual(d.comentarios.map((c) => c.id), ["5"]);
+});
+
+test("lerDocx: marca de revisão e âncora em célula de tabela saem na notação do sidecar", () => {
+  const comments = `<?xml version="1.0"?><w:comments ${W}><w:comment w:id="1" w:author="Ana" w:date="d"><w:p>${RUN("ok?")}</w:p></w:comment></w:comments>`;
+  const xml = documento(
+    `<w:tbl><w:tr><w:tc><w:p>${RUN("R$ ")}${DEL("100", "Ana")}${INS(RUN("200"), "Bruno")}<w:commentRangeEnd w:id="1"/></w:p></w:tc></w:tr></w:tbl>`,
+  );
+  const d = lerDocx(construirDocx({ documentXml: xml, commentsXml: comments }));
+  assert.deepEqual(d.blocos[0].linhas, [["R$ {--100--}[Ana]{++200++}[Bruno][^c1]"]]);
+  assert.deepEqual(d.comentarios.map((c) => c.id), ["1"]);
+});
+
+test("lerDocx: hífen inseparável vira hífen; nota de fim vira aviso", () => {
+  const xml = documento(`<w:p><w:r><w:t>12.345.678/0001</w:t><w:noBreakHyphen/><w:t>90</w:t></w:r><w:r><w:endnoteReference w:id="2"/></w:r></w:p>`);
+  const d = lerDocx(construirDocx({ documentXml: xml }));
+  assert.deepEqual(d.blocos.map(textoDe), ["12.345.678/0001-90"]);
+  assert.deepEqual(d.avisos, ["1 nota de fim não renderizada (parágrafo 1)"]);
+});
+
+test("lerDocx: cabeçalho em tabela entra com as células; texto excluído no cabeçalho fica de fora", () => {
+  const header = `<?xml version="1.0"?><w:hdr ${W}>${tabela([["LOGO", "Contrato nº 7"]])}<w:p>${RUN("Minuta ")}${DEL("v1", "Ana")}${INS(RUN("v2"), "Ana")}</w:p></w:hdr>`;
+  const d = lerDocx(construirDocx({ documentXml: documento(paragrafo("x")), headerXml: header }));
+  assert.deepEqual(d.cabecalhoRodape, ["LOGO | Contrato nº 7\nMinuta v2"]);
+});

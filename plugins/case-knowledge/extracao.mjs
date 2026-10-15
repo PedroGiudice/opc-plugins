@@ -211,3 +211,149 @@ export function planejarExtracao({ originais = {}, sidecars = {} } = {}) {
   }
   return { extrair, pular, naoTocar };
 }
+
+// ---------- .docx ----------
+
+// Marcadores de lacuna usuais em minuta: o rótulo é o que a radiografia mostra.
+const PLACEHOLDERS = [
+  ["XXXX", /X{4,}/g],
+  ["[●]", /\[●\]/g],
+  ["___", /_{3,}/g],
+  ["( )", /\(\s+\)/g],
+];
+
+/** Conta os placeholders de minuta no texto; só entram as chaves com contagem > 0. */
+export function acharPlaceholders(texto) {
+  const out = {};
+  for (const [rotulo, re] of PLACEHOLDERS) {
+    const n = (texto.match(re) ?? []).length;
+    if (n > 0) out[rotulo] = n;
+  }
+  return out;
+}
+
+function plural(n, um, varios) {
+  return `${n} ${n === 1 ? um : varios}`;
+}
+
+function escaparCelula(s) {
+  return s.replace(/\|/g, "\\|").replace(/\n/g, " ");
+}
+
+/**
+ * Segmentos do leitor em Markdown: CriticMarkup com o autor entre colchetes;
+ * âncoras como referência de nota. Exportado porque o leitor de .docx usa a
+ * mesma notação no texto de célula de tabela (que no contrato é string).
+ */
+export function renderSegmentos(segs) {
+  let s = "";
+  for (const seg of segs) {
+    if (seg.comentarios) {
+      s += seg.comentarios.map((id) => `[^c${id}]`).join("");
+      continue;
+    }
+    if (seg.nota !== undefined) {
+      s += `[^n${seg.nota}]`;
+      continue;
+    }
+    if (seg.marca === "ins") s += `{++${seg.texto}++}[${seg.autor}]`;
+    else if (seg.marca === "del") s += `{--${seg.texto}--}[${seg.autor}]`;
+    else s += seg.texto;
+  }
+  return s;
+}
+
+/**
+ * Corpo do sidecar de um .docx a partir da estrutura de lerDocx. A
+ * radiografia vem primeiro porque é o que decide se o advogado pode confiar
+ * no texto: marcas de revisão e comentários pendentes mudam o que o contrato
+ * diz. Placeholders são contados no texto ACEITO (exclusões fora), que é o
+ * que ficará no contrato. Autores em ordem alfabética com colação pt-BR fixa
+ * (não a do sistema), para a saída não depender da máquina nem da ordem de
+ * aparição.
+ */
+export function renderDocx(d) {
+  // --- radiografia ---
+  const porAutor = new Map(); // autor -> {ins, del}
+  let ins = 0;
+  let del = 0;
+  let textoAceito = "";
+  for (const b of d.blocos) {
+    if (b.tipo !== "paragrafo") continue;
+    for (const s of b.segmentos) {
+      if (s.marca) {
+        const a = porAutor.get(s.autor) ?? { ins: 0, del: 0 };
+        a[s.marca] += 1;
+        porAutor.set(s.autor, a);
+        if (s.marca === "ins") {
+          ins += 1;
+          textoAceito += s.texto;
+        } else del += 1;
+      } else textoAceito += s.texto;
+    }
+    textoAceito += "\n";
+  }
+  const porAutorOrdenado = Array.from(porAutor.entries()).sort(([a], [b]) => a.localeCompare(b, "pt-BR"));
+  const porAutorCom = new Map();
+  for (const c of d.comentarios) porAutorCom.set(c.autor, (porAutorCom.get(c.autor) ?? 0) + 1);
+  const placeholders = acharPlaceholders(textoAceito);
+  const linhas = ["## Radiografia", ""];
+  const temMarcas = ins + del > 0;
+  const temCom = d.comentarios.length > 0;
+  const temPh = Object.keys(placeholders).length > 0;
+  if (!temMarcas && !temCom && !temPh && !d.temNumeracao) {
+    linhas.push("- Sem marcas de revisão, sem comentários, sem placeholders, sem numeração automática.");
+  } else {
+    if (temMarcas) {
+      const detalhe = porAutorOrdenado
+        .map(([autor, a]) => {
+          const partes = [a.ins ? plural(a.ins, "inserção", "inserções") : null, a.del ? plural(a.del, "exclusão", "exclusões") : null];
+          return `${autor}: ${partes.filter(Boolean).join(", ")}`;
+        })
+        .join("; ");
+      linhas.push(`- Marcas de revisão: ${plural(ins, "inserção", "inserções")} e ${plural(del, "exclusão", "exclusões")} de ${plural(porAutor.size, "revisor", "revisores")} (${detalhe})`);
+    } else linhas.push("- Marcas de revisão: nenhuma");
+    if (temCom) {
+      const det = Array.from(porAutorCom.entries())
+        .sort(([a], [b]) => a.localeCompare(b, "pt-BR"))
+        .map(([a, n]) => `${a}: ${n}`)
+        .join("; ");
+      linhas.push(`- Comentários: ${d.comentarios.length} (${det})`);
+    } else linhas.push("- Comentários: nenhum");
+    if (temPh) linhas.push(`- Placeholders no texto aceito: ${Object.entries(placeholders).map(([r, n]) => `${r} ×${n}`).join(", ")}`);
+    linhas.push(`- Numeração automática: ${d.temNumeracao ? `sim (${plural(d.niveisNumeracao, "nível", "níveis")})` : "não"}`);
+  }
+  // --- texto ---
+  linhas.push("", "## Texto", "");
+  for (const b of d.blocos) {
+    if (b.tipo === "tabela") {
+      if (b.linhas.length === 0) continue;
+      // linha mais curta completada com células vazias: tabela Markdown exige
+      // o mesmo número de colunas em toda linha
+      const largura = Math.max(...b.linhas.map((l) => l.length));
+      const norm = b.linhas.map((l) => [...l, ...Array(largura - l.length).fill("")]);
+      linhas.push(`| ${norm[0].map(escaparCelula).join(" | ")} |`);
+      linhas.push(`| ${norm[0].map(() => "---").join(" | ")} |`);
+      for (const l of norm.slice(1)) linhas.push(`| ${l.map(escaparCelula).join(" | ")} |`);
+      linhas.push("");
+      continue;
+    }
+    const corpo = renderSegmentos(b.segmentos);
+    linhas.push(b.numero ? `${b.numero} ${corpo}` : corpo, "");
+  }
+  if (d.comentarios.length) {
+    linhas.push("## Comentários", "");
+    for (const c of d.comentarios) linhas.push(`[^c${c.id}]: **${c.autor}** (${c.data}): ${c.texto.replace(/\n/g, " ")}`);
+    linhas.push("");
+  }
+  if (d.notas.length) {
+    linhas.push("## Notas", "");
+    for (const n of d.notas) linhas.push(`[^n${n.id}]: ${n.texto.replace(/\n/g, " ")}`);
+    linhas.push("");
+  }
+  if (d.cabecalhoRodape.length) {
+    linhas.push("## Cabeçalho e rodapé", "");
+    for (const t of d.cabecalhoRodape) linhas.push(t, "");
+  }
+  return linhas.join("\n");
+}

@@ -5,10 +5,12 @@
  * revisão por autor e comentários. mammoth ignora comentários e não
  * documenta w:ins/w:del; pandoc e python-docx perdem numeração.
  *
- * Esta é só a leitura: a renderização em Markdown fica em outro módulo.
+ * Esta é só a leitura: a renderização em Markdown fica em extracao.mjs (daqui
+ * só se usa a notação de segmentos, no texto de célula de tabela).
  */
 import { unzipSync, strFromU8 } from "fflate";
 import { DOMParser, onErrorStopParsing } from "@xmldom/xmldom";
+import { renderSegmentos } from "../extracao.mjs";
 
 const W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 
@@ -208,37 +210,143 @@ function criarNumerador(numeracao) {
 // ---------- texto ----------
 
 /**
- * Percorre um parágrafo e devolve segmentos. Nesta versão toda marca é null;
- * o `switch` por localName é o ponto onde entram revisões, comentários e
- * notas. Elemento sem caso próprio é atravessado (hyperlink, sdt, fldSimple,
- * smartTag...): o texto dele é texto do parágrafo.
+ * Percorre um parágrafo e devolve segmentos {texto, marca, autor?}. A marca
+ * vem do invólucro de revisão (w:ins/w:moveTo = "ins", w:del/w:moveFrom =
+ * "del"). Quando há del contendo ins, a marca MAIS EXTERNA vence: o revisor
+ * que apagou a inserção alheia é quem decide o que ficará aceito.
+ *
+ * Âncoras viram segmentos de texto vazio: {comentarios:[ids]} no fim do range
+ * do comentário e {nota:id} no ponto da nota de rodapé. Elemento que não é
+ * texto (imagem, caixa de texto, equação, objeto) não é lido: vai para
+ * ctx.registrar e vira aviso. Elemento sem caso próprio é atravessado
+ * (hyperlink, sdt, fldSimple, smartTag, r...): o texto dele é do parágrafo.
  */
 function segmentosDoParagrafo(p, ctx) {
   const segs = [];
-  let atual = { texto: "", marca: null };
-  const fecha = () => { if (atual.texto) segs.push(atual); atual = { texto: "", marca: null }; };
+  let atual = null;
+  const abrir = (estado) => {
+    atual = { texto: "", marca: estado.marca };
+    if (estado.marca) atual.autor = estado.autor;
+  };
+  const fechar = () => {
+    if (atual && atual.texto) segs.push(atual);
+    atual = null;
+  };
+  const garantir = (estado) => {
+    if (!atual || atual.marca !== estado.marca || (estado.marca && atual.autor !== estado.autor)) {
+      fechar();
+      abrir(estado);
+    }
+  };
+  const ancora = (campo, valor) => {
+    fechar();
+    const s = { texto: "", marca: null };
+    s[campo] = valor;
+    segs.push(s);
+  };
+  const ancorarComentario = (id) => {
+    // vários ranges que terminam no mesmo ponto dividem a mesma âncora
+    const ultimo = segs[segs.length - 1];
+    if (atual === null && ultimo && ultimo.comentarios) ultimo.comentarios.push(id);
+    else ancora("comentarios", [id]);
+    ctx.comentariosReferenciados.add(id);
+  };
+  const marcar = (estado, marca, no) => (estado.marca ? estado : { marca, autor: attr(no, "author") ?? "" });
   const visitar = (no, estado) => {
     for (const f of filhos(no)) {
       switch (f.localName) {
         case "t":
+        case "delText":
+          garantir(estado);
           atual.texto += f.textContent ?? "";
           break;
         case "tab":
+          garantir(estado);
           atual.texto += "\t";
           break;
         case "br":
         case "cr":
+          garantir(estado);
           atual.texto += "\n";
+          break;
+        case "noBreakHyphen":
+          // hífen inseparável (comum em CNPJ, CPF e número de processo): sem
+          // este caso o hífen sumia do texto
+          garantir(estado);
+          atual.texto += "-";
+          break;
+        case "ins":
+        case "moveTo":
+          visitar(f, marcar(estado, "ins", f));
+          break;
+        case "del":
+        case "moveFrom":
+          visitar(f, marcar(estado, "del", f));
+          break;
+        case "commentRangeStart":
+          // fecha o segmento: o trecho comentado fica num segmento próprio,
+          // e a âncora no fim do range aponta exatamente para ele
+          fechar();
+          break;
+        case "commentRangeEnd":
+          ancorarComentario(attr(f, "id"));
+          break;
+        case "commentReference": {
+          // Comentário sem range (só a referência) é válido no OOXML; sem
+          // esta âncora ele sumiria calado. Com range, a âncora já foi posta
+          // no commentRangeEnd e a referência é ignorada.
+          const id = attr(f, "id");
+          if (!ctx.comentariosReferenciados.has(id)) ancorarComentario(id);
+          break;
+        }
+        case "footnoteReference": {
+          const id = attr(f, "id");
+          ancora("nota", id);
+          ctx.notasReferenciadas.add(id);
+          break;
+        }
+        case "endnoteReference":
+          // nota de fim não é renderizada (o leitor só cobre footnotes.xml): aviso
+          ctx.registrar("notaFim", ctx.paragrafoAtual);
+          break;
+        case "AlternateContent": {
+          // mc:AlternateContent traz a mesma coisa duas vezes (Choice moderno e
+          // Fallback VML). Atravessar os dois duplicava o conteúdo ("CAIXACAIXA");
+          // só o primeiro Choice é lido, como faz um consumidor que o entende.
+          const escolha = primeiro(f, "Choice");
+          if (escolha) visitar(escolha, estado);
+          break;
+        }
+        case "drawing":
+        case "pict":
+          // com txbxContent é caixa de texto (o texto dela NÃO é lido: a
+          // posição dela no documento não é a do parágrafo); sem, é imagem ou forma
+          if (f.getElementsByTagNameNS(W_NS, "txbxContent").length > 0) ctx.registrar("caixa", ctx.paragrafoAtual);
+          else ctx.registrar("imagem", ctx.paragrafoAtual);
+          break;
+        case "object":
+          ctx.registrar("objeto", ctx.paragrafoAtual);
+          break;
+        case "oMathPara":
+        case "oMath":
+          // não desce: o oMath de dentro de um oMathPara não conta de novo
+          ctx.registrar("equacao", ctx.paragrafoAtual);
           break;
         case "instrText":
         case "delInstrText":
         case "rPr":
         case "pPr":
+        case "footnoteRef":
+        case "separator":
+        case "continuationSeparator":
           // instrText é o código do campo (PAGE, REF...); o resultado visível
-          // vem depois do fldChar "separate", em w:t comum.
+          // vem depois do fldChar "separate", em w:t comum. rPr/pPr guardam
+          // propriedades (inclusive marcas de revisão da marca de parágrafo,
+          // que não são texto).
           break;
         case "tbl": {
           // tabela dentro de parágrafo (só aparece em XML atípico): achatada no texto
+          garantir(estado);
           const t = lerTabela(f, ctx);
           atual.texto += t.linhas.map((l) => l.join(" | ")).join(" / ");
           break;
@@ -248,20 +356,23 @@ function segmentosDoParagrafo(p, ctx) {
       }
     }
   };
-  visitar(p, {});
-  fecha();
+  visitar(p, { marca: null, autor: null });
+  fechar();
   return segs;
 }
 
 /**
  * Texto de uma célula: parágrafos unidos por " / " e tabela aninhada achatada
  * ("a | b / c | d"), porque uma célula de tabela Markdown não comporta bloco.
+ * Os segmentos saem na notação do sidecar (renderSegmentos): sem isso, texto
+ * excluído numa célula pareceria aceito e a âncora de comentário ou nota se
+ * perderia.
  */
 function textoDaCelula(tc, ctx) {
   const partes = [];
   for (const f of filhosDesembrulhados(tc)) {
     if (f.localName === "p") {
-      const t = segmentosDoParagrafo(f, ctx).map((s) => s.texto).join("");
+      const t = renderSegmentos(segmentosDoParagrafo(f, ctx));
       if (t) partes.push(t);
     } else if (f.localName === "tbl") {
       const t = lerTabela(f, ctx);
@@ -311,6 +422,106 @@ function lerCorpo(body, ctx, numerador, estilos) {
   return blocos;
 }
 
+// ---------- avisos ----------
+
+// Ordem fixa dos avisos e as formas singular/plural de cada tipo.
+const TIPOS_AVISO = [
+  ["imagem", "imagem não renderizada", "imagens não renderizadas"],
+  ["caixa", "caixa de texto ignorada", "caixas de texto ignoradas"],
+  ["equacao", "equação não renderizada", "equações não renderizadas"],
+  ["objeto", "objeto embutido não renderizado", "objetos embutidos não renderizados"],
+  ["notaFim", "nota de fim não renderizada", "notas de fim não renderizadas"],
+];
+
+/** {tipo: [parágrafo por ocorrência]} -> avisos, um por tipo, na ordem fixa. */
+function avisosDosRegistros(registros) {
+  const saida = [];
+  for (const [tipo, um, varios] of TIPOS_AVISO) {
+    const ocorrencias = registros[tipo];
+    if (!ocorrencias || ocorrencias.length === 0) continue;
+    const n = ocorrencias.length;
+    const paragrafos = [...new Set(ocorrencias)];
+    const onde = `${paragrafos.length === 1 ? "parágrafo" : "parágrafos"} ${paragrafos.join(", ")}`;
+    saida.push(`${n} ${n === 1 ? um : varios} (${onde})`);
+  }
+  return saida;
+}
+
+// ---------- partes auxiliares: comentários, notas, cabeçalho e rodapé ----------
+
+/**
+ * ctx de leitura para texto fora do corpo (comentário, nota, cabeçalho): as
+ * âncoras e os registros dele são descartados, porque o que vale é o texto;
+ * aviso de imagem ou caixa nessas partes não é emitido nesta versão.
+ */
+function ctxDescartavel() {
+  return { paragrafoAtual: 0, registrar() {}, comentariosReferenciados: new Set(), notasReferenciadas: new Set() };
+}
+
+/**
+ * Texto corrido de um contêiner (comentário, nota, cabeçalho): parágrafos
+ * unidos por "\n", tabela uma linha por "\n" com células por " | " (cabeçalho
+ * de contrato costuma ser tabela de logo + texto; ler só w:p o perderia).
+ * Texto excluído por marca de revisão fica de fora: aqui não há notação de
+ * marca, e o que se quer é o texto que ficará aceito.
+ */
+function textoDoConteudo(no) {
+  const ctx = ctxDescartavel();
+  const partes = [];
+  for (const f of filhosDesembrulhados(no)) {
+    if (f.localName === "p") {
+      partes.push(segmentosDoParagrafo(f, ctx).filter((s) => s.marca !== "del").map((s) => s.texto).join(""));
+    } else if (f.localName === "tbl") {
+      for (const l of lerTabela(f, ctx).linhas) partes.push(l.filter(Boolean).join(" | "));
+    }
+  }
+  return partes.join("\n").trim();
+}
+
+/** comments.xml na ordem do arquivo, só os comentários com âncora no corpo. */
+function lerComentarios(doc, referenciados) {
+  if (!doc) return [];
+  const saida = [];
+  for (const c of Array.from(doc.getElementsByTagNameNS(W_NS, "comment"))) {
+    const id = attr(c, "id");
+    if (!referenciados.has(id)) continue;
+    saida.push({ id, autor: attr(c, "author") ?? "", data: attr(c, "date") ?? "", texto: textoDoConteudo(c) });
+  }
+  return saida;
+}
+
+/** footnotes.xml na ordem do arquivo, sem separadores e só as referenciadas no corpo. */
+function lerNotas(doc, referenciadas) {
+  if (!doc) return [];
+  const saida = [];
+  for (const n of Array.from(doc.getElementsByTagNameNS(W_NS, "footnote"))) {
+    const tipo = attr(n, "type");
+    if (tipo === "separator" || tipo === "continuationSeparator" || tipo === "continuationNotice") continue;
+    const id = attr(n, "id");
+    if (!referenciadas.has(id)) continue;
+    saida.push({ id, texto: textoDoConteudo(n) });
+  }
+  return saida;
+}
+
+/**
+ * word/header*.xml e word/footer*.xml ordenados pelo nome da parte (prefixo,
+ * depois número: header2 antes de header10), para a saída ser determinística.
+ */
+function partesCabecalhoRodape(zip) {
+  const chave = (nome) => {
+    const m = /^word\/(header|footer)(\d*)\.xml$/.exec(nome);
+    return m ? [m[1], m[2] === "" ? 0 : Number(m[2])] : null;
+  };
+  return Object.keys(zip)
+    .filter((nome) => chave(nome))
+    .sort((a, b) => {
+      const [pa, na] = chave(a);
+      const [pb, nb] = chave(b);
+      return pa === pb ? na - nb : pa < pb ? -1 : 1;
+    });
+}
+
 export function abrirPacote(buffer) {
   const zip = unzipSync(new Uint8Array(buffer));
   const parte = (nome) => (zip[nome] ? parseXml(zip[nome]) : null);
@@ -319,7 +530,7 @@ export function abrirPacote(buffer) {
 
 export function lerDocx(buffer) {
   const saida = { blocos: [], comentarios: [], notas: [], cabecalhoRodape: [], avisos: [], temNumeracao: false, niveisNumeracao: 0 };
-  let docXml, numeracao, estilos;
+  let docXml, numeracao, estilos, comentariosXml, notasXml, cabecalhos;
   try {
     // O parse das partes fica dentro do try: XML malformado num zip íntegro
     // também é arquivo corrompido, e deve virar aviso, não exceção.
@@ -328,12 +539,23 @@ export function lerDocx(buffer) {
     docXml = pacote.parte("word/document.xml");
     numeracao = carregarNumeracao(pacote.parte("word/numbering.xml"));
     estilos = carregarEstilos(pacote.parte("word/styles.xml"));
+    comentariosXml = pacote.parte("word/comments.xml");
+    notasXml = pacote.parte("word/footnotes.xml");
+    cabecalhos = partesCabecalhoRodape(pacote.zip).map((nome) => pacote.parte(nome));
   } catch (err) {
     saida.avisos.push(`não foi possível abrir o .docx (${err.message}); arquivo protegido ou corrompido`);
     return saida;
   }
   const numerador = criarNumerador(numeracao);
-  const ctx = { avisos: saida.avisos, paragrafoAtual: 0 };
+  const registros = {};
+  const ctx = {
+    paragrafoAtual: 0,
+    registrar(tipo, paragrafo) {
+      (registros[tipo] ??= []).push(paragrafo);
+    },
+    comentariosReferenciados: new Set(),
+    notasReferenciadas: new Set(),
+  };
   const body = docXml.getElementsByTagNameNS(W_NS, "body")[0];
   saida.blocos = body ? lerCorpo(body, ctx, numerador, estilos) : [];
   const numerados = saida.blocos.filter((b) => b.tipo === "paragrafo" && b.numero);
@@ -341,5 +563,13 @@ export function lerDocx(buffer) {
   // níveis = profundidades distintas de fato usadas no documento, não as que
   // o numbering.xml define (o Word define 9 níveis em toda lista)
   saida.niveisNumeracao = new Set(numerados.map((b) => b.ilvl)).size;
+  saida.comentarios = lerComentarios(comentariosXml, ctx.comentariosReferenciados);
+  saida.notas = lerNotas(notasXml, ctx.notasReferenciadas);
+  for (const doc of cabecalhos) {
+    const raiz = doc.documentElement;
+    const texto = raiz ? textoDoConteudo(raiz) : "";
+    if (texto) saida.cabecalhoRodape.push(texto);
+  }
+  saida.avisos.push(...avisosDosRegistros(registros));
   return saida;
 }
