@@ -87,7 +87,8 @@ test("lerDocx: tabela vira bloco com linhas e células; parágrafos da célula u
       `<w:tr><w:tc><w:p><w:r><w:t>Taxa</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>R$ 100</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`,
   );
   const d = lerDocx(construirDocx({ documentXml: xml }));
-  assert.deepEqual(d.blocos[0], { tipo: "tabela", linhas: [["Item", "Valor / mensal"], ["Taxa", "R$ 100"]] });
+  assert.deepEqual(d.blocos[0].tipo, "tabela");
+  assert.deepEqual(d.blocos[0].linhas, [["Item", "Valor / mensal"], ["Taxa", "R$ 100"]]);
 });
 
 test("lerDocx: célula com gridSpan ocupa colunas vazias; tabela aninhada achatada no texto da célula", () => {
@@ -300,4 +301,35 @@ test("lerDocx: cabeçalho em tabela entra com as células; texto excluído no ca
   const header = `<?xml version="1.0"?><w:hdr ${W}>${tabela([["LOGO", "Contrato nº 7"]])}<w:p>${RUN("Minuta ")}${DEL("v1", "Ana")}${INS(RUN("v2"), "Ana")}</w:p></w:hdr>`;
   const d = lerDocx(construirDocx({ documentXml: documento(paragrafo("x")), headerXml: header }));
   assert.deepEqual(d.cabecalhoRodape, ["LOGO | Contrato nº 7\nMinuta v2"]);
+});
+
+// ---------- R9: exclusão vence em qualquer profundidade ----------
+
+test("lerDocx: exclusão dentro de inserção (ins(Ana) > del(Bruno)) sai como del de Bruno", () => {
+  const xml = documento(`<w:p>${RUN("R$ ")}<w:ins w:id="1" w:author="Ana"><w:del w:id="2" w:author="Bruno"><w:r><w:delText>XXXX</w:delText></w:r></w:del></w:ins></w:p>`);
+  const d = lerDocx(construirDocx({ documentXml: xml }));
+  assert.deepEqual(d.blocos[0].segmentos[1], { texto: "XXXX", marca: "del", autor: "Bruno" });
+});
+
+test("lerDocx: no cabeçalho, exclusão dentro de inserção fica fora do texto aceito (parágrafo e célula)", () => {
+  const insDel = `<w:ins w:id="1" w:author="Ana">${RUN("novo")}<w:del w:id="2" w:author="Bruno"><w:r><w:delText>velho</w:delText></w:r></w:del></w:ins>`;
+  const header = `<?xml version="1.0"?><w:hdr ${W}><w:p>${insDel}</w:p><w:tbl><w:tr><w:tc><w:p>${insDel}</w:p></w:tc></w:tr></w:tbl></w:hdr>`;
+  const d = lerDocx(construirDocx({ documentXml: documento(paragrafo("x")), headerXml: header }));
+  assert.deepEqual(d.cabecalhoRodape, ["novo\nnovo"]);
+});
+
+// ---------- R10: tabela carrega os segmentos das células ----------
+
+test("lerDocx: bloco de tabela traz segmentos de todas as células, em ordem, com marca e âncora", () => {
+  const xml = documento(
+    `<w:tbl><w:tr><w:tc><w:p>${RUN("R$ ")}${DEL("100", "Ana")}</w:p></w:tc><w:tc><w:p>${RUN("[●]")}<w:r><w:footnoteReference w:id="1"/></w:r></w:p></w:tc></w:tr></w:tbl>`,
+  );
+  const d = lerDocx(construirDocx({ documentXml: xml }));
+  assert.deepEqual(d.blocos[0].linhas, [["R$ {--100--}[Ana]", "[●][^n1]"]]);
+  assert.deepEqual(d.blocos[0].segmentos, [
+    { texto: "R$ ", marca: null },
+    { texto: "100", marca: "del", autor: "Ana" },
+    { texto: "[●]", marca: null },
+    { texto: "", marca: null, nota: "1" },
+  ]);
 });

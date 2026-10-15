@@ -212,8 +212,12 @@ function criarNumerador(numeracao) {
 /**
  * Percorre um parágrafo e devolve segmentos {texto, marca, autor?}. A marca
  * vem do invólucro de revisão (w:ins/w:moveTo = "ins", w:del/w:moveFrom =
- * "del"). Quando há del contendo ins, a marca MAIS EXTERNA vence: o revisor
- * que apagou a inserção alheia é quem decide o que ficará aceito.
+ * "del"). Exclusão vence em QUALQUER profundidade, com o autor daquela
+ * exclusão: del(Bruno) > ins(Ana) e ins(Ana) > del(Bruno) saem os dois como
+ * del de Bruno, porque o texto apagado não fica no contrato aceito,
+ * qualquer que seja a ordem em que o Word aninhou as marcas (ins por fora é
+ * a forma usual quando um revisor apaga o que outro inseriu). ins só vale
+ * quando não há del na cadeia.
  *
  * Âncoras viram segmentos de texto vazio: {comentarios:[ids]} no fim do range
  * do comentário e {nota:id} no ponto da nota de rodapé. Elemento que não é
@@ -251,7 +255,7 @@ function segmentosDoParagrafo(p, ctx) {
     else ancora("comentarios", [id]);
     ctx.comentariosReferenciados.add(id);
   };
-  const marcar = (estado, marca, no) => (estado.marca ? estado : { marca, autor: attr(no, "author") ?? "" });
+  const marcar = (no, marca) => ({ marca, autor: attr(no, "author") ?? "" });
   const visitar = (no, estado) => {
     for (const f of filhos(no)) {
       switch (f.localName) {
@@ -277,11 +281,13 @@ function segmentosDoParagrafo(p, ctx) {
           break;
         case "ins":
         case "moveTo":
-          visitar(f, marcar(estado, "ins", f));
+          // ins não sobrepõe marca já em vigor (ins externo ou del externo)
+          visitar(f, estado.marca ? estado : marcar(f, "ins"));
           break;
         case "del":
         case "moveFrom":
-          visitar(f, marcar(estado, "del", f));
+          // del sobrepõe ins externo; sob outro del, o externo segue valendo
+          visitar(f, estado.marca === "del" ? estado : marcar(f, "del"));
           break;
         case "commentRangeStart":
           // fecha o segmento: o trecho comentado fica num segmento próprio,
@@ -368,26 +374,37 @@ function segmentosDoParagrafo(p, ctx) {
  * excluído numa célula pareceria aceito e a âncora de comentário ou nota se
  * perderia.
  */
-function textoDaCelula(tc, ctx) {
+function textoDaCelula(tc, ctx, render, segmentos) {
   const partes = [];
   for (const f of filhosDesembrulhados(tc)) {
     if (f.localName === "p") {
-      const t = renderSegmentos(segmentosDoParagrafo(f, ctx));
+      const segs = segmentosDoParagrafo(f, ctx);
+      segmentos.push(...segs);
+      const t = render(segs);
       if (t) partes.push(t);
     } else if (f.localName === "tbl") {
-      const t = lerTabela(f, ctx);
+      const t = lerTabela(f, ctx, render);
+      segmentos.push(...t.segmentos);
       partes.push(t.linhas.map((l) => l.join(" | ")).join(" / "));
     }
   }
   return partes.join(" / ");
 }
 
-function lerTabela(tbl, ctx) {
+/**
+ * Tabela -> {tipo, linhas, segmentos}. `linhas` é o texto de cada célula já
+ * renderizado por `render` (por padrão a notação do sidecar; o cabeçalho usa
+ * o texto aceito). `segmentos` são todos os segmentos de todas as células,
+ * em ordem, âncoras inclusive: é por eles que a radiografia conta marcas e
+ * placeholders dentro de tabela, sem reler o texto renderizado.
+ */
+function lerTabela(tbl, ctx, render = renderSegmentos) {
   const linhas = [];
+  const segmentos = [];
   for (const tr of filhosDesembrulhados(tbl).filter((n) => n.localName === "tr")) {
     const cels = [];
     for (const tc of filhosDesembrulhados(tr).filter((n) => n.localName === "tc")) {
-      cels.push(textoDaCelula(tc, ctx));
+      cels.push(textoDaCelula(tc, ctx, render, segmentos));
       // célula mesclada na horizontal: as colunas que ela cobre viram células
       // vazias, para a linha manter o número de colunas da grade
       const tcPr = primeiro(tc, "tcPr");
@@ -397,7 +414,7 @@ function lerTabela(tbl, ctx) {
     }
     linhas.push(cels);
   }
-  return { tipo: "tabela", linhas };
+  return { tipo: "tabela", linhas, segmentos };
 }
 
 function lerCorpo(body, ctx, numerador, estilos) {
@@ -458,6 +475,9 @@ function ctxDescartavel() {
   return { paragrafoAtual: 0, registrar() {}, comentariosReferenciados: new Set(), notasReferenciadas: new Set() };
 }
 
+// texto que ficará aceito: segmentos excluídos fora, sem notação de marca
+const textoAceito = (segs) => segs.filter((s) => s.marca !== "del").map((s) => s.texto).join("");
+
 /**
  * Texto corrido de um contêiner (comentário, nota, cabeçalho): parágrafos
  * unidos por "\n", tabela uma linha por "\n" com células por " | " (cabeçalho
@@ -470,9 +490,9 @@ function textoDoConteudo(no) {
   const partes = [];
   for (const f of filhosDesembrulhados(no)) {
     if (f.localName === "p") {
-      partes.push(segmentosDoParagrafo(f, ctx).filter((s) => s.marca !== "del").map((s) => s.texto).join(""));
+      partes.push(textoAceito(segmentosDoParagrafo(f, ctx)));
     } else if (f.localName === "tbl") {
-      for (const l of lerTabela(f, ctx).linhas) partes.push(l.filter(Boolean).join(" | "));
+      for (const l of lerTabela(f, ctx, textoAceito).linhas) partes.push(l.filter(Boolean).join(" | "));
     }
   }
   return partes.join("\n").trim();

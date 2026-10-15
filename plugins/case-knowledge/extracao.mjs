@@ -267,8 +267,9 @@ export function renderSegmentos(segs) {
  * Corpo do sidecar de um .docx a partir da estrutura de lerDocx. A
  * radiografia vem primeiro porque é o que decide se o advogado pode confiar
  * no texto: marcas de revisão e comentários pendentes mudam o que o contrato
- * diz. Placeholders são contados no texto ACEITO (exclusões fora), que é o
- * que ficará no contrato. Autores em ordem alfabética com colação pt-BR fixa
+ * diz. Marcas e placeholders contam em parágrafos e tabelas. Placeholders
+ * são contados no texto ACEITO (exclusões fora), que é o que ficará no
+ * contrato. Autores em ordem alfabética com colação pt-BR fixa
  * (não a do sistema), para a saída não depender da máquina nem da ordem de
  * aparição.
  */
@@ -279,8 +280,9 @@ export function renderDocx(d) {
   let del = 0;
   let textoAceito = "";
   for (const b of d.blocos) {
-    if (b.tipo !== "paragrafo") continue;
-    for (const s of b.segmentos) {
+    // tabela conta pelos segmentos das células; tabela sem `segmentos`
+    // (estrutura montada à mão) conta como vazia
+    for (const s of b.segmentos ?? []) {
       if (s.marca) {
         const a = porAutor.get(s.autor) ?? { ins: 0, del: 0 };
         a[s.marca] += 1;

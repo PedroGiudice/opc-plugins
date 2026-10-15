@@ -259,3 +259,26 @@ test("renderDocx: placeholders dentro de exclusão não contam (texto aceito); q
   assert.ok(!md.includes("Placeholders"));
   assert.ok(md.includes("{--XXXX--}[A]a\nb\n"));
 });
+
+test("renderDocx: placeholder excluído (ins de um revisor apagado por outro) não conta no texto aceito", () => {
+  const md = renderDocx({ blocos: [{ tipo: "paragrafo", numero: null, segmentos: [{ texto: "R$ ", marca: null }, { texto: "XXXX", marca: "del", autor: "Bruno" }] }], comentarios: [], notas: [], cabecalhoRodape: [], avisos: [], temNumeracao: false, niveisNumeracao: 0 });
+  assert.ok(md.includes("- Marcas de revisão: 0 inserções e 1 exclusão de 1 revisor (Bruno: 1 exclusão)"));
+  assert.ok(!md.includes("Placeholders"));
+});
+
+test("renderDocx: marca e placeholder que só existem em tabela entram na radiografia", () => {
+  const md = renderDocx({
+    blocos: [
+      { tipo: "paragrafo", numero: null, segmentos: [{ texto: "Preço:", marca: null }] },
+      {
+        tipo: "tabela",
+        linhas: [["R$ [●] {--100--}[Ana]"]],
+        segmentos: [{ texto: "R$ [●] ", marca: null }, { texto: "100", marca: "del", autor: "Ana" }],
+      },
+    ],
+    comentarios: [], notas: [], cabecalhoRodape: [], avisos: [], temNumeracao: false, niveisNumeracao: 0,
+  });
+  assert.ok(md.includes("- Marcas de revisão: 0 inserções e 1 exclusão de 1 revisor (Ana: 1 exclusão)"));
+  assert.ok(md.includes("- Placeholders no texto aceito: [●] ×1"));
+  assert.ok(md.includes("| R$ [●] {--100--}[Ana] |"));
+});
