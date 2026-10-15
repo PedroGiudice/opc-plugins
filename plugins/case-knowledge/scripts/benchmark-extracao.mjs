@@ -164,13 +164,19 @@ export function resolverCaminho(arquivo, { home = HOME_PADRAO, cases, existe = e
 }
 
 // Extrai em memória (sem sidecar). Devolve o Markdown que o extrator geraria.
+// Arquivo que o leitor não abre vira erro, como no extrator (que não grava
+// sidecar dele): renderizar a estrutura vazia daria recall 0 sem dizer por quê.
 async function extrairEmMemoria(abs) {
   const buf = readFileSync(abs);
+  const lido = (d) => {
+    if (d.ilegivel) throw new Error(`não foi possível ler: ${d.motivo}`);
+    return d;
+  };
   switch (tipoDeFormato(abs.replaceAll("\\", "/"))) {
-    case "docx": return { md: renderDocx(lerDocx(buf)), bytes: buf.length };
-    case "xlsx": return { md: renderXlsx(await lerXlsx(buf)), bytes: buf.length };
+    case "docx": return { md: renderDocx(lido(lerDocx(buf))), bytes: buf.length };
+    case "xlsx": return { md: renderXlsx(lido(await lerXlsx(buf))), bytes: buf.length };
     case "eml": return { md: renderEmail(await lerEml(buf)), bytes: buf.length };
-    case "msg": return { md: renderEmail(lerMsg(buf)), bytes: buf.length };
+    case "msg": return { md: renderEmail(lido(lerMsg(buf))), bytes: buf.length };
     default: return { md: null, bytes: buf.length };
   }
 }

@@ -77,8 +77,11 @@ export async function lerXlsx(buffer, { maxLinhasPorAba = 2000, maxBytes = Infin
   try {
     await wb.xlsx.load(buffer);
   } catch (err) {
-    saida.avisos.push(`não foi possível abrir a planilha (${err.message}); arquivo protegido ou corrompido`);
-    return saida;
+    // Sem sidecar (o chamador trata como erro): uma planilha vazia com aviso
+    // pareceria lida. Cifrada (senha de abertura) é contêiner OLE/CFB, não zip.
+    const cfb = Buffer.isBuffer(buffer) && buffer.subarray(0, 8).equals(Buffer.from("d0cf11e0a1b11ae1", "hex"));
+    const motivo = cfb ? "protegida por senha (ou .xls antigo renomeado)" : `planilha não abre (${String(err.message).split("\n")[0]})`;
+    return { abas: [], avisos: [], ilegivel: true, motivo };
   }
   const ocultas = [];
   wb.eachSheet((ws) => {

@@ -77,10 +77,13 @@ test("lerXlsx: célula mesclada: valor na primeira, demais vazias; linhas com bu
   assert.deepEqual(d.abas[0].linhas, [["Título", "", ""], ["a", "", "c"]]);
 });
 
-test("lerXlsx: buffer inválido vira aviso e zero abas", async () => {
+test("lerXlsx: buffer inválido é ilegível, com zero abas", async () => {
   const d = await lerXlsx(Buffer.from("não é xlsx"));
   assert.deepEqual(d.abas, []);
-  assert.match(d.avisos[0], /não foi possível abrir/i);
+  assert.equal(d.ilegivel, true);
+  assert.match(d.motivo, /^planilha não abre \(/);
+  const cfb = await lerXlsx(Buffer.concat([Buffer.from("d0cf11e0a1b11ae1", "hex"), Buffer.alloc(504)]));
+  assert.deepEqual([cfb.ilegivel, cfb.motivo], [true, "protegida por senha (ou .xls antigo renomeado)"]);
 });
 
 test("lerXlsx: apara linhas e colunas vazias do fim, preserva as do meio", async () => {

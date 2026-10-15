@@ -231,6 +231,13 @@ function transitorio(err) {
  * Devolve {detalhe, avisos, novosOriginais} ou {adiar: motivo}; lança quando o
  * arquivo não pode ser extraído (o chamador decide se é falha do arquivo).
  */
+// Leitor que não abre o arquivo (corrompido, cifrado, não é do formato): o
+// arquivo é ERRO, sem sidecar, e vai para o cache negativo. Um sidecar vazio com
+// aviso diria "sem marcas de revisão" de um contrato que ninguém leu.
+function naoLido(motivo) {
+  return new Error(`não foi possível ler: ${motivo}`);
+}
+
 async function extrairUm(caseDir, rel, buf, limites) {
   const tipo = tipoDeFormato(rel);
   const fonte = rel.slice(rel.lastIndexOf("/") + 1);
@@ -241,6 +248,7 @@ async function extrairUm(caseDir, rel, buf, limites) {
   if (tipo === "docx") {
     const { lerDocx } = await import("./extracao/docx.mjs");
     const d = lerDocx(buf);
+    if (d.ilegivel) throw naoLido(d.motivo);
     corpo = renderDocx(d);
     avisos = d.avisos;
     // parágrafos e tabelas trazem `segmentos`; revisor = autor de marca de revisão
@@ -250,12 +258,19 @@ async function extrairUm(caseDir, rel, buf, limites) {
     const { lerXlsx } = await import("./extracao/xlsx.mjs");
     const d = await lerXlsx(buf, { maxBytes: limites.maxBytesPorArquivo });
     if (d.grandeDemais) return { adiar: `grande demais para extrair agora (${tamanhoLegivel(buf.length)})` };
+    if (d.ilegivel) throw naoLido(d.motivo);
     avisos = d.avisos;
     corpo = renderXlsxNoTeto(d, limites.maxSaidaBytes, avisos);
     detalhe = plural(d.abas.filter((a) => !a.oculta).length, "aba", "abas");
   } else {
     const { lerEml, lerMsg } = await import("./extracao/email.mjs");
-    const e = tipo === "eml" ? await lerEml(buf) : lerMsg(buf);
+    let e;
+    try {
+      e = tipo === "eml" ? await lerEml(buf) : lerMsg(buf);
+    } catch (err) {
+      throw naoLido(err.message);
+    }
+    if (e.ilegivel) throw naoLido(e.motivo);
     avisos = e.avisos;
     const dirAnexos = `${rel}${SUFIXO_ANEXOS}`;
     const nivelDosAnexos = nivelDeAnexo(rel) + 1;

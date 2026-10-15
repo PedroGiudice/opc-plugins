@@ -163,11 +163,12 @@ test("lerMsg: .msg sintético de ponta a ponta (RTF comprimido -> HTML encapsula
   assert.deepEqual(e.avisos, []);
 });
 
-test("lerMsg: arquivo que não é .msg vira aviso, não exceção", () => {
+test("lerMsg: arquivo que não é .msg é ilegível, não exceção", () => {
   const e = lerMsg(Buffer.from("isto não é um arquivo CFBF"));
   assert.equal(e.corpo, "");
-  assert.equal(e.avisos.length, 1);
-  assert.match(e.avisos[0], /^não foi possível abrir o \.msg \(/);
+  assert.equal(e.ilegivel, true);
+  assert.match(e.motivo, /^\.msg não abre \(/);
+  assert.deepEqual(e.avisos, []);
 });
 
 test("normalizarMsg: anexo oculto ou imagem com content-id é inline; documento com content-id não", () => {

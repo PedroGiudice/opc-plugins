@@ -152,6 +152,7 @@ export function lerMsg(buffer) {
     if (fileData.error) throw new Error(fileData.error);
     return normalizarMsg(fileData, (att) => reader.getAttachment(att));
   } catch (err) {
-    return { cabecalhos: { de: "", para: [], cc: [], data: "", assunto: "" }, corpo: "", anexos: [], avisos: [`não foi possível abrir o .msg (${err.message})`] };
+    // sem sidecar: o chamador trata como erro (um e-mail vazio pareceria lido)
+    return { cabecalhos: { de: "", para: [], cc: [], data: "", assunto: "" }, corpo: "", anexos: [], avisos: [], ilegivel: true, motivo: `.msg não abre (${err.message})` };
   }
 }

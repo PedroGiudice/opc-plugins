@@ -12,7 +12,17 @@ import { unzipSync, strFromU8 } from "fflate";
 import { DOMParser, onErrorStopParsing } from "@xmldom/xmldom";
 import { renderSegmentos } from "../extracao.mjs";
 
+// O Word grava em OOXML transicional; "Salvar como Documento Strict" (ISO 29500
+// estrito) troca o namespace do prefixo w e mantém o resto. Sem aceitar os
+// dois, um .docx Strict saía com zero blocos e uma radiografia tranquilizadora.
 const W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+const W_NS_STRICT = "http://purl.oclc.org/ooxml/wordprocessingml/main";
+const W_NSS = [W_NS, W_NS_STRICT];
+
+/** Descendentes com o nome local dado, em qualquer dos dois namespaces (um documento usa um só). */
+function porTag(no, local) {
+  return W_NSS.flatMap((ns) => Array.from(no.getElementsByTagNameNS(ns, local)));
+}
 
 function parseXml(u8) {
   // onErrorStopParsing: erro e erro fatal viram ParseError (o chamador trata
@@ -29,7 +39,7 @@ function attr(no, nome) {
   // Conferido no xmldom 0.9: getAttribute("w:val") resolve pelo nome
   // qualificado e devolve null quando falta. O getAttributeNS cobre um
   // documento que use outro prefixo para o mesmo namespace.
-  return no.getAttribute(`w:${nome}`) ?? no.getAttributeNS?.(W_NS, nome) ?? null;
+  return no.getAttribute(`w:${nome}`) ?? no.getAttributeNS?.(W_NS, nome) ?? no.getAttributeNS?.(W_NS_STRICT, nome) ?? null;
 }
 
 function primeiro(no, local) {
@@ -90,15 +100,17 @@ function formatar(numFmt, n) {
 
 /**
  * Carrega numbering.xml: numId -> {abstractId, overrides{ilvl: start}};
- * abstractId -> [{start, numFmt, lvlText}] por nível.
+ * abstractId -> {niveis: [{start, numFmt, lvlText}] por nível, numStyleLink}.
+ * abstractNum de lista definida por estilo de numeração (comum em template de
+ * escritório) não tem níveis: só `w:numStyleLink`, resolvido no numerador.
  */
 function carregarNumeracao(doc) {
   const abstratos = new Map();
   const nums = new Map();
   if (!doc) return { abstratos, nums };
-  for (const an of Array.from(doc.getElementsByTagNameNS(W_NS, "abstractNum"))) {
+  for (const an of porTag(doc, "abstractNum")) {
     const niveis = [];
-    for (const lvl of Array.from(an.getElementsByTagNameNS(W_NS, "lvl"))) {
+    for (const lvl of porTag(an, "lvl")) {
       const ilvl = Number(attr(lvl, "ilvl"));
       const start = primeiro(lvl, "start");
       const fmt = primeiro(lvl, "numFmt");
@@ -109,12 +121,13 @@ function carregarNumeracao(doc) {
         lvlText: txt ? attr(txt, "val") ?? "" : "%" + (ilvl + 1) + ".",
       };
     }
-    abstratos.set(attr(an, "abstractNumId"), niveis);
+    const link = primeiro(an, "numStyleLink");
+    abstratos.set(attr(an, "abstractNumId"), { niveis, numStyleLink: link ? attr(link, "val") : null });
   }
-  for (const num of Array.from(doc.getElementsByTagNameNS(W_NS, "num"))) {
+  for (const num of porTag(doc, "num")) {
     const ab = primeiro(num, "abstractNumId");
     const overrides = {};
-    for (const ov of Array.from(num.getElementsByTagNameNS(W_NS, "lvlOverride"))) {
+    for (const ov of porTag(num, "lvlOverride")) {
       const so = primeiro(ov, "startOverride");
       if (so) overrides[Number(attr(ov, "ilvl"))] = Number(attr(so, "val"));
     }
@@ -123,11 +136,11 @@ function carregarNumeracao(doc) {
   return { abstratos, nums };
 }
 
-/** styles.xml: styleId -> {basedOn, numPr: {numId, ilvl} | null}. */
+/** styles.xml: styleId -> {basedOn, numPr: {numId, ilvl} | null} (estilos de parágrafo e de numeração). */
 function carregarEstilos(doc) {
   const estilos = new Map();
   if (!doc) return estilos;
-  for (const st of Array.from(doc.getElementsByTagNameNS(W_NS, "style"))) {
+  for (const st of porTag(doc, "style")) {
     const basedOn = primeiro(st, "basedOn");
     const pPr = primeiro(st, "pPr");
     const numPr = pPr ? primeiro(pPr, "numPr") : null;
@@ -136,29 +149,37 @@ function carregarEstilos(doc) {
   return estilos;
 }
 
+// Campos ausentes ficam null: o numPr direto pode trazer só um deles e herdar o
+// outro do estilo.
 function lerNumPr(numPr) {
   const numId = primeiro(numPr, "numId");
   const ilvl = primeiro(numPr, "ilvl");
-  return { numId: numId ? attr(numId, "val") : null, ilvl: ilvl ? Number(attr(ilvl, "val")) : 0 };
+  return { numId: numId ? attr(numId, "val") : null, ilvl: ilvl ? Number(attr(ilvl, "val")) : null };
 }
 
-/** numPr efetivo do parágrafo: o próprio, senão o do estilo (seguindo basedOn, com teto contra ciclo). */
+/**
+ * numPr efetivo do parágrafo, CAMPO A CAMPO: o que o parágrafo traz vale, o que
+ * falta vem do estilo (seguindo basedOn, com teto contra ciclo), como o Word
+ * faz. Parágrafo de estilo numerado com `numPr` direto só com `ilvl` (o jeito
+ * de descer um nível na lista do estilo) perdia o número inteiro.
+ */
 function numPrEfetivo(p, estilos) {
   const pPr = primeiro(p, "pPr");
-  if (pPr) {
-    const direto = primeiro(pPr, "numPr");
-    if (direto) return lerNumPr(direto);
-    const pStyle = primeiro(pPr, "pStyle");
-    if (pStyle) {
-      let id = attr(pStyle, "val");
-      for (let i = 0; i < 20 && id && estilos.has(id); i++) {
-        const st = estilos.get(id);
-        if (st.numPr) return st.numPr;
-        id = st.basedOn;
-      }
+  if (!pPr) return null;
+  const numPrDireto = primeiro(pPr, "numPr");
+  let { numId, ilvl } = numPrDireto ? lerNumPr(numPrDireto) : { numId: null, ilvl: null };
+  const pStyle = primeiro(pPr, "pStyle");
+  let id = pStyle ? attr(pStyle, "val") : null;
+  for (let i = 0; i < 20 && id && estilos.has(id) && (numId === null || ilvl === null); i++) {
+    const st = estilos.get(id);
+    if (st.numPr) {
+      numId ??= st.numPr.numId;
+      ilvl ??= st.numPr.ilvl;
     }
+    id = st.basedOn;
   }
-  return null;
+  if (numId === null) return null;
+  return { numId, ilvl: ilvl ?? 0 };
 }
 
 /**
@@ -171,23 +192,47 @@ function numPrEfetivo(p, estilos) {
  * nele recebe exatamente esse valor. Isso cobre start 0 ("0.", "1.") e o
  * nível superior nunca emitido ("5.1." com start 5), que um contador
  * pré-decrementado com piso em 1 errava.
+ *
+ * abstractNum com numStyleLink é resolvido pelo estilo de numeração: estilo ->
+ * seu numId -> o abstractNum que tem os níveis; o contador é o desse último
+ * (a lista do estilo é uma só, qualquer numId que chegue a ela).
+ *
+ * numId que não resolve (sem w:num, abstractNum ausente, nível ausente) não
+ * some calado: `naoResolvidos` conta os parágrafos por numId, para o aviso.
  */
-function criarNumerador(numeracao) {
-  const listas = new Map(); // abstractId -> { cont: [], usado: [] }
+function criarNumerador(numeracao, estilos) {
+  const listas = new Map(); // abstractId (resolvido) -> { cont: [], usado: [] }
   const numIdsVistos = new Set();
-  return function proximo(numPr) {
+  const naoResolvidos = new Map(); // numId -> parágrafos
+  const resolverAbstrato = (abstractId) => {
+    let id = abstractId;
+    for (let i = 0; i < 5 && id != null; i++) {
+      const ab = numeracao.abstratos.get(id);
+      if (!ab) return null;
+      if (ab.niveis.length || !ab.numStyleLink) return { id, niveis: ab.niveis };
+      const numIdDoEstilo = estilos.get(ab.numStyleLink)?.numPr?.numId;
+      id = numIdDoEstilo ? numeracao.nums.get(numIdDoEstilo)?.abstractId ?? null : null;
+    }
+    return null;
+  };
+  const falhou = (numId) => {
+    naoResolvidos.set(numId, (naoResolvidos.get(numId) ?? 0) + 1);
+    return null;
+  };
+  function proximo(numPr) {
     if (!numPr || !numPr.numId || numPr.numId === "0") return null;
     const num = numeracao.nums.get(numPr.numId);
-    if (!num) return null;
-    const niveis = numeracao.abstratos.get(num.abstractId);
-    if (!niveis) return null;
+    if (!num) return falhou(numPr.numId);
+    const abstrato = resolverAbstrato(num.abstractId);
+    if (!abstrato) return falhou(numPr.numId);
+    const niveis = abstrato.niveis;
     const ilvl = numPr.ilvl;
     const lvl = niveis[ilvl];
-    if (!lvl) return null;
-    let lista = listas.get(num.abstractId);
+    if (!lvl) return falhou(numPr.numId);
+    let lista = listas.get(abstrato.id);
     if (!lista) {
       lista = { cont: [], usado: [] };
-      listas.set(num.abstractId, lista);
+      listas.set(abstrato.id, lista);
     }
     // start efetivo: o startOverride deste numId, senão o start do nível
     const inicio = (i) => num.overrides[i] ?? niveis[i]?.start ?? 1;
@@ -204,7 +249,9 @@ function criarNumerador(numeracao) {
       const n = niveis[i];
       return n ? formatar(n.numFmt, lista.usado[i] ? lista.cont[i] : inicio(i)) : "";
     });
-  };
+  }
+  proximo.naoResolvidos = naoResolvidos;
+  return proximo;
 }
 
 // ---------- texto ----------
@@ -327,7 +374,7 @@ function segmentosDoParagrafo(p, ctx) {
         case "pict":
           // com txbxContent é caixa de texto (o texto dela NÃO é lido: a
           // posição dela no documento não é a do parágrafo); sem, é imagem ou forma
-          if (f.getElementsByTagNameNS(W_NS, "txbxContent").length > 0) ctx.registrar("caixa", ctx.paragrafoAtual);
+          if (porTag(f, "txbxContent").length > 0) ctx.registrar("caixa", ctx.paragrafoAtual);
           else ctx.registrar("imagem", ctx.paragrafoAtual);
           break;
         case "object":
@@ -502,7 +549,7 @@ function textoDoConteudo(no) {
 function lerComentarios(doc, referenciados) {
   if (!doc) return [];
   const saida = [];
-  for (const c of Array.from(doc.getElementsByTagNameNS(W_NS, "comment"))) {
+  for (const c of porTag(doc, "comment")) {
     const id = attr(c, "id");
     if (!referenciados.has(id)) continue;
     saida.push({ id, autor: attr(c, "author") ?? "", data: attr(c, "date") ?? "", texto: textoDoConteudo(c) });
@@ -514,7 +561,7 @@ function lerComentarios(doc, referenciados) {
 function lerNotas(doc, referenciadas) {
   if (!doc) return [];
   const saida = [];
-  for (const n of Array.from(doc.getElementsByTagNameNS(W_NS, "footnote"))) {
+  for (const n of porTag(doc, "footnote")) {
     const tipo = attr(n, "type");
     if (tipo === "separator" || tipo === "continuationSeparator" || tipo === "continuationNotice") continue;
     const id = attr(n, "id");
@@ -570,26 +617,62 @@ export function abrirPacote(buffer, { maxParteBytes = MAX_PARTE_BYTES } = {}) {
   return { zip, parte, acimaDoTeto };
 }
 
+// .docx cifrado (senha de abertura) é um contêiner OLE/CFB, não zip; o .doc
+// antigo renomeado também. Assinatura D0 CF 11 E0 A1 B1 1A E1.
+const ASSINATURA_CFB = Buffer.from("d0cf11e0a1b11ae1", "hex");
+
+export function ehCfb(buffer) {
+  return Buffer.isBuffer(buffer) && buffer.subarray(0, 8).equals(ASSINATURA_CFB);
+}
+
+const primeiraLinha = (s) => String(s ?? "").split("\n")[0].trim();
+
+/**
+ * .docx -> estrutura. Arquivo que não abre (não é zip, cifrado, sem
+ * word/document.xml, XML principal malformado ou sem w:body) devolve
+ * {ilegivel: true, motivo}: o chamador não grava sidecar (um sidecar vazio
+ * diria "sem marcas de revisão" de um contrato que ninguém leu). Parte
+ * auxiliar malformada (numeração, estilos, comentários, notas, cabeçalho)
+ * degrada com aviso e o resto do documento é lido.
+ */
 export function lerDocx(buffer, { maxParteBytes = MAX_PARTE_BYTES } = {}) {
   const saida = { blocos: [], comentarios: [], notas: [], cabecalhoRodape: [], avisos: [], temNumeracao: false, niveisNumeracao: 0 };
-  let docXml, numeracao, estilos, comentariosXml, notasXml, cabecalhos;
+  const ilegivel = (motivo) => ({ ...saida, avisos: [], ilegivel: true, motivo });
+  let pacote;
   try {
-    // O parse das partes fica dentro do try: XML malformado num zip íntegro
-    // também é arquivo corrompido, e deve virar aviso, não exceção.
-    const pacote = abrirPacote(buffer, { maxParteBytes });
-    for (const nome of pacote.acimaDoTeto) saida.avisos.push(`parte ${nome} acima de ${Math.round(maxParteBytes / (1024 * 1024))} MiB não lida`);
-    if (!pacote.zip["word/document.xml"]) throw new Error("sem word/document.xml");
-    docXml = pacote.parte("word/document.xml");
-    numeracao = carregarNumeracao(pacote.parte("word/numbering.xml"));
-    estilos = carregarEstilos(pacote.parte("word/styles.xml"));
-    comentariosXml = pacote.parte("word/comments.xml");
-    notasXml = pacote.parte("word/footnotes.xml");
-    cabecalhos = partesCabecalhoRodape(pacote.zip).map((nome) => pacote.parte(nome));
+    pacote = abrirPacote(buffer, { maxParteBytes });
   } catch (err) {
-    saida.avisos.push(`não foi possível abrir o .docx (${err.message}); arquivo protegido ou corrompido`);
-    return saida;
+    return ilegivel(ehCfb(buffer) ? "protegido por senha (ou .doc antigo renomeado)" : `zip inválido (${primeiraLinha(err.message)})`);
   }
-  const numerador = criarNumerador(numeracao);
+  const mib = Math.round(maxParteBytes / (1024 * 1024));
+  if (pacote.acimaDoTeto.includes("word/document.xml")) return ilegivel(`parte word/document.xml acima de ${mib} MiB`);
+  for (const nome of pacote.acimaDoTeto) saida.avisos.push(`parte ${nome} acima de ${mib} MiB não lida`);
+  if (!pacote.zip["word/document.xml"]) return ilegivel("sem word/document.xml");
+  let docXml;
+  try {
+    docXml = pacote.parte("word/document.xml");
+  } catch (err) {
+    return ilegivel(`word/document.xml malformado (${primeiraLinha(err.message)})`);
+  }
+  const body = docXml && porTag(docXml, "body")[0];
+  if (!body) return ilegivel("word/document.xml sem w:body");
+  const auxiliar = (nome, aviso) => {
+    try {
+      return pacote.parte(nome);
+    } catch {
+      saida.avisos.push(aviso);
+      return null;
+    }
+  };
+  const numeracaoXml = auxiliar("word/numbering.xml", "numbering.xml ilegível: numeração automática não renderizada");
+  const numeracaoIlegivel = numeracaoXml === null && Boolean(pacote.zip["word/numbering.xml"]);
+  const estilos = carregarEstilos(auxiliar("word/styles.xml", "styles.xml ilegível: numeração herdada de estilo não renderizada"));
+  const comentariosXml = auxiliar("word/comments.xml", "comments.xml ilegível: comentários não renderizados");
+  const notasXml = auxiliar("word/footnotes.xml", "footnotes.xml ilegível: notas de rodapé não renderizadas");
+  const cabecalhos = partesCabecalhoRodape(pacote.zip)
+    .map((nome) => auxiliar(nome, `${nome.slice("word/".length)} ilegível: cabeçalho ou rodapé não renderizado`))
+    .filter(Boolean);
+  const numerador = criarNumerador(carregarNumeracao(numeracaoXml), estilos);
   const registros = {};
   const ctx = {
     paragrafoAtual: 0,
@@ -599,8 +682,7 @@ export function lerDocx(buffer, { maxParteBytes = MAX_PARTE_BYTES } = {}) {
     comentariosReferenciados: new Set(),
     notasReferenciadas: new Set(),
   };
-  const body = docXml.getElementsByTagNameNS(W_NS, "body")[0];
-  saida.blocos = body ? lerCorpo(body, ctx, numerador, estilos) : [];
+  saida.blocos = lerCorpo(body, ctx, numerador, estilos);
   const numerados = saida.blocos.filter((b) => b.tipo === "paragrafo" && b.numero);
   saida.temNumeracao = numerados.length > 0;
   // níveis = profundidades distintas de fato usadas no documento, não as que
@@ -614,5 +696,13 @@ export function lerDocx(buffer, { maxParteBytes = MAX_PARTE_BYTES } = {}) {
     if (texto) saida.cabecalhoRodape.push(texto);
   }
   saida.avisos.push(...avisosDosRegistros(registros));
+  // com o numbering.xml ilegível o aviso dele já diz tudo; repetir por numId seria ruído
+  if (!numeracaoIlegivel) {
+    for (const [numId, n] of numerador.naoResolvidos) {
+      saida.avisos.push(`numeração automática não resolvida em ${n} ${n === 1 ? "parágrafo" : "parágrafos"} (numId ${numId})`);
+    }
+  }
+  // abriu, mas não há nada: o sidecar diz isso em vez de uma radiografia vazia
+  if (saida.blocos.length === 0 && saida.cabecalhoRodape.length === 0 && saida.avisos.length === 0) saida.avisos.push("documento sem texto");
   return saida;
 }

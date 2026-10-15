@@ -80,13 +80,19 @@ test("extrairCaso: original acima de 50 MiB vai para `grandes`, sem sidecar e se
   assert.ok(!existsSync(join(dir, "grande.docx.md")));
 });
 
-test("extrairCaso: docx corrompido gera sidecar com aviso (não erro), e erro de leitura de disco vai em erros", async () => {
+test("extrairCaso: arquivo que o leitor não abre é erro, sem sidecar, e entra no cache negativo", async () => {
   const dir = casoTemp();
   writeFileSync(join(dir, "ruim.docx"), Buffer.from("nada"));
+  writeFileSync(join(dir, "ruim.xlsx"), Buffer.from("nada"));
+  writeFileSync(join(dir, "ruim.msg"), Buffer.from("nada"));
   const r = await extrairCaso(dir);
-  assert.equal(r.extraidos.length, 1);
-  const fm = lerFrontmatter(readFileSync(join(dir, "ruim.docx.md"), "utf-8"));
-  assert.match(fm.avisos[0], /não foi possível abrir/);
+  assert.deepEqual(r.extraidos, []);
+  assert.deepEqual(r.erros.map((e) => e.rel), ["ruim.docx", "ruim.msg", "ruim.xlsx"]);
+  for (const e of r.erros) assert.match(e.erro, /^não foi possível ler: /);
+  for (const n of ["ruim.docx", "ruim.xlsx", "ruim.msg"]) assert.ok(!existsSync(join(dir, `${n}.md`)), n);
+  assert.equal(Object.keys(r.falhasNovas).length, 3);
+  // no resumo do hook, vão para a lista "leia o original"
+  assert.match(formatarResumo(r), /^Não foi possível extrair \(leia o original\):\n- ruim\.docx: não foi possível ler: zip inválido/);
 });
 
 const EML_COM_DOCX = [

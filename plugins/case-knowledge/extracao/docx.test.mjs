@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { lerDocx, deveInflar } from "./docx.mjs";
-import { construirDocx, documento, paragrafo, tabela, numeracaoDecimal3Niveis, W } from "./fixtures/docx-builder.mjs";
+import { construirDocx, documento, paragrafo, tabela, numeracaoDecimal3Niveis, W, W_STRICT } from "./fixtures/docx-builder.mjs";
 
 const textoDe = (bloco) => bloco.segmentos.map((s) => s.texto).join("");
 
@@ -100,12 +100,13 @@ test("lerDocx: célula com gridSpan ocupa colunas vazias; tabela aninhada achata
   assert.deepEqual(d.blocos[0].linhas, [["Título", ""], ["a", "x | y"]]);
 });
 
-test("lerDocx: parágrafo vazio não vira bloco; buffer que não é zip vira aviso e zero blocos", () => {
+test("lerDocx: parágrafo vazio não vira bloco; buffer que não é zip é ilegível (sem blocos)", () => {
   const d1 = lerDocx(construirDocx({ documentXml: documento(`<w:p/><w:p><w:r><w:t>só este</w:t></w:r></w:p>`) }));
   assert.equal(d1.blocos.length, 1);
   const d2 = lerDocx(Buffer.from("isto não é um docx"));
+  assert.equal(d2.ilegivel, true);
+  assert.match(d2.motivo, /^zip inválido/);
   assert.equal(d2.blocos.length, 0);
-  assert.match(d2.avisos[0], /não foi possível abrir/i);
 });
 
 // ---------- sdt e customXml em todos os níveis ----------
@@ -355,4 +356,108 @@ test("lerDocx: mídia grande no zip não é inflada; parte lida acima do teto vi
   assert.deepEqual(d.blocos.map(textoDe), ["Corpo"]);
   assert.deepEqual(d.cabecalhoRodape, []);
   assert.deepEqual(d.avisos, ["parte word/header1.xml acima de 1 MiB não lida"]);
+});
+
+// ---------- numeração que some sem aviso (R21) ----------
+
+// lista definida por ESTILO de numeração (template de escritório): o
+// abstractNum do numId usado só aponta para o estilo; os níveis estão no
+// abstractNum que o estilo usa
+const NUMERACAO_POR_ESTILO = `<?xml version="1.0"?><w:numbering ${W}>
+  <w:abstractNum w:abstractNumId="0"><w:styleLink w:val="ListaContrato"/>
+    <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+    <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2."/></w:lvl>
+  </w:abstractNum>
+  <w:abstractNum w:abstractNumId="1"><w:numStyleLink w:val="ListaContrato"/></w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+  <w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num>
+</w:numbering>`;
+const ESTILO_DE_NUMERACAO = `<?xml version="1.0"?><w:styles ${W}>
+  <w:style w:type="numbering" w:styleId="ListaContrato"><w:pPr><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr></w:style>
+</w:styles>`;
+
+test("lerDocx: abstractNum com numStyleLink resolve os níveis pelo estilo de numeração", () => {
+  const xml = documento(paragrafo("Objeto", { numId: 2, ilvl: 0 }) + paragrafo("Escopo", { numId: 2, ilvl: 1 }) + paragrafo("Preço", { numId: 2, ilvl: 0 }));
+  const d = lerDocx(construirDocx({ documentXml: xml, numberingXml: NUMERACAO_POR_ESTILO, stylesXml: ESTILO_DE_NUMERACAO }));
+  assert.deepEqual(d.blocos.map((b) => b.numero), ["1.", "1.1.", "2."]);
+  assert.deepEqual(d.avisos, []);
+});
+
+test("lerDocx: numPr direto mescla campo a campo com o do estilo (ilvl direto + numId do estilo, e vice-versa)", () => {
+  const styles = `<?xml version="1.0"?><w:styles ${W}>
+    <w:style w:type="paragraph" w:styleId="Clausula"><w:pPr><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr></w:style>
+    <w:style w:type="paragraph" w:styleId="Sub"><w:pPr><w:numPr><w:ilvl w:val="1"/></w:numPr></w:pPr></w:style>
+  </w:styles>`;
+  const p = (t, pPr) => `<w:p><w:pPr>${pPr}</w:pPr><w:r><w:t>${t}</w:t></w:r></w:p>`;
+  const xml = documento(
+    p("Objeto", '<w:pStyle w:val="Clausula"/>') +
+      p("Escopo", '<w:pStyle w:val="Clausula"/><w:numPr><w:ilvl w:val="1"/></w:numPr>') +
+      p("Detalhe", '<w:pStyle w:val="Sub"/><w:numPr><w:numId w:val="1"/></w:numPr>'),
+  );
+  const d = lerDocx(construirDocx({ documentXml: xml, numberingXml: numeracaoDecimal3Niveis(), stylesXml: styles }));
+  assert.deepEqual(d.blocos.map((b) => b.numero), ["1.", "1.1.", "1.2."]);
+});
+
+test("lerDocx: numId que não resolve vira aviso com a contagem de parágrafos por numId", () => {
+  const xml = documento(
+    paragrafo("a", { numId: 7 }) + paragrafo("b", { numId: 7 }) + paragrafo("c", { numId: 1, ilvl: 5 }) + paragrafo("d", { numId: 1 }),
+  );
+  const d = lerDocx(construirDocx({ documentXml: xml, numberingXml: numeracaoDecimal3Niveis() }));
+  assert.deepEqual(d.blocos.map((b) => b.numero), [null, null, null, "1."]);
+  assert.deepEqual(d.avisos, [
+    "numeração automática não resolvida em 2 parágrafos (numId 7)",
+    "numeração automática não resolvida em 1 parágrafo (numId 1)",
+  ]);
+  // sem numbering.xml nenhum, o parágrafo numerado também avisa
+  const sem = lerDocx(construirDocx({ documentXml: documento(paragrafo("x", { numId: 3 })) }));
+  assert.deepEqual(sem.avisos, ["numeração automática não resolvida em 1 parágrafo (numId 3)"]);
+});
+
+test("lerDocx: numbering.xml ou styles.xml malformados degradam com aviso, sem derrubar o documento", () => {
+  const xml = documento(paragrafo("Objeto", { numId: 1 }) + paragrafo("Texto"));
+  const d = lerDocx(construirDocx({ documentXml: xml, numberingXml: "<w:numbering><quebrado", stylesXml: "<<<" }));
+  assert.equal(d.ilegivel, undefined);
+  assert.deepEqual(d.blocos.map(textoDe), ["Objeto", "Texto"]);
+  assert.deepEqual(d.avisos, ["numbering.xml ilegível: numeração automática não renderizada", "styles.xml ilegível: numeração herdada de estilo não renderizada"]);
+  const c = lerDocx(construirDocx({ documentXml: xml, numberingXml: numeracaoDecimal3Niveis(), commentsXml: "<x", footnotesXml: "<y", headerXml: "<z" }));
+  assert.deepEqual(c.blocos.map((b) => b.numero), ["1.", null]);
+  assert.deepEqual(c.avisos, ["comments.xml ilegível: comentários não renderizados", "footnotes.xml ilegível: notas de rodapé não renderizadas", "header1.xml ilegível: cabeçalho ou rodapé não renderizado"]);
+});
+
+// ---------- sidecar vazio que diz "sem marcas" (R22) ----------
+
+test("lerDocx: OOXML Strict (namespace purl.oclc.org) é lido como o transicional", () => {
+  const strictNum = numeracaoDecimal3Niveis({ strict: true });
+  const comentarios = `<?xml version="1.0"?><w:comments ${W_STRICT}><w:comment w:id="0" w:author="Ana" w:date="2026-01-01T00:00:00Z"><w:p><w:r><w:t>ver</w:t></w:r></w:p></w:comment></w:comments>`;
+  const xml = documento(
+    paragrafo("Objeto", { numId: 1 }) +
+      `<w:p><w:commentRangeStart w:id="0"/><w:r><w:t>Preço</w:t></w:r><w:commentRangeEnd w:id="0"/><w:ins w:author="Bruno"><w:r><w:t> fixo</w:t></w:r></w:ins></w:p>`,
+    { strict: true },
+  );
+  const d = lerDocx(construirDocx({ documentXml: xml, numberingXml: strictNum, commentsXml: comentarios }));
+  assert.equal(d.ilegivel, undefined);
+  assert.deepEqual(d.blocos.map((b) => b.numero), ["1.", null]);
+  assert.deepEqual(d.comentarios.map((c) => [c.autor, c.texto]), [["Ana", "ver"]]);
+  assert.ok(d.blocos[1].segmentos.some((s) => s.marca === "ins" && s.autor === "Bruno"));
+  assert.deepEqual(d.avisos, []);
+});
+
+test("lerDocx: ilegível quando falta document.xml, o XML é malformado ou não há body; protegido por senha é dito", async () => {
+  const { zipSync, strToU8 } = await import("fflate");
+  const semDoc = lerDocx(Buffer.from(zipSync({ "word/styles.xml": strToU8("<x/>") })));
+  assert.deepEqual([semDoc.ilegivel, semDoc.motivo], [true, "sem word/document.xml"]);
+  const malformado = lerDocx(construirDocx({ documentXml: "<w:document><w:body><w:p>" }));
+  assert.deepEqual([malformado.ilegivel, /^word\/document\.xml malformado/.test(malformado.motivo)], [true, true]);
+  const semBody = lerDocx(construirDocx({ documentXml: `<?xml version="1.0"?><w:document ${W}></w:document>` }));
+  assert.deepEqual([semBody.ilegivel, semBody.motivo], [true, "word/document.xml sem w:body"]);
+  // .docx cifrado é um contêiner OLE (CFB), não zip
+  const cfb = Buffer.concat([Buffer.from("d0cf11e0a1b11ae1", "hex"), Buffer.alloc(504)]);
+  const protegido = lerDocx(cfb);
+  assert.deepEqual([protegido.ilegivel, protegido.motivo], [true, "protegido por senha (ou .doc antigo renomeado)"]);
+});
+
+test("lerDocx: documento que abre sem texto nenhum ganha o aviso 'documento sem texto'", () => {
+  const d = lerDocx(construirDocx({ documentXml: documento("<w:p/>") }));
+  assert.equal(d.ilegivel, undefined);
+  assert.deepEqual(d.avisos, ["documento sem texto"]);
 });

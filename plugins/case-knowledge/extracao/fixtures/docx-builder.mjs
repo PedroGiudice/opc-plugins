@@ -5,8 +5,11 @@
 import { zipSync, strToU8 } from "fflate";
 
 const NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+// OOXML Strict (ISO 29500 estrito): mesmo XML, outro namespace para o prefixo w
+const NS_STRICT = 'xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main" xmlns:r="http://purl.oclc.org/ooxml/officeDocument/relationships"';
 
 export const W = NS;
+export const W_STRICT = NS_STRICT;
 
 export function paragrafo(texto, { numId, ilvl = 0, estilo } = {}) {
   const pPr = [];
@@ -23,12 +26,12 @@ export function tabela(linhas) {
   return `<w:tbl>${tr}</w:tbl>`;
 }
 
-export function documento(corpoXml) {
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${NS}><w:body>${corpoXml}<w:sectPr/></w:body></w:document>`;
+export function documento(corpoXml, { strict = false } = {}) {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${strict ? NS_STRICT : NS}><w:body>${corpoXml}<w:sectPr/></w:body></w:document>`;
 }
 
 /** numbering.xml com um abstractNum decimal de 3 níveis ("%1.", "%1.%2.", "%1.%2.%3.") e numId 1 -> ele. */
-export function numeracaoDecimal3Niveis({ numIds = [1], startOverrides = {} } = {}) {
+export function numeracaoDecimal3Niveis({ numIds = [1], startOverrides = {}, strict = false } = {}) {
   const lvls = [0, 1, 2]
     .map((i) => {
       const txt = ["%1.", "%1.%2.", "%1.%2.%3."][i];
@@ -43,7 +46,7 @@ export function numeracaoDecimal3Niveis({ numIds = [1], startOverrides = {} } = 
       return `<w:num w:numId="${id}"><w:abstractNumId w:val="0"/>${ov}</w:num>`;
     })
     .join("");
-  return `<?xml version="1.0" encoding="UTF-8"?><w:numbering ${NS}><w:abstractNum w:abstractNumId="0">${lvls}</w:abstractNum>${nums}</w:numbering>`;
+  return `<?xml version="1.0" encoding="UTF-8"?><w:numbering ${strict ? NS_STRICT : NS}><w:abstractNum w:abstractNumId="0">${lvls}</w:abstractNum>${nums}</w:numbering>`;
 }
 
 export function construirDocx({ documentXml, numberingXml, stylesXml, commentsXml, footnotesXml, headerXml, footerXml }) {
