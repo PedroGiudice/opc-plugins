@@ -145,12 +145,39 @@ Original com opt-out pessoal (`x.local.docx`) gera sidecar também `.local`, que
 o pool ignora.
 
 Há dois gatilhos. O tick do sincronizador (`sync-cases.mjs`) roda a extração em
-todos os casos antes do espelho de workdocs, com orçamento de 120 s, e registra
-uma linha `extracao ...` no log por arquivo extraído, adiado ou com erro. O hook
+todos os casos antes da busca do manifest (a fase é local: máquina offline também
+extrai) e antes do espelho de workdocs, com orçamento de 120 s, e registra uma
+linha `extracao ...` no log por arquivo extraído, adiado ou com erro. O hook
 `SessionStart` (`hooks/extracao-sessao.mjs`) extrai a pasta da sessão antes do
-primeiro prompt, com orçamento de 60 s, e injeta no contexto a lista do que foi
-extraído, do que ficou para o sincronizador e do que não foi possível extrair.
-Fora de `~/cases` ele devolve `{}`.
+primeiro prompt, com orçamento de 60 s, e injeta no contexto (no máximo 40
+linhas) o que foi extraído, o que ficou para o sincronizador, o que não foi
+possível extrair e o que é grande demais (acima de 50 MiB). Fora de `~/cases` ele
+devolve `{}` sem carregar o extrator.
+
+Cada arquivo é extraído num processo filho (`extrair.mjs --arquivo`), com heap de
+1 GiB e teto de tempo (90 s no tick, 45 s no hook): planilha que estoura a memória
+ou `.docx` que não termina vira erro daquele arquivo, nunca a morte do tick. O hook
+não tenta original acima de 5 MiB (fica para o tick). Arquivo que falhou (tempo,
+memória, leitor que não abre, protegido por senha) entra no cache negativo
+`<cases>/.extracao-falhas.json` e não é tentado de novo enquanto o md5 e a versão
+do plugin forem os mesmos; o tick grava esse arquivo, o hook só o lê. Arquivo que
+o leitor não abre não ganha sidecar (o original é a fonte).
+
+Dependências: o tick roda do clone do marketplace, que só ganha pacote novo com
+`npm install`. Por isso `sync-cases.mjs` confere a cada ciclo as dependências do
+`package.json` no `node_modules` (`garantirDependencias`) e roda
+`npm install --no-save` quando falta alguma (`--no-save` para não sujar o
+`package-lock.json` do clone, o que quebraria o `git pull --ff-only` do
+self-update), e importa o extrator só por import dinâmico. Regra que o teste C1 de
+`sync-cases.test.mjs` impõe: nada alcançável por import estático do tick ou dos
+hooks pode depender de pacote além de `@modelcontextprotocol/sdk`,
+`@napi-rs/keyring`, `js-yaml` e `zod`.
+
+Regra de processo: toda mudança de renderização do sidecar sobe `EXTRATOR_VERSAO`
+(`extracao.mjs`). Sem isso, durante o rollout duas versões do plugin geram bytes
+diferentes para o mesmo original, cada máquina regrava o sidecar da outra e o pool
+produz cópias `.conflito-`. Com a versão nova, a máquina atualizada regrava uma vez
+e a desatualizada não toca sidecar de versão maior.
 
 Uso manual: `node extrair.mjs --caso <pasta> [--orcamento <s>] [--resumo]` ou
 `node extrair.mjs --todos <cases> [--orcamento <s>]`. Regras, limites e formato
