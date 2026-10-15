@@ -15,7 +15,7 @@ import MsgReaderMod from "@kenjiuno/msgreader";
 import { decompressRTF } from "@kenjiuno/decompressrtf";
 import { deEncapsulateSync } from "rtf-stream-parser";
 import iconv from "iconv-lite";
-import { htmlParaTexto } from "../extracao.mjs";
+import { htmlParaTexto, sanitizarNomeAnexo } from "../extracao.mjs";
 
 // o pacote é CommonJS com `exports.default`: num import ESM o default é o
 // objeto de exports inteiro, e o construtor fica em `.default`
@@ -26,6 +26,21 @@ function endereco(nome, email) {
   const e = (email ?? "").trim();
   if (n && e && n.toLowerCase() !== e.toLowerCase()) return `${n} <${e}>`;
   return e || n;
+}
+
+/**
+ * Inline = imagem do corpo do e-mail (logo, assinatura, print colado), que o
+ * sidecar lista e o wiring não grava. O sinal do formato (Content-ID; no .msg,
+ * PR_ATTACH_CONTENT_ID) só conta para IMAGEM: o Apple Mail manda PDF com
+ * `Content-Disposition: inline` e Content-ID, e a conversão MIME do Exchange
+ * preserva o Content-ID de anexo comum; sem a restrição, o contrato anexado
+ * deixaria de ser gravado e extraído. Anexo oculto do Outlook
+ * (PR_ATTACHMENT_HIDDEN) é inline de qualquer tipo: o usuário nunca o viu.
+ */
+const EXT_IMAGEM = /\.(png|jpe?g|gif|bmp|tiff?|webp|svg|emf|wmf|emz|wmz|ico)$/i;
+
+function ehImagem(nome, mime) {
+  return /^image\//i.test(mime ?? "") || EXT_IMAGEM.test(nome ?? "");
 }
 
 function dataIso(v) {
@@ -56,7 +71,9 @@ export async function lerEml(buffer) {
     anexos: (m.attachments ?? []).map((a) => {
       // postal-mime entrega o conteúdo como ArrayBuffer (attachmentEncoding padrão)
       const conteudo = a.content ? Buffer.from(a.content) : null;
-      return { nome: a.filename || "anexo-sem-nome", bytes: conteudo ? conteudo.length : 0, conteudo };
+      const nome = a.filename || "anexo-sem-nome";
+      const inline = a.disposition === "inline" && Boolean(a.contentId) && ehImagem(nome, a.mimeType);
+      return { nome, bytes: conteudo ? conteudo.length : 0, conteudo, inline };
     }),
     avisos,
   };
@@ -97,13 +114,19 @@ export function normalizarMsg(fileData, pegarAnexo, { desencapsular = desencapsu
     const nomeBase = att.fileName || att.name || "anexo-sem-nome";
     const nome = att.innerMsgContent && !/\.msg$/i.test(nomeBase) ? `${nomeBase}.msg` : nomeBase;
     let conteudo = null;
+    let erroLeitura = false;
     try {
       const a = pegarAnexo(att);
       if (a && a.content) conteudo = Buffer.from(a.content);
     } catch (err) {
-      avisos.push(`anexo ${nome} não pôde ser lido (${err.message})`);
+      // o nome no aviso é o que o sidecar mostra (sem `..\` nem separadores)
+      erroLeitura = true;
+      avisos.push(`anexo ${sanitizarNomeAnexo(nome)} não pôde ser lido (${err.message})`);
     }
-    anexos.push({ nome, bytes: conteudo ? conteudo.length : att.contentLength ?? 0, conteudo });
+    const inline = att.attachmentHidden === true || (Boolean(att.pidContentId) && ehImagem(nome, att.attachMimeTag));
+    const anexo = { nome, bytes: conteudo ? conteudo.length : att.contentLength ?? 0, conteudo, inline };
+    if (erroLeitura) anexo.erroLeitura = true;
+    anexos.push(anexo);
   }
   return {
     cabecalhos: {

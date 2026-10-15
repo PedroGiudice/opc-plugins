@@ -423,6 +423,52 @@ export function htmlParaTexto(html) {
   return s.trim();
 }
 
+const RESERVADOS_WIN = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+// Nome de anexo pode ser o assunto inteiro do e-mail (.msg aninhado): sem teto,
+// um nome acima do limite do sistema de arquivos derrubaria a extração do
+// e-mail todo (ENAMETOOLONG).
+const MAX_NOME_ANEXO = 150;
+// Nomes que o Claude Code ou o sistema de casos LEEM por conta própria: um
+// anexo chamado CLAUDE.md gravado em `<email>.anexos/` vira instrução para o
+// Claude (o Claude Code carrega o CLAUDE.md de subpasta que a sessão toca), e
+// case.yaml/documentos.yaml/MEMORY.md são lidos como dados do caso.
+const NOMES_RESERVADOS_CASO = new Set(["claude.md", "claude.local.md", "case.yaml", "documentos.yaml", "memory.md"]);
+
+/**
+ * Nome de anexo (vindo do remetente, não confiável) -> nome de arquivo gravável
+ * no NTFS e no ext4. Segmentos `.`/`..` somem (o anexo nunca sai da pasta
+ * `.anexos/`); separadores viram `_`; `<>:"|?*` também (no NTFS `RE: x` criaria
+ * um fluxo alternativo, não um arquivo); ponto inicial sai (dotfile é invisível
+ * para a varredura e para o canal); ponto e espaço finais saem (o Windows os
+ * descarta e o nome divergiria do que gravamos).
+ *
+ * Dois vetores de injeção levam o prefixo `anexo-`: (1) nome que o Claude Code
+ * ou o caso leem sozinhos (CLAUDE.md, case.yaml...; e `.claude*`, a pasta de
+ * configuração); (2) extensão `.md` ou `.py`: `contrato.docx.md` com o nosso
+ * frontmatter e o md5 certo faria o `contrato.docx` irmão ser tido como em dia
+ * (nunca extraído) e o .md forjado circularia pelo pool como se fosse nosso.
+ */
+export function sanitizarNomeAnexo(nome) {
+  const semControle = String(nome ?? "").replace(/[\u0000-\u001f\u007f]/g, "");
+  let s = semControle
+    .split(/[\\/]/)
+    .filter((seg) => seg.trim() !== "" && seg.trim() !== "." && seg.trim() !== "..")
+    .join("_");
+  s = s.replace(/[<>:"|?*]/g, "_").trim();
+  // antes de tirar o ponto inicial: `.claude_x` vira `claude_x`, mas o vetor é o `.claude`
+  const configClaude = /^\.claude/i.test(s);
+  s = s.replace(/^\.+/, "").replace(/[. ]+$/, "");
+  if (!s) return "anexo-sem-nome";
+  if (configClaude || NOMES_RESERVADOS_CASO.has(s.toLowerCase()) || /\.(md|py)$/i.test(s)) s = `anexo-${s}`;
+  if (RESERVADOS_WIN.test(s)) s = `_${s}`;
+  if (s.length > MAX_NOME_ANEXO) {
+    const ponto = s.lastIndexOf(".");
+    const ext = ponto > 0 && s.length - ponto <= 10 ? s.slice(ponto) : "";
+    s = s.slice(0, MAX_NOME_ANEXO - ext.length).replace(/[. ]+$/, "") + ext;
+  }
+  return s;
+}
+
 /** Tamanho em B, KiB ou MiB com uma casa e vírgula decimal (pt-BR fixo, não o locale da máquina). */
 export function tamanhoLegivel(bytes) {
   const fmt = (v) => v.toFixed(1).replace(".", ",");
@@ -435,7 +481,8 @@ export function tamanhoLegivel(bytes) {
  * E-mail -> Markdown: cabeçalhos em lista, corpo, anexos. Cc só aparece
  * quando há. Cada anexo mostra o caminho do arquivo extraído quando o wiring
  * o gravou em disco (`caminho`); sem ele, "não extraído", para quem lê o
- * sidecar saber que o anexo existe e não está ao lado.
+ * sidecar saber que o anexo existe e não está ao lado. Anexo inline (imagem
+ * do corpo, anexo oculto do Outlook) é listado e nunca gravado.
  */
 export function renderEmail(e) {
   const c = e.cabecalhos;
@@ -443,7 +490,7 @@ export function renderEmail(e) {
   if (c.cc.length) linhas.push(`- Cc: ${c.cc.join(", ")}`);
   linhas.push(`- Data: ${c.data}`, `- Assunto: ${c.assunto}`, "", "## Corpo", "", e.corpo, "", "## Anexos", "");
   if (!e.anexos.length) linhas.push("(nenhum)");
-  for (const a of e.anexos) linhas.push(`- ${a.nome} (${tamanhoLegivel(a.bytes)}) -> ${a.caminho ?? "não extraído"}`);
+  for (const a of e.anexos) linhas.push(`- ${a.nome} (${tamanhoLegivel(a.bytes)}) -> ${a.inline ? "(inline, não gravado)" : a.caminho ?? "não extraído"}`);
   linhas.push("");
   return linhas.join("\n");
 }

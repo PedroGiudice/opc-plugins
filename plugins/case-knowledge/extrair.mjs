@@ -37,7 +37,7 @@ import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { isExcludedDirName, WORKDOC_MAX_DEPTH } from "./workdocs.mjs";
-import { planejarExtracao, nomeSidecar, tipoDeFormato, ehOriginalElegivel, montarSidecar, renderDocx, renderXlsx, renderEmail, tamanhoLegivel } from "./extracao.mjs";
+import { planejarExtracao, nomeSidecar, tipoDeFormato, ehOriginalElegivel, montarSidecar, renderDocx, renderXlsx, renderEmail, tamanhoLegivel, sanitizarNomeAnexo } from "./extracao.mjs";
 
 export const MAX_ORIGINAL_BYTES = 50 * 1024 * 1024;
 export const MAX_ANEXO_BYTES = 20 * 1024 * 1024;
@@ -54,11 +54,9 @@ const MAX_HEAP_FILHO_MB = 1024;
 export const ARQUIVO_FALHAS = ".extracao-falhas.json";
 const CAMINHO_EXTRAIR = fileURLToPath(import.meta.url);
 const SUFIXO_ANEXOS = ".anexos";
-const RESERVADOS_WIN = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
-// Nome de anexo pode ser o assunto inteiro do e-mail (.msg aninhado): sem teto,
-// um nome acima do limite do sistema de arquivos derrubaria a extração do
-// e-mail todo (ENAMETOOLONG).
-const MAX_NOME_ANEXO = 150;
+// Teto de anexos gravados por e-mail: um e-mail de spam ou de sistema com
+// centenas de anexos encheria a pasta do caso (e o pool) de uma vez.
+export const MAX_ANEXOS_POR_EMAIL = 50;
 
 // md5hex e escreverAtomico são cópias locais DE PROPÓSITO: importar de
 // sync-cases.mjs carregaria auth.mjs/@napi-rs/keyring em todo hook
@@ -91,30 +89,9 @@ function escreverAtomico(path, conteudo) {
   }
 }
 
-/**
- * Nome de anexo (vindo do remetente, não confiável) -> nome de arquivo gravável
- * no NTFS e no ext4. Segmentos `.`/`..` somem (o anexo nunca sai da pasta
- * `.anexos/`); separadores viram `_`; `<>:"|?*` também (no NTFS `RE: x` criaria
- * um fluxo alternativo, não um arquivo); ponto inicial sai (dotfile é invisível
- * para a varredura e para o canal); ponto e espaço finais saem (o Windows os
- * descarta e o nome divergiria do que gravamos).
- */
-export function sanitizarNomeAnexo(nome) {
-  const semControle = String(nome ?? "").replace(/[\u0000-\u001f\u007f]/g, "");
-  let s = semControle
-    .split(/[\\/]/)
-    .filter((seg) => seg.trim() !== "" && seg.trim() !== "." && seg.trim() !== "..")
-    .join("_");
-  s = s.replace(/[<>:"|?*]/g, "_").trim().replace(/^\.+/, "").replace(/[. ]+$/, "");
-  if (!s) return "anexo-sem-nome";
-  if (RESERVADOS_WIN.test(s)) s = `_${s}`;
-  if (s.length > MAX_NOME_ANEXO) {
-    const ponto = s.lastIndexOf(".");
-    const ext = ponto > 0 && s.length - ponto <= 10 ? s.slice(ponto) : "";
-    s = s.slice(0, MAX_NOME_ANEXO - ext.length).replace(/[. ]+$/, "") + ext;
-  }
-  return s;
-}
+// sanitizarNomeAnexo vive no módulo puro (o leitor de .msg usa o mesmo nome
+// no aviso de anexo ilegível); reexportado aqui, onde o wiring o usa.
+export { sanitizarNomeAnexo };
 
 /**
  * Varre o caso: originais elegíveis {rel: {md5, bytes}}, os textos dos
@@ -282,27 +259,56 @@ async function extrairUm(caseDir, rel, buf, limites) {
     avisos = e.avisos;
     const dirAnexos = `${rel}${SUFIXO_ANEXOS}`;
     const nivelDosAnexos = nivelDeAnexo(rel) + 1;
-    const usados = new Set();
     // conta o que de fato vai ter (ou já tem) sidecar, não o que foi só gravado
     let extraiveis = 0;
+    const candidatos = [];
     for (const a of e.anexos) {
       // nome cru veio do remetente: o sidecar nunca mostra `../x`
-      const nomeCru = a.nome;
-      a.nome = sanitizarNomeAnexo(nomeCru);
+      a.nome = sanitizarNomeAnexo(a.nome);
+      // inline (imagem do corpo, anexo oculto): listado no sidecar, não gravado
+      if (a.inline) continue;
       if (a.conteudo == null) {
         // o leitor, quando lançou ao ler o anexo, já registrou o aviso
-        if (!avisos.some((x) => x.startsWith(`anexo ${nomeCru} `))) avisos.push(`anexo ${a.nome} sem conteúdo legível`);
+        if (!a.erroLeitura) avisos.push(`anexo ${a.nome} sem conteúdo legível`);
         continue;
       }
       if (a.bytes > limites.maxAnexoBytes) {
         avisos.push(`anexo ${a.nome} acima do teto de 20 MiB (${tamanhoLegivel(a.bytes)}); não extraído`);
         continue;
       }
-      // dois anexos com o mesmo nome (sem caixa: NTFS) não se sobrescrevem
-      let nome = a.nome;
-      for (let i = 2; usados.has(nome.toLowerCase()); i++) nome = a.nome.replace(/(\.[^.]*)?$/, `-${i}$1`);
-      usados.add(nome.toLowerCase());
-      const relAnexo = `${dirAnexos}/${nome}`;
+      candidatos.push(a);
+    }
+    if (candidatos.length > MAX_ANEXOS_POR_EMAIL) {
+      avisos.push(`${candidatos.length - MAX_ANEXOS_POR_EMAIL} anexos além do teto de ${MAX_ANEXOS_POR_EMAIL} não gravados`);
+      candidatos.length = MAX_ANEXOS_POR_EMAIL;
+    }
+    // Nomes finais, sem caixa (NTFS): dois anexos com o mesmo nome não se
+    // sobrescrevem. Depois, nenhum anexo pode ocupar o nome do SIDECAR de outro
+    // anexo extraível: o prefixo anexo- leva `contrato.docx.md` para
+    // `anexo-contrato.docx.md`, que é exatamente o sidecar de um anexo chamado
+    // `anexo-contrato.docx` no mesmo e-mail (o .md forjado seria tido como em dia).
+    const ocupado = (conjuntos) => (n) => conjuntos.some((c) => c.has(n.toLowerCase()));
+    const unico = (base, emUso) => {
+      let n = base;
+      for (let i = 2; emUso(n); i++) n = base.replace(/(\.[^.]*)?$/, `-${i}$1`);
+      return n;
+    };
+    const usados = new Set();
+    for (const a of candidatos) {
+      a.nomeFinal = unico(a.nome, ocupado([usados]));
+      usados.add(a.nomeFinal.toLowerCase());
+    }
+    const sidecarsDeAnexos = new Set(
+      candidatos.filter((a) => ehOriginalElegivel(`${dirAnexos}/${a.nomeFinal}`)).map((a) => nomeSidecar(a.nomeFinal).toLowerCase()),
+    );
+    for (const a of candidatos) {
+      if (!sidecarsDeAnexos.has(a.nomeFinal.toLowerCase())) continue;
+      usados.delete(a.nomeFinal.toLowerCase());
+      a.nomeFinal = unico(a.nomeFinal, ocupado([usados, sidecarsDeAnexos]));
+      usados.add(a.nomeFinal.toLowerCase());
+    }
+    for (const a of candidatos) {
+      const relAnexo = `${dirAnexos}/${a.nomeFinal}`;
       const destino = destinoSeguro(caseDir, relAnexo);
       if (!destino) {
         avisos.push(`anexo ${a.nome} não gravado: caminho passa por symlink`);

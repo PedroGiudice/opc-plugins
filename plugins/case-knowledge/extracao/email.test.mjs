@@ -169,3 +169,37 @@ test("lerMsg: arquivo que não é .msg vira aviso, não exceção", () => {
   assert.equal(e.avisos.length, 1);
   assert.match(e.avisos[0], /^não foi possível abrir o \.msg \(/);
 });
+
+test("normalizarMsg: anexo oculto ou imagem com content-id é inline; documento com content-id não", () => {
+  const fileData = {
+    subject: "s", senderEmail: "a@a", recipients: [], body: "b",
+    attachments: [
+      { fileName: "image001.png", attachmentHidden: true },
+      { fileName: "assinatura.jpg", pidContentId: "abc@x" },
+      { fileName: "contrato.pdf", pidContentId: "def@x", attachMimeTag: "application/pdf" },
+      { fileName: "oculto.docx", attachmentHidden: true },
+      { fileName: "normal.docx" },
+    ],
+  };
+  const e = normalizarMsg(fileData, () => ({ content: new Uint8Array([1]) }));
+  assert.deepEqual(e.anexos.map((a) => [a.nome, a.inline]), [["image001.png", true], ["assinatura.jpg", true], ["contrato.pdf", false], ["oculto.docx", true], ["normal.docx", false]]);
+});
+
+test("lerEml: inline só com disposition inline + content-id + imagem", async () => {
+  const eml = [
+    "From: a@a", "To: b@b", "Subject: s", 'Content-Type: multipart/related; boundary="R"', "",
+    "--R", "Content-Type: text/html", "", '<p>oi <img src="cid:i1"></p>',
+    "--R", 'Content-Type: image/png; name="logo.png"', "Content-Transfer-Encoding: base64", 'Content-Disposition: inline; filename="logo.png"', "Content-ID: <i1>", "", Buffer.from("PNG").toString("base64"),
+    "--R", 'Content-Type: image/png; name="foto.png"', "Content-Transfer-Encoding: base64", 'Content-Disposition: attachment; filename="foto.png"', "Content-ID: <i2>", "", Buffer.from("PNG").toString("base64"),
+    "--R--", "",
+  ].join("\r\n");
+  const e = await lerEml(Buffer.from(eml));
+  assert.deepEqual(e.anexos.map((a) => [a.nome, a.inline]), [["logo.png", true], ["foto.png", false]]);
+});
+
+test("normalizarMsg: aviso de anexo ilegível usa o nome sem separadores de caminho", () => {
+  const fileData = { subject: "s", senderEmail: "a@a", recipients: [], body: "b", attachments: [{ fileName: "..\\pasta/x.pdf" }] };
+  const e = normalizarMsg(fileData, () => { throw new Error("ruim"); });
+  assert.deepEqual(e.avisos, ["anexo pasta_x.pdf não pôde ser lido (ruim)"]);
+  assert.equal(e.anexos[0].erroLeitura, true);
+});
