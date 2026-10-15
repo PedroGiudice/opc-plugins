@@ -1,12 +1,42 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { resolverSaidaHook, pastaDoCaso, PREFIXO } from "./extracao-sessao.mjs";
 
-test("resolverSaidaHook: fora de ~/cases devolve {} sem chamar o extrator", async () => {
+test("resolverSaidaHook: fora de ~/cases devolve {} sem carregar nem chamar o extrator", async () => {
   let chamado = false;
-  const out = await resolverSaidaHook("/outro/lugar", "/home/x/cases", { extrairCaso: async () => { chamado = true; } });
-  assert.deepEqual(out, {});
+  let importado = false;
+  const deps = { importar: async () => { importado = true; return import("../extrair.mjs"); }, extrairCaso: async () => { chamado = true; } };
+  assert.deepEqual(await resolverSaidaHook("/outro/lugar", "/home/x/cases", deps), {});
+  assert.deepEqual(await resolverSaidaHook("/home/x/cases", "/home/x/cases", deps), {});
   assert.equal(chamado, false);
+  assert.equal(importado, false);
+});
+
+test("hook: o extrator não é import estático (só carrega dentro de pasta de caso)", () => {
+  const texto = readFileSync(new URL("./extracao-sessao.mjs", import.meta.url), "utf-8");
+  assert.ok(!/^\s*import\s[^;]*from\s*["']\.\.\/extrair\.mjs["']/m.test(texto));
+});
+
+test("hook: stdout recebe só a linha JSON, mesmo com console.* chamado durante a execução", () => {
+  const dir = mkdtempSync(join(tmpdir(), "hook-"));
+  const caso = join(dir, "caso");
+  mkdirSync(caso);
+  // .eml inválido o bastante para o leitor reclamar não pode sujar a saída
+  writeFileSync(join(caso, "a.eml"), "From: a@a\r\nTo: b@b\r\nSubject: s\r\n\r\ncorpo\r\n");
+  const r = spawnSync(process.execPath, ["--import", "data:text/javascript,setTimeout(()=>console.log('ruido'),0)", fileURLToPath(new URL("./extracao-sessao.mjs", import.meta.url))], {
+    input: JSON.stringify({ cwd: caso }),
+    env: { ...process.env, CASE_KNOWLEDGE_CASES_BASE: dir },
+    encoding: "utf-8",
+  });
+  const linhas = r.stdout.split("\n").filter(Boolean);
+  assert.equal(linhas.length, 1, r.stdout);
+  const out = JSON.parse(linhas[0]);
+  assert.ok(out.hookSpecificOutput.additionalContext.includes("a.eml.md"));
 });
 
 test("resolverSaidaHook: na raiz de ~/cases devolve {} (não é pasta de caso)", async () => {

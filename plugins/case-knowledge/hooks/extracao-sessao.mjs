@@ -7,13 +7,18 @@
  * fica para o tick do sync e aparece na segunda lista. Degrada para {} em
  * qualquer falha — nunca quebra o Claude Code.
  *
+ * O extrator (../extrair.mjs) entra por import DINÂMICO, só depois de
+ * pastaDoCaso decidir que o cwd é pasta de caso: este hook roda em todo
+ * SessionStart, de qualquer pasta, e não deve pagar a carga do extrator fora de
+ * caso; e dep de pacote por import estático derruba o módulo inteiro quando o
+ * node_modules não a tem (teste C1 em sync-cases.test.mjs).
+ *
  * Não usa caseSlugFromCwd: o hook roda em QUALQUER pasta dentro de ~/cases
  * (inclusive pasta solta de revisão que não está no manifesto), então a pasta
  * da sessão é decidida só pelo cwd relativo à base.
  */
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { extrairCaso as extrairCasoReal, formatarResumo } from "../extrair.mjs";
 import { defaultCasesBase } from "./memoria-context.mjs";
 
 const CASES_BASE = process.env.CASE_KNOWLEDGE_CASES_BASE || defaultCasesBase();
@@ -37,12 +42,15 @@ export function pastaDoCaso(cwd, base) {
   return `${base.replace(/[\\/]+$/, "")}${sep}${slug}`;
 }
 
-export async function resolverSaidaHook(cwd, base = CASES_BASE, { extrairCaso = extrairCasoReal } = {}) {
+export async function resolverSaidaHook(cwd, base = CASES_BASE, deps = {}) {
   const dir = pastaDoCaso(cwd, base);
   if (!dir) return {};
   try {
+    const importar = deps.importar ?? (() => import("../extrair.mjs"));
+    const mod = await importar();
+    const extrairCaso = deps.extrairCaso ?? mod.extrairCaso;
     const r = await extrairCaso(dir, { orcamentoMs: ORCAMENTO_MS });
-    const s = formatarResumo(r);
+    const s = mod.formatarResumo(r);
     if (!s) return {};
     return { hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: PREFIXO + s } };
   } catch {
@@ -56,7 +64,20 @@ async function readStdin() {
   return Buffer.concat(c).toString("utf-8");
 }
 
+// Nada além da linha JSON final pode chegar ao stdout do hook: o Claude Code a
+// lê como JSON, e uma linha a mais (uma lib que faz console.debug ao ler um .msg
+// com recorrência malformada, p.ex.) invalida a saída inteira. O console fica
+// mudo durante todo o hook; a saída final vai direto por process.stdout.
+function silenciarConsole() {
+  for (const m of ["log", "debug", "info", "warn", "error", "trace", "dir"]) console[m] = () => {};
+}
+
+function emitir(obj) {
+  process.stdout.write(`${JSON.stringify(obj)}\n`);
+}
+
 async function main() {
+  silenciarConsole();
   let input = {};
   try {
     input = JSON.parse(await readStdin());
@@ -73,10 +94,10 @@ async function main() {
       return p;
     }
   };
-  console.log(JSON.stringify(await resolverSaidaHook(physical(rawCwd), physical(CASES_BASE))));
+  emitir(await resolverSaidaHook(physical(rawCwd), physical(CASES_BASE)));
 }
 
 // pathToFileURL: comparar com `file://${argv[1]}` falha no Windows (drive letter).
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch(() => console.log("{}"));
+  main().catch(() => emitir({}));
 }

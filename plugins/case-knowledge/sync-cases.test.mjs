@@ -3379,3 +3379,130 @@ test("updatePluginCaches: claude CLI ausente em todos os candidatos -> linha de 
   assert.equal(lines.length, 1);
   assert.match(lines[0], /plugin-update: pulado \(claude CLI nao encontrado\)/);
 });
+
+// ---------- CMR-303 C1: o tick não pode depender de dep nova por import estático ----------
+
+// Por que este teste existe: a tarefa agendada roda sync-cases.mjs do CLONE do
+// marketplace, cujo node_modules só muda com `npm install` (o self-update faz
+// git pull e nada mais). Um import estático de pacote que o clone ainda não tem
+// derruba o módulo inteiro com ERR_MODULE_NOT_FOUND antes de main() rodar, e o
+// tick morre em toda máquina (aconteceu com o import de extrair.mjs -> fflate).
+// O hook roda do cache install, mas a regra vale igual: qualquer dep nova só
+// entra por import dinâmico, dentro de try. A checagem é TRANSITIVA: seguir os
+// imports locais pega o caso em que o pacote entra por um módulo intermediário.
+const DEPS_ANTIGAS = new Set(["@modelcontextprotocol/sdk", "@napi-rs/keyring", "js-yaml", "zod"]);
+
+function importsEstaticos(texto) {
+  const alvos = [];
+  // `import x from "y"`, `import {a,\n b} from "y"`, `export ... from "y"`, `import "y"`.
+  // Linha que começa com `*` ou `//` é comentário e não casa (âncora em ^\s*import).
+  const reFrom = /^\s*(?:import|export)\s[^;"'`]*?\sfrom\s*["']([^"']+)["']/gm;
+  const reNu = /^\s*import\s*["']([^"']+)["']/gm;
+  for (const re of [reFrom, reNu]) for (const m of texto.matchAll(re)) alvos.push(m[1]);
+  return alvos;
+}
+
+function nomeDoPacote(espec) {
+  const partes = espec.split("/");
+  return espec.startsWith("@") ? partes.slice(0, 2).join("/") : partes[0];
+}
+
+test("C1: imports estáticos alcançáveis do tick e dos hooks são builtin, locais ou deps antigas", async () => {
+  const { dirname: dn, resolve } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const raiz = dn(fileURLToPath(import.meta.url));
+  const hooks = readdirSync(join(raiz, "hooks")).filter((f) => f.endsWith(".mjs") && !f.endsWith(".test.mjs"));
+  const fila = [join(raiz, "sync-cases.mjs"), ...hooks.map((f) => join(raiz, "hooks", f))];
+  const vistos = new Set();
+  const proibidos = [];
+  while (fila.length) {
+    const arq = fila.shift();
+    if (vistos.has(arq)) continue;
+    vistos.add(arq);
+    for (const espec of importsEstaticos(readFileSync(arq, "utf-8"))) {
+      if (espec.startsWith("node:")) continue;
+      if (espec.startsWith("./") || espec.startsWith("../")) {
+        fila.push(resolve(dn(arq), espec));
+        continue;
+      }
+      if (!DEPS_ANTIGAS.has(nomeDoPacote(espec))) proibidos.push(`${arq.slice(raiz.length + 1)} -> ${espec}`);
+    }
+  }
+  assert.ok(vistos.has(join(raiz, "hooks", "extracao-sessao.mjs")));
+  assert.deepEqual(proibidos, []);
+});
+
+test("C1: o extrator também não pode ser alcançado por import estático (só dinâmico)", () => {
+  const texto = readFileSync(new URL("./sync-cases.mjs", import.meta.url), "utf-8");
+  assert.ok(!importsEstaticos(texto).includes("./extrair.mjs"));
+  assert.match(texto, /await import\("\.\/extrair\.mjs"\)/);
+});
+
+function pluginComDeps(deps, instalados) {
+  const dir = mkdtempSync(join(tmpdir(), "deps-"));
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "x", dependencies: deps }));
+  for (const n of instalados) {
+    mkdirSync(join(dir, "node_modules", n), { recursive: true });
+    writeFileSync(join(dir, "node_modules", n, "package.json"), "{}");
+  }
+  return dir;
+}
+
+test("garantirDependencias: tudo presente não roda npm", async () => {
+  const { garantirDependencias } = await import("./sync-cases.mjs");
+  const dir = pluginComDeps({ zod: "^3", "@napi-rs/keyring": "^1" }, ["zod", "@napi-rs/keyring"]);
+  let chamadas = 0;
+  const r = garantirDependencias(dir, { spawn: () => { chamadas++; return { status: 0 }; } });
+  assert.deepEqual(r, { faltavam: [], ok: true, saida: "" });
+  assert.equal(chamadas, 0);
+});
+
+test("garantirDependencias: falta dep -> npm install no pluginDir, sem salvar lock, e confere de novo", async () => {
+  const { garantirDependencias } = await import("./sync-cases.mjs");
+  const dir = pluginComDeps({ zod: "^3", fflate: "^0.8", "@xmldom/xmldom": "^0.9" }, ["zod"]);
+  const vistos = [];
+  const spawn = (cmd, args, opts) => {
+    vistos.push({ cmd, args, cwd: opts.cwd, timeout: opts.timeout, shell: opts.shell });
+    for (const n of ["fflate", "@xmldom/xmldom"]) {
+      mkdirSync(join(dir, "node_modules", n), { recursive: true });
+      writeFileSync(join(dir, "node_modules", n, "package.json"), "{}");
+    }
+    return { status: 0, stdout: "added 2 packages", stderr: "" };
+  };
+  const r = garantirDependencias(dir, { spawn, platform: "linux", execPath: "/nao/existe/node" });
+  assert.deepEqual(r.faltavam, ["@xmldom/xmldom", "fflate"]);
+  assert.equal(r.ok, true);
+  assert.equal(vistos.length, 1);
+  assert.equal(vistos[0].cmd, "npm");
+  assert.deepEqual(vistos[0].args, ["install", "--no-audit", "--no-fund", "--omit=dev", "--no-save"]);
+  assert.equal(vistos[0].cwd, dir);
+  assert.equal(vistos[0].timeout, 180_000);
+  assert.equal(vistos[0].shell, false);
+});
+
+test("garantirDependencias: no Windows usa npm.cmd ao lado do node, entre aspas, com shell", async () => {
+  const { garantirDependencias } = await import("./sync-cases.mjs");
+  const dir = pluginComDeps({ fflate: "^0.8" }, []);
+  const vistos = [];
+  const execPath = "C:\\Program Files\\nodejs\\node.exe";
+  const exists = (p) => (p.endsWith("npm.cmd") ? true : existsSync(p));
+  const r = garantirDependencias(dir, { spawn: (cmd, args, opts) => { vistos.push([cmd, opts.shell]); return { status: 1, stderr: "npm ERR! network\nmais" }; }, platform: "win32", execPath, exists });
+  assert.equal(vistos.length, 1);
+  assert.match(vistos[0][0], /^".*npm\.cmd"$/);
+  assert.equal(vistos[0][1], true);
+  assert.deepEqual(r, { faltavam: ["fflate"], ok: false, saida: "npm ERR! network" });
+});
+
+test("garantirDependencias: nunca lança (spawn que lança, package.json ausente, install que não instala)", async () => {
+  const { garantirDependencias } = await import("./sync-cases.mjs");
+  const dir = pluginComDeps({ fflate: "^0.8" }, []);
+  const r1 = garantirDependencias(dir, { spawn: () => { throw new Error("EPERM"); } });
+  assert.equal(r1.ok, false);
+  assert.match(r1.saida, /EPERM/);
+  const r2 = garantirDependencias(mkdtempSync(join(tmpdir(), "deps-")), { spawn: () => ({ status: 0 }) });
+  assert.equal(r2.ok, false);
+  const r3 = garantirDependencias(dir, { spawn: () => ({ status: 0, stdout: "" }) });
+  assert.deepEqual([r3.ok, r3.saida], [false, "ainda faltam: fflate"]);
+  const r4 = garantirDependencias(dir, { spawn: () => ({ error: Object.assign(new Error("spawnSync npm ETIMEDOUT"), { code: "ETIMEDOUT" }), status: null }) });
+  assert.deepEqual([r4.ok, r4.saida], [false, "spawnSync npm ETIMEDOUT"]);
+});

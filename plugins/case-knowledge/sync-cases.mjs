@@ -25,7 +25,6 @@ import { spawnSync } from "node:child_process";
 import { requestWithAuth, readCredential, decodeJwtAuthorDir } from "./auth.mjs";
 import { defaultMemApiBase } from "./memoria.mjs";
 import { isSafeScaffoldingPath, SETUP_PLUGINS } from "./setup.mjs";
-import { extrairTodos } from "./extrair.mjs";
 import {
   isWorkdocPath,
   isSafeRelPath,
@@ -2723,6 +2722,71 @@ export function updatePluginCaches(scriptDir, deps = {}) {
   return lines;
 }
 
+/**
+ * CMR-303 (C1): garante no node_modules do plugin as dependências do
+ * package.json. A tarefa agendada roda este arquivo do CLONE do marketplace,
+ * cujo node_modules só muda com `npm install`: o self-update faz `git pull` e
+ * nada mais, e o setup.mjs pula o npm install quando node_modules já existe.
+ * Sem isto, a dep nova de um release (fflate, exceljs...) nunca chega ao clone e
+ * a fase que depende dela falha em toda máquina, para sempre.
+ *
+ * Confere cada dependência pelo package.json dela dentro de node_modules (barato,
+ * sem resolver o grafo); faltando alguma, roda `npm install` no pluginDir.
+ * `--no-save`: npm de outra versão reescreve o package-lock.json do clone (o
+ * formato muda entre versões), o clone fica sujo e o próximo `git pull --ff-only`
+ * do self-update falha. `--omit=dev`: o tick só precisa das deps de runtime.
+ * Prefere o npm ao lado do node em execução: a tarefa agendada nem sempre herda
+ * um PATH com o npm, e o npm irmão é o da mesma instalação do node.
+ *
+ * Devolve {faltavam, ok, saida}; nunca lança (o tick não pode morrer aqui).
+ */
+export function garantirDependencias(pluginDir, deps = {}) {
+  const exists = deps.exists || existsSync;
+  const readFile = deps.readFile || ((p) => readFileSync(p, "utf-8"));
+  const spawn = deps.spawn || spawnSync;
+  const win = (deps.platform || process.platform) === "win32";
+  const faltando = () => {
+    try {
+      const pkg = JSON.parse(readFile(join(pluginDir, "package.json")));
+      return Object.keys(pkg.dependencies || {})
+        .sort()
+        .filter((nome) => !exists(join(pluginDir, "node_modules", nome, "package.json")));
+    } catch {
+      return null;
+    }
+  };
+  const faltavam = faltando();
+  if (faltavam === null) return { faltavam: [], ok: false, saida: "package.json ilegível" };
+  if (faltavam.length === 0) return { faltavam, ok: true, saida: "" };
+  const primeiraLinha = (s) => String(s || "").trim().split("\n")[0].trim();
+  try {
+    // separador pela plataforma alvo, não pela do processo (o teste simula o Windows)
+    const dirNode = String(deps.execPath || process.execPath).replace(/[\\/][^\\/]*$/, "");
+    const irmao = win ? `${dirNode}\\npm.cmd` : `${dirNode}/npm`;
+    let cmd = exists(irmao) ? irmao : "npm";
+    // Windows: .cmd só roda com shell desde o patch do CVE-2024-27980 (como no
+    // setup.mjs); com shell, caminho com espaço ("Program Files") vai entre aspas.
+    if (win && cmd.includes(" ")) cmd = `"${cmd}"`;
+    const r = spawn(cmd, ["install", "--no-audit", "--no-fund", "--omit=dev", "--no-save"], {
+      cwd: pluginDir,
+      encoding: "utf-8",
+      timeout: 180_000,
+      stdio: "pipe",
+      shell: win,
+      windowsHide: true,
+    });
+    if (r.error) return { faltavam, ok: false, saida: primeiraLinha(r.error.message) };
+    if (r.status !== 0) {
+      return { faltavam, ok: false, saida: primeiraLinha(r.stderr) || primeiraLinha(r.stdout) || `exit ${r.status}` };
+    }
+    const restantes = faltando() ?? faltavam;
+    if (restantes.length) return { faltavam, ok: false, saida: `ainda faltam: ${restantes.join(", ")}` };
+    return { faltavam, ok: true, saida: primeiraLinha(r.stdout) };
+  } catch (err) {
+    return { faltavam, ok: false, saida: primeiraLinha(err.message) };
+  }
+}
+
 async function main() {
   const apiBase = process.env.CASE_KNOWLEDGE_API_BASE || defaultApiBase();
   const casesBase = process.env.CASE_KNOWLEDGE_CASES_BASE || defaultCasesBase();
@@ -2749,6 +2813,56 @@ async function main() {
     }
   } catch (err) {
     appendLog(casesBase, `plugin-update: erro inesperado: ${err.message}`);
+  }
+
+  // CMR-303 (C1): deps do package.json presentes no node_modules deste clone
+  // (o self-update não roda npm install). Silencioso quando nada falta.
+  let depsOk = true;
+  try {
+    const d = garantirDependencias(dirname(fileURLToPath(import.meta.url)));
+    depsOk = d.ok;
+    if (d.faltavam.length) {
+      appendLog(casesBase, d.ok ? `deps: instalou ${d.faltavam.join(", ")}` : `deps: npm install falhou (${d.saida})`);
+    }
+  } catch (err) {
+    appendLog(casesBase, `deps: erro inesperado: ${err.message}`);
+  }
+
+  // CMR-303: extrai o texto dos workdocs (.docx/.xlsx/.msg/.eml) para um .md ao
+  // lado do original. A fase é LOCAL (não fala com a VM), então roda antes da
+  // busca do manifest: máquina offline também extrai (o `return` por falha do
+  // manifest pularia a fase). Fica antes do syncWorkdocs, como a spec pede: o
+  // arquivo que nasceu nesta máquina é extraído e sobe no mesmo tick; o .docx
+  // que desceu do hub é extraído no tick seguinte. Orçamento de 120 s (a tarefa
+  // do Windows tem ExecutionTimeLimit de 5 min).
+  //
+  // Import DINÂMICO de propósito (ver o teste C1 em sync-cases.test.mjs): o
+  // extrator puxa deps que o clone pode ainda não ter; import estático
+  // derrubaria o tick inteiro antes de main(). Falha do import vira uma linha
+  // de log e o tick segue.
+  if (!depsOk) {
+    appendLog(casesBase, "extracao: indisponível (dependências ausentes no node_modules do plugin)");
+  } else {
+    let extrairTodos = null;
+    try {
+      ({ extrairTodos } = await import("./extrair.mjs"));
+    } catch (err) {
+      appendLog(casesBase, `extracao: indisponível (${err.message})`);
+    }
+    if (extrairTodos) {
+      try {
+        const { porCaso } = await extrairTodos(casesBase, { orcamentoMs: 120_000 });
+        for (const [caso, r] of Object.entries(porCaso)) {
+          for (const e of r.extraidos) appendLog(casesBase, `extracao ${caso}: ${e.rel} -> ${e.sidecar}`);
+          for (const a of r.adiados) if (a.motivo !== "orçamento de tempo esgotado") appendLog(casesBase, `extracao ${caso}: ${a.rel} adiado (${a.motivo})`);
+          for (const x of r.erros) appendLog(casesBase, `extracao ${caso}: ${x.rel} erro (${x.erro})`);
+          const esgotados = r.adiados.filter((a) => a.motivo === "orçamento de tempo esgotado").length;
+          if (esgotados) appendLog(casesBase, `extracao ${caso}: ${esgotados} arquivo(s) ficaram para o próximo tick (orçamento)`);
+        }
+      } catch (err) {
+        appendLog(casesBase, `extracao: erro inesperado: ${err.message}`);
+      }
+    }
   }
 
   // CMR-138: autor da memoria (namespace-por-autor) derivado UMA vez do access_jwt,
@@ -2879,25 +2993,6 @@ async function main() {
     await syncTranscripts(memApiBase, casesBase);
   } catch (err) {
     appendLog(casesBase, `transcripts: erro inesperado: ${err.message}`);
-  }
-
-  // CMR-303: extrai o texto dos workdocs (.docx/.xlsx/.msg/.eml) para um .md ao
-  // lado do original. Roda ANTES do syncWorkdocs para o arquivo que nasceu
-  // nesta máquina ser extraído e subir no mesmo tick; o .docx que desceu do hub
-  // agora é extraído no tick seguinte. Orçamento de 120 s (a tarefa do Windows
-  // tem ExecutionTimeLimit de 5 min). extrairTodos nunca lança; try/catch é a
-  // última linha de defesa. Linhas de log por arquivo extraído/adiado/erro.
-  try {
-    const { porCaso } = await extrairTodos(casesBase, { orcamentoMs: 120_000 });
-    for (const [caso, r] of Object.entries(porCaso)) {
-      for (const e of r.extraidos) appendLog(casesBase, `extracao ${caso}: ${e.rel} -> ${e.sidecar}`);
-      for (const a of r.adiados) if (a.motivo !== "orçamento de tempo esgotado") appendLog(casesBase, `extracao ${caso}: ${a.rel} adiado (${a.motivo})`);
-      for (const x of r.erros) appendLog(casesBase, `extracao ${caso}: ${x.rel} erro (${x.erro})`);
-      const esgotados = r.adiados.filter((a) => a.motivo === "orçamento de tempo esgotado").length;
-      if (esgotados) appendLog(casesBase, `extracao ${caso}: ${esgotados} arquivo(s) ficaram para o próximo tick (orçamento)`);
-    }
-  } catch (err) {
-    appendLog(casesBase, `extracao: erro inesperado: ${err.message}`);
   }
 
   // CMR-161: espelha os workdocs (.md/.py/.docx) da pasta do caso — pool comum do
