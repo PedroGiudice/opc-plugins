@@ -34,6 +34,28 @@ function primeiro(no, local) {
   return filhos(no).find((n) => n.localName === local) ?? null;
 }
 
+/**
+ * Filhos de um nó estrutural (corpo, tabela, linha, célula) com os
+ * invólucros abertos: w:sdt (controle de conteúdo) contribui o que está em
+ * w:sdtContent, e w:customXml contribui os próprios filhos. Os dois podem
+ * embrulhar parágrafo, tabela, linha ou célula; sem abrir, o conteúdo some
+ * calado. sdtPr/sdtEndPr ficam de fora (são propriedades, não conteúdo).
+ */
+function filhosDesembrulhados(no) {
+  const saida = [];
+  for (const f of filhos(no)) {
+    if (f.localName === "sdt") {
+      const conteudo = primeiro(f, "sdtContent");
+      if (conteudo) saida.push(...filhosDesembrulhados(conteudo));
+    } else if (f.localName === "customXml") {
+      saida.push(...filhosDesembrulhados(f));
+    } else {
+      saida.push(f);
+    }
+  }
+  return saida;
+}
+
 // ---------- numeração ----------
 
 function romano(n, maiusculo) {
@@ -138,12 +160,19 @@ function numPrEfetivo(p, estilos) {
 }
 
 /**
- * Contadores por numId. Um numId diferente para o mesmo abstractNum reinicia a
- * contagem (é assim que o Word reinicia listas, com ou sem startOverride).
- * Nível inferior zera quando um superior incrementa.
+ * Contadores por abstractNum, como o Word: todo w:num que aponta para o mesmo
+ * abstractNum CONTINUA a mesma lista. Só um lvlOverride/startOverride reinicia,
+ * e só os níveis sobrescritos, na primeira vez que aquele numId aparece.
+ *
+ * Cada nível guarda se já foi usado: nível nunca emitido (ou zerado porque um
+ * superior avançou) é exibido com o valor de start, e o primeiro parágrafo
+ * nele recebe exatamente esse valor. Isso cobre start 0 ("0.", "1.") e o
+ * nível superior nunca emitido ("5.1." com start 5), que um contador
+ * pré-decrementado com piso em 1 errava.
  */
 function criarNumerador(numeracao) {
-  const contadores = new Map(); // numId -> array por nível
+  const listas = new Map(); // abstractId -> { cont: [], usado: [] }
+  const numIdsVistos = new Set();
   return function proximo(numPr) {
     if (!numPr || !numPr.numId || numPr.numId === "0") return null;
     const num = numeracao.nums.get(numPr.numId);
@@ -153,18 +182,25 @@ function criarNumerador(numeracao) {
     const ilvl = numPr.ilvl;
     const lvl = niveis[ilvl];
     if (!lvl) return null;
-    let cont = contadores.get(numPr.numId);
-    if (!cont) {
-      cont = niveis.map((n, i) => (num.overrides[i] ?? n?.start ?? 1) - 1);
-      contadores.set(numPr.numId, cont);
+    let lista = listas.get(num.abstractId);
+    if (!lista) {
+      lista = { cont: [], usado: [] };
+      listas.set(num.abstractId, lista);
     }
-    cont[ilvl] += 1;
-    for (let i = ilvl + 1; i < cont.length; i++) cont[i] = (num.overrides[i] ?? niveis[i]?.start ?? 1) - 1;
+    // start efetivo: o startOverride deste numId, senão o start do nível
+    const inicio = (i) => num.overrides[i] ?? niveis[i]?.start ?? 1;
+    if (!numIdsVistos.has(numPr.numId)) {
+      numIdsVistos.add(numPr.numId);
+      for (const i of Object.keys(num.overrides)) lista.usado[Number(i)] = false;
+    }
+    lista.cont[ilvl] = lista.usado[ilvl] ? lista.cont[ilvl] + 1 : inicio(ilvl);
+    lista.usado[ilvl] = true;
+    for (let i = ilvl + 1; i < niveis.length; i++) lista.usado[i] = false;
     if (lvl.numFmt === "bullet") return "-";
     return lvl.lvlText.replace(/%(\d)/g, (_, d) => {
       const i = Number(d) - 1;
       const n = niveis[i];
-      return n ? formatar(n.numFmt, Math.max(cont[i], 1)) : "";
+      return n ? formatar(n.numFmt, lista.usado[i] ? lista.cont[i] : inicio(i)) : "";
     });
   };
 }
@@ -223,7 +259,7 @@ function segmentosDoParagrafo(p, ctx) {
  */
 function textoDaCelula(tc, ctx) {
   const partes = [];
-  for (const f of filhos(tc)) {
+  for (const f of filhosDesembrulhados(tc)) {
     if (f.localName === "p") {
       const t = segmentosDoParagrafo(f, ctx).map((s) => s.texto).join("");
       if (t) partes.push(t);
@@ -237,9 +273,9 @@ function textoDaCelula(tc, ctx) {
 
 function lerTabela(tbl, ctx) {
   const linhas = [];
-  for (const tr of filhos(tbl).filter((n) => n.localName === "tr")) {
+  for (const tr of filhosDesembrulhados(tbl).filter((n) => n.localName === "tr")) {
     const cels = [];
-    for (const tc of filhos(tr).filter((n) => n.localName === "tc")) {
+    for (const tc of filhosDesembrulhados(tr).filter((n) => n.localName === "tc")) {
       cels.push(textoDaCelula(tc, ctx));
       // célula mesclada na horizontal: as colunas que ela cobre viram células
       // vazias, para a linha manter o número de colunas da grade
@@ -255,7 +291,7 @@ function lerTabela(tbl, ctx) {
 
 function lerCorpo(body, ctx, numerador, estilos) {
   const blocos = [];
-  for (const f of filhos(body)) {
+  for (const f of filhosDesembrulhados(body)) {
     if (f.localName === "p") {
       // conta todo parágrafo (vazio inclusive): é a posição no documento,
       // usada como âncora pelos avisos
@@ -270,9 +306,6 @@ function lerCorpo(body, ctx, numerador, estilos) {
       blocos.push(bloco);
     } else if (f.localName === "tbl") {
       blocos.push(lerTabela(f, ctx));
-    } else if (f.localName === "sdt") {
-      const conteudo = primeiro(f, "sdtContent");
-      if (conteudo) blocos.push(...lerCorpo(conteudo, ctx, numerador, estilos));
     }
   }
   return blocos;

@@ -106,3 +106,72 @@ test("lerDocx: parágrafo vazio não vira bloco; buffer que não é zip vira avi
   assert.equal(d2.blocos.length, 0);
   assert.match(d2.avisos[0], /não foi possível abrir/i);
 });
+
+// ---------- sdt e customXml em todos os níveis ----------
+
+test("lerDocx: conteúdo de célula dentro de sdt entra no texto da célula", () => {
+  const xml = documento(
+    `<w:tbl><w:tr><w:tc><w:sdt><w:sdtPr/><w:sdtContent><w:p><w:r><w:t>dentro</w:t></w:r></w:p></w:sdtContent></w:sdt></w:tc></w:tr></w:tbl>`,
+  );
+  const d = lerDocx(construirDocx({ documentXml: xml }));
+  assert.deepEqual(d.blocos[0].linhas, [["dentro"]]);
+});
+
+test("lerDocx: linha de tabela dentro de sdt vira linha", () => {
+  const xml = documento(
+    `<w:tbl><w:sdt><w:sdtContent><w:tr><w:tc><w:p><w:r><w:t>a</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>b</w:t></w:r></w:p></w:tc></w:tr></w:sdtContent></w:sdt></w:tbl>`,
+  );
+  const d = lerDocx(construirDocx({ documentXml: xml }));
+  assert.deepEqual(d.blocos[0].linhas, [["a", "b"]]);
+});
+
+test("lerDocx: célula dentro de sdt vira célula da linha", () => {
+  const xml = documento(
+    `<w:tbl><w:tr><w:tc><w:p><w:r><w:t>a</w:t></w:r></w:p></w:tc><w:sdt><w:sdtContent><w:tc><w:p><w:r><w:t>b</w:t></w:r></w:p></w:tc></w:sdtContent></w:sdt></w:tr></w:tbl>`,
+  );
+  const d = lerDocx(construirDocx({ documentXml: xml }));
+  assert.deepEqual(d.blocos[0].linhas, [["a", "b"]]);
+});
+
+test("lerDocx: parágrafo dentro de customXml no corpo vira bloco", () => {
+  const xml = documento(
+    `<w:customXml w:element="clausula"><w:p><w:r><w:t>embrulhado</w:t></w:r></w:p></w:customXml>`,
+  );
+  const d = lerDocx(construirDocx({ documentXml: xml }));
+  assert.deepEqual(d.blocos.map(textoDe), ["embrulhado"]);
+});
+
+// ---------- contadores de numeração ----------
+
+const numeracaoUmNivel = (lvls, nums) =>
+  `<?xml version="1.0"?><w:numbering ${W}><w:abstractNum w:abstractNumId="0">${lvls}</w:abstractNum>${nums}</w:numbering>`;
+
+test("lerDocx: w:start 0 numera a partir de zero", () => {
+  const numbering = numeracaoUmNivel(
+    `<w:lvl w:ilvl="0"><w:start w:val="0"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>`,
+    `<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>`,
+  );
+  const xml = documento(paragrafo("a", { numId: 1 }) + paragrafo("b", { numId: 1 }));
+  const d = lerDocx(construirDocx({ documentXml: xml, numberingXml: numbering }));
+  assert.deepEqual(d.blocos.map((b) => b.numero), ["0.", "1."]);
+});
+
+test("lerDocx: nível superior nunca emitido aparece com o valor de start", () => {
+  const numbering = numeracaoUmNivel(
+    `<w:lvl w:ilvl="0"><w:start w:val="5"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>` +
+      `<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2."/></w:lvl>`,
+    `<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>`,
+  );
+  const xml = documento(paragrafo("sub", { numId: 1, ilvl: 1 }));
+  const d = lerDocx(construirDocx({ documentXml: xml, numberingXml: numbering }));
+  assert.deepEqual(d.blocos.map((b) => b.numero), ["5.1."]);
+});
+
+test("lerDocx: numIds do mesmo abstractNum sem startOverride continuam a lista", () => {
+  const xml = documento(
+    paragrafo("A", { numId: 1 }) + paragrafo("B", { numId: 1 }) + paragrafo("C", { numId: 2 }) + paragrafo("D", { numId: 2 }),
+  );
+  const num = numeracaoDecimal3Niveis({ numIds: [1, 2] });
+  const d = lerDocx(construirDocx({ documentXml: xml, numberingXml: num }));
+  assert.deepEqual(d.blocos.map((b) => b.numero), ["1.", "2.", "3.", "4."]);
+});
