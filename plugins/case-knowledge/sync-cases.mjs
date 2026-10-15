@@ -2899,9 +2899,16 @@ async function main() {
           // Migração do layout 0.29: enquanto o hub não for migrado, o pool
           // re-baixa o sidecar antigo e esta linha volta a cada tick.
           const mig = r.migracao;
-          if (mig && mig.movidos.length + mig.mesclados.length + mig.removidos.length) {
-            appendLog(casesBase, `extracao ${caso}: migração: ${mig.movidos.length} movido(s), ${mig.mesclados.length} mesclado(s), ${mig.removidos.length} removido(s) para extracoes/`);
+          if (mig && mig.movidos.length + mig.mesclados.length + mig.removidos.length + mig.conflitos.length) {
+            appendLog(casesBase, `extracao ${caso}: migração: ${mig.movidos.length} movido(s), ${mig.mesclados.length} mesclado(s), ${mig.removidos.length} removido(s), ${mig.conflitos.length} conflito(s) para extracoes/`);
           }
+          // o que foi descartado (o destino já existia) tem nome no log: até 5
+          if (mig?.removidos.length) {
+            const nomes = mig.removidos.slice(0, 5).join(", ");
+            const resto = mig.removidos.length > 5 ? ` e mais ${mig.removidos.length - 5}` : "";
+            appendLog(casesBase, `extracao ${caso}: migração: removido(s), o destino já existia: ${nomes}${resto}`);
+          }
+          for (const c of mig?.conflitos ?? []) appendLog(casesBase, `extracao ${caso}: migração: ${c.rel} difere do destino; preservado como ${c.preservadoComo}`);
           for (const x of mig?.erros ?? []) appendLog(casesBase, `extracao ${caso}: migração: ${x.rel} erro (${x.erro})`);
           for (const e of r.extraidos) appendLog(casesBase, `extracao ${caso}: ${e.rel} -> ${e.sidecar}`);
           for (const a of r.adiados) if (a.motivo !== "orçamento de tempo esgotado") appendLog(casesBase, `extracao ${caso}: ${a.rel} adiado (${a.motivo})`);

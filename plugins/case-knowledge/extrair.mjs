@@ -556,7 +556,7 @@ export function gravarFalhas(casesBase, falhas) {
 // ---------- migração do layout 0.29 (sidecar ao lado do original) ----------
 
 function migracaoVazia() {
-  return { movidos: [], mesclados: [], removidos: [], erros: [] };
+  return { movidos: [], mesclados: [], removidos: [], conflitos: [], erros: [] };
 }
 
 // Entrada do caminho sem seguir symlink (existsSync segue).
@@ -616,9 +616,50 @@ function migrarSidecar(caseDir, rel, m) {
   }
 }
 
-// Mescla arquivo a arquivo; o que já existe no destino vence (o anexo é
-// derivado do e-mail e o destino foi gravado pelo 0.30). Devolve sem lançar.
-function mesclarPasta(src, dest, rel, m) {
+// Arquivo da pasta antiga cujo destino já existe (R28). Sidecar nosso (.md com
+// o nosso frontmatter) é derivado: o destino vence. Bytes iguais: o antigo só
+// sai. Bytes DIFERENTES num anexo: o antigo pode ser a edição do advogado, e não
+// pode sumir. Até o hub ser migrado, o pool re-baixa `m.msg.anexos/` no lugar
+// antigo; o advogado edita o .docx ali; a migração do tick seguinte roda ANTES
+// do syncWorkdocs, então a edição nunca chegou ao hub nem tem cópia em
+// `.versoes`. Ela vai para a pasta de destino como
+// `<stem>.conflito-migracao<ext>`: o marcador `.conflito-` a deixa fora do pool
+// e da extração por construção (como a cópia de conflito do canal).
+function resolverColisao(s, d, nome, dirDest, r, relDirDest, m) {
+  if (!lstatSync(d).isFile()) {
+    m.erros.push({ rel: r, erro: "destino existe e não é arquivo" });
+    return;
+  }
+  const velho = readFileSync(s);
+  const nossoSidecar = asciiLower(nome).endsWith(".md") && lerFrontmatter(velho.toString("utf-8")) !== null;
+  if (nossoSidecar || velho.equals(readFileSync(d))) {
+    unlinkSync(s);
+    m.removidos.push(r);
+    return;
+  }
+  const ponto = nome.lastIndexOf(".");
+  const [stem, ext] = ponto > 0 ? [nome.slice(0, ponto), nome.slice(ponto)] : [nome, ""];
+  for (let i = 1; ; i++) {
+    const n = `${stem}.conflito-migracao${i === 1 ? "" : `-${i}`}${ext}`;
+    const c = join(dirDest, n);
+    if (!existe(c)) {
+      renameSync(s, c);
+      m.conflitos.push({ rel: r, preservadoComo: `${relDirDest}/${n}` });
+      return;
+    }
+    // a mesma edição já preservada numa rodada anterior (o pool a re-baixou)
+    if (lstatSync(c).isFile() && readFileSync(c).equals(velho)) {
+      unlinkSync(s);
+      m.removidos.push(r);
+      return;
+    }
+  }
+}
+
+// Mescla arquivo a arquivo (ver resolverColisao para o que já existe no
+// destino). `relDest` é o caminho da pasta de destino, para nomear a cópia de
+// conflito. Devolve sem lançar.
+function mesclarPasta(src, dest, rel, relDest, m) {
   let entradas;
   try {
     entradas = readdirSync(src, { withFileTypes: true });
@@ -634,11 +675,11 @@ function mesclarPasta(src, dest, rel, m) {
       if (e.isDirectory()) {
         if (!existe(d)) renameSync(s, d);
         else if (lstatSync(d).isDirectory()) {
-          mesclarPasta(s, d, r, m);
+          mesclarPasta(s, d, r, `${relDest}/${e.name}`, m);
           rmdirSync(s);
         } else m.erros.push({ rel: r, erro: "destino existe e não é pasta" });
       } else if (e.isFile()) {
-        if (existe(d)) unlinkSync(s);
+        if (existe(d)) resolverColisao(s, d, e.name, dest, r, relDest, m);
         else renameSync(s, d);
       } else m.erros.push({ rel: r, erro: "não é arquivo comum; não migrado" });
     } catch (err) {
@@ -650,7 +691,8 @@ function mesclarPasta(src, dest, rel, m) {
 
 function migrarPastaDeAnexos(caseDir, rel, m) {
   const src = join(caseDir, ...rel.split("/"));
-  const dest = destinoSeguro(caseDir, destinoDaMigracao(rel));
+  const relDest = destinoDaMigracao(rel);
+  const dest = destinoSeguro(caseDir, relDest);
   if (!dest) {
     m.erros.push({ rel, erro: "destino passa por symlink" });
     return;
@@ -670,7 +712,7 @@ function migrarPastaDeAnexos(caseDir, rel, m) {
     erroDeMigracao(m, rel, err);
     return;
   }
-  mesclarPasta(src, dest, rel, m);
+  mesclarPasta(src, dest, rel, relDest, m);
   m.mesclados.push(rel);
   try {
     rmdirSync(src);
@@ -684,8 +726,10 @@ function migrarPastaDeAnexos(caseDir, rel, m) {
  * `m.msg.anexos/` ao lado do e-mail) para `extracoes/`. Idempotente e barata:
  * sem nada a migrar, custa uma varredura de nomes (só o `.md` com nome de
  * sidecar é lido, para conferir o frontmatter). Nunca lança: cada falha vira um
- * item de `erros` e o resto segue. Devolve {movidos, mesclados, removidos, erros}
- * com os caminhos ANTIGOS.
+ * item de `erros` e o resto segue. Devolve {movidos, mesclados, removidos,
+ * conflitos, erros} com os caminhos ANTIGOS; `removidos` nomeia cada arquivo
+ * descartado (também os de dentro de uma pasta mesclada) e `conflitos` traz
+ * {rel, preservadoComo} do anexo editado que foi preservado (resolverColisao).
  *
  * Por que idempotente, e por que o hub migra à parte: o pool de workdocs
  * RE-BAIXA o `.md` que some localmente enquanto o hub ainda o tem (deleção local
@@ -734,6 +778,7 @@ export function migrarLayout(caseDir) {
     m.erros.push({ rel: ".", erro: err.message });
   }
   for (const k of ["movidos", "mesclados", "removidos"]) m[k].sort();
+  m.conflitos.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
   return m;
 }
 
@@ -804,6 +849,7 @@ export async function extrairCaso(caseDir, opts = {}) {
     for (const k of ["movidos", "mesclados", "removidos"]) {
       for (const rel of resumo.migracao[k]) log(`migração: ${rel} -> ${destinoDaMigracao(rel)}${k === "movidos" ? "" : ` (${k === "mesclados" ? "mesclado" : "removido, o destino já existia"})`}`);
     }
+    for (const c of resumo.migracao.conflitos) log(`migração: ${c.rel} difere do destino; preservado como ${c.preservadoComo}`);
     for (const e of resumo.migracao.erros) log(`migração: ${e.rel} erro (${e.erro})`);
     const varredura = varrer(caseDir, { maxOriginalBytes });
     resumo.erros.push(...varredura.erros);
@@ -1080,7 +1126,8 @@ async function main() {
       const casos = Object.entries(porCaso);
       if (!casos.length) console.log(`nenhum caso em ${val("--migrar")}`);
       for (const [caso, m] of casos) {
-        console.log(`${caso}: ${m.movidos.length} movido(s), ${m.mesclados.length} mesclado(s), ${m.removidos.length} removido(s), ${m.erros.length} erro(s)`);
+        console.log(`${caso}: ${m.movidos.length} movido(s), ${m.mesclados.length} mesclado(s), ${m.removidos.length} removido(s), ${m.conflitos.length} conflito(s), ${m.erros.length} erro(s)`);
+        for (const c of m.conflitos) console.log(`${caso}: ${c.rel} difere do destino; preservado como ${c.preservadoComo}`);
         for (const e of m.erros) console.log(`${caso}: erro ${e.rel}: ${e.erro}`);
       }
     } else {

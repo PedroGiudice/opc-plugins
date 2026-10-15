@@ -155,8 +155,11 @@ Migração do layout 0.29 (sidecar ao lado do original): `migrarLayout`
 (`extrair.mjs`) roda no início de toda extração de caso, no tick e no hook. Ela
 move para `extracoes/` cada `<original>.md` que tenha o cabeçalho do extrator e
 cada pasta `<e-mail>.anexos/`; se o destino já existe, o destino fica e o antigo
-sai (pasta é mesclada arquivo a arquivo). `.md` do usuário, mesmo com nome
-parecido, não é tocado. A migração é idempotente porque o pool re-baixa o `.md`
+sai (pasta é mesclada arquivo a arquivo). Exceção: um anexo cujo destino existe
+com bytes DIFERENTES pode ser edição do advogado feita no lugar antigo; ele não
+é apagado, e sim preservado na pasta de destino como
+`<nome>.conflito-migracao<ext>` (o marcador `.conflito-` o deixa fora do pool e
+da extração). `.md` do usuário, mesmo com nome parecido, não é tocado. A migração é idempotente porque o pool re-baixa o `.md`
 que some localmente enquanto o hub ainda o tem: até o hub ser migrado, um tick
 pode trazer de volta o arquivo no lugar antigo e o seguinte o move de novo. Por
 isso, logo após publicar a 0.30.0, migrar o hub na VM (não extrai nada; o hub
@@ -168,8 +171,19 @@ tick de cada máquina). O argumento é a base de casos do hub, a mesma do
 node ~/opc-plugins/plugins/case-knowledge/extrair.mjs --migrar /home/opc/case-docs/tenants/1/cases
 ```
 
+Uma passada só não basta: máquina que ainda está no 0.29 continua gravando
+sidecar ao lado do original e o sobe para o hub. Por isso o `--migrar` (que é
+idempotente) precisa rodar de novo no hub quando TODAS as máquinas estiverem no
+0.30. Sinal de que falta: linhas recorrentes `extracao <caso>: migração: ...
+removido(s)` ou `... mesclado(s)` no `.sync.log` de uma máquina cliente (o hub
+ainda tem o arquivo no lugar antigo e o pool o re-baixa a cada tick). Durante o
+rollout, o controlador mantém na VM um timer temporário que roda o `--migrar` a
+cada 15 minutos.
+
 Cada migração com efeito vira a linha `extracao <caso>: migração: ...` no log do
-tick (e cada falha, `extracao <caso>: migração: <caminho> erro (...)`). O
+tick, com os arquivos descartados nomeados (até 5, depois `e mais N`), cada
+anexo preservado como `... preservado como <caminho>` e cada falha como
+`extracao <caso>: migração: <caminho> erro (...)`. O
 `EXTRATOR_VERSAO` não mudou: o conteúdo do sidecar é o mesmo byte a byte (o
 caminho do anexo listado no sidecar do e-mail é relativo a `extracoes/`), então o
 sidecar migrado continua em dia e nada é reextraído.

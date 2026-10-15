@@ -256,7 +256,7 @@ test("extrairCaso: leitor que lança vai para erros, sem sidecar, e a varredura 
 
 test("extrairCaso: caso inexistente não lança", async () => {
   const r = await extrairCaso(join(casoTemp(), "nao-existe"));
-  assert.deepEqual(r, { extraidos: [], adiados: [], grandes: [], pulados: 0, naoTocados: [], erros: [], falhasNovas: {}, falhasMantidas: [], migracao: { movidos: [], mesclados: [], removidos: [], erros: [] } });
+  assert.deepEqual(r, { extraidos: [], adiados: [], grandes: [], pulados: 0, naoTocados: [], erros: [], falhasNovas: {}, falhasMantidas: [], migracao: { movidos: [], mesclados: [], removidos: [], conflitos: [], erros: [] } });
 });
 
 // chmod não tira a leitura no Windows; o ramo coberto é código independente de plataforma
@@ -703,7 +703,7 @@ async function casoLayoutAntigo() {
 test("migrarLayout: layout 0.29 vira extracoes/; usuário intocado; segunda chamada não faz nada", async () => {
   const { dir, scA, scRe, scMin } = await casoLayoutAntigo();
   const m = migrarLayout(dir);
-  assert.deepEqual(m, { movidos: ["a.docx.md", "sub/RE.eml.anexos", "sub/RE.eml.md"], mesclados: [], removidos: [], erros: [] });
+  assert.deepEqual(m, { movidos: ["a.docx.md", "sub/RE.eml.anexos", "sub/RE.eml.md"], mesclados: [], removidos: [], conflitos: [], erros: [] });
   assert.equal(readFileSync(ex(dir, "a.docx.md"), "utf-8"), scA);
   assert.equal(readFileSync(ex(dir, "sub", "RE.eml.md"), "utf-8"), scRe);
   assert.equal(readFileSync(ex(dir, "sub", "RE.eml.anexos", "Minuta.docx.md"), "utf-8"), scMin);
@@ -713,7 +713,7 @@ test("migrarLayout: layout 0.29 vira extracoes/; usuário intocado; segunda cham
   assert.equal(readFileSync(join(dir, "b.docx.md"), "utf-8"), "# minhas notas sobre b\n");
   assert.equal(readFileSync(join(dir, "resumo.md"), "utf-8"), scA);
   assert.ok(existsSync(join(dir, "fotos.anexos", "x.docx")));
-  assert.deepEqual(migrarLayout(dir), { movidos: [], mesclados: [], removidos: [], erros: [] });
+  assert.deepEqual(migrarLayout(dir), { movidos: [], mesclados: [], removidos: [], conflitos: [], erros: [] });
 });
 
 test("extrairCaso: migra antes de varrer; o sidecar movido está em dia e não é reextraído", async () => {
@@ -739,13 +739,13 @@ test("migrarLayout: destino já existe -- igual ou diferente, o destino fica e o
   writeFileSync(join(dir, "c.docx.md"), velho);
   writeFileSync(ex(dir, "c.docx.md"), novo);
   const m = migrarLayout(dir);
-  assert.deepEqual(m, { movidos: [], mesclados: [], removidos: ["a.docx.md", "c.docx.md"], erros: [] });
+  assert.deepEqual(m, { movidos: [], mesclados: [], removidos: ["a.docx.md", "c.docx.md"], conflitos: [], erros: [] });
   assert.equal(readFileSync(ex(dir, "a.docx.md"), "utf-8"), velho);
   assert.equal(readFileSync(ex(dir, "c.docx.md"), "utf-8"), novo, "o destino é o mais novo por construção");
   assert.ok(!existsSync(join(dir, "a.docx.md")) && !existsSync(join(dir, "c.docx.md")));
 });
 
-test("migrarLayout: pasta .anexos/ com destino existente é mesclada arquivo a arquivo (destino vence) e a antiga sai", async () => {
+test("migrarLayout: pasta .anexos/ com destino existente é mesclada arquivo a arquivo (igual sai, diferente vira .conflito-migracao) e a antiga sai", async () => {
   const dir = casoTemp();
   mkdirSync(join(dir, "m.eml.anexos", "interno.eml.anexos"), { recursive: true });
   mkdirSync(ex(dir, "m.eml.anexos"), { recursive: true });
@@ -753,16 +753,23 @@ test("migrarLayout: pasta .anexos/ com destino existente é mesclada arquivo a a
   writeFileSync(join(dir, "m.eml.anexos", "so-no-antigo.txt"), "s");
   writeFileSync(join(dir, "m.eml.anexos", "interno.eml.anexos", "y.txt"), "y");
   writeFileSync(ex(dir, "m.eml.anexos", "x.txt"), "novo");
+  writeFileSync(join(dir, "m.eml.anexos", "igual.txt"), "mesmo");
+  writeFileSync(ex(dir, "m.eml.anexos", "igual.txt"), "mesmo");
   const m = migrarLayout(dir);
-  assert.deepEqual(m, { movidos: [], mesclados: ["m.eml.anexos"], removidos: [], erros: [] });
+  assert.deepEqual(m, {
+    movidos: [], mesclados: ["m.eml.anexos"], removidos: ["m.eml.anexos/igual.txt"],
+    conflitos: [{ rel: "m.eml.anexos/x.txt", preservadoComo: "extracoes/m.eml.anexos/x.conflito-migracao.txt" }], erros: [],
+  });
   assert.equal(readFileSync(ex(dir, "m.eml.anexos", "x.txt"), "utf-8"), "novo");
+  assert.equal(readFileSync(ex(dir, "m.eml.anexos", "x.conflito-migracao.txt"), "utf-8"), "antigo");
+  assert.equal(readFileSync(ex(dir, "m.eml.anexos", "igual.txt"), "utf-8"), "mesmo");
   assert.equal(readFileSync(ex(dir, "m.eml.anexos", "so-no-antigo.txt"), "utf-8"), "s");
   assert.equal(readFileSync(ex(dir, "m.eml.anexos", "interno.eml.anexos", "y.txt"), "utf-8"), "y");
   assert.ok(!existsSync(join(dir, "m.eml.anexos")));
 });
 
 test("migrarLayout: caso inexistente devolve vazio sem lançar; falha vira erro e o resto segue", { skip: process.getuid?.() === 0 || process.platform === "win32" }, async () => {
-  assert.deepEqual(migrarLayout(join(casoTemp(), "nao-existe")), { movidos: [], mesclados: [], removidos: [], erros: [] });
+  assert.deepEqual(migrarLayout(join(casoTemp(), "nao-existe")), { movidos: [], mesclados: [], removidos: [], conflitos: [], erros: [] });
   const { chmodSync } = await import("node:fs");
   const dir = casoTemp();
   const md5 = await md5de(DOCX);
@@ -797,5 +804,89 @@ test("migrarTodos e CLI --migrar: todos os casos, sem extrair, exit 0", async ()
   assert.ok(existsSync(join(base, "_archive", "a.docx.md")));
   assert.ok(!existsSync(join(base, "caso-b", "extracoes")));
   // idempotente
-  assert.deepEqual(migrarTodos(base).porCaso["caso-a"], { movidos: [], mesclados: [], removidos: [], erros: [] });
+  assert.deepEqual(migrarTodos(base).porCaso["caso-a"], { movidos: [], mesclados: [], removidos: [], conflitos: [], erros: [] });
+});
+
+test("migrarLayout (R28): anexo editado no lugar antigo com destino diferente é preservado como .conflito-migracao; igual sai; segunda rodada não faz nada", async () => {
+  const dir = casoTemp();
+  const editado = construirDocx({ documentXml: documento(paragrafo("Minuta editada pelo advogado")) });
+  mkdirSync(join(dir, "RE.msg.anexos"), { recursive: true });
+  mkdirSync(ex(dir, "RE.msg.anexos"), { recursive: true });
+  writeFileSync(join(dir, "RE.msg.anexos", "Minuta.docx"), editado);
+  writeFileSync(ex(dir, "RE.msg.anexos", "Minuta.docx"), DOCX);
+  writeFileSync(join(dir, "RE.msg.anexos", "Laudo.pdf"), "%PDF");
+  writeFileSync(ex(dir, "RE.msg.anexos", "Laudo.pdf"), "%PDF");
+  // sidecar nosso: o destino vence mesmo diferente (é derivado)
+  const sc = (corpo) => montarSidecar({ fonte: "Minuta.docx", md5: "0".repeat(32), bytes: 1, avisos: [], corpo });
+  writeFileSync(join(dir, "RE.msg.anexos", "Minuta.docx.md"), sc("velho\n"));
+  writeFileSync(ex(dir, "RE.msg.anexos", "Minuta.docx.md"), sc("novo\n"));
+  const m = migrarLayout(dir);
+  assert.deepEqual(m.conflitos, [{ rel: "RE.msg.anexos/Minuta.docx", preservadoComo: "extracoes/RE.msg.anexos/Minuta.conflito-migracao.docx" }]);
+  assert.deepEqual(m.removidos, ["RE.msg.anexos/Laudo.pdf", "RE.msg.anexos/Minuta.docx.md"]);
+  assert.deepEqual(m.erros, []);
+  assert.ok(readFileSync(ex(dir, "RE.msg.anexos", "Minuta.docx")).equals(DOCX));
+  assert.ok(readFileSync(ex(dir, "RE.msg.anexos", "Minuta.conflito-migracao.docx")).equals(editado));
+  assert.ok(readFileSync(ex(dir, "RE.msg.anexos", "Minuta.docx.md"), "utf-8").includes("novo"));
+  assert.ok(!existsSync(join(dir, "RE.msg.anexos")));
+  assert.deepEqual(migrarLayout(dir), { movidos: [], mesclados: [], removidos: [], conflitos: [], erros: [] });
+  // a cópia de conflito não é original (não ganha sidecar) nem workdoc do pool
+  const r = await extrairCaso(dir);
+  assert.ok(!r.extraidos.some((e) => e.rel.includes("conflito-migracao")));
+});
+
+test("migrarLayout (R28): nome de conflito já ocupado por outra versão ganha sufixo; com os mesmos bytes, o antigo só sai", () => {
+  const dir = casoTemp();
+  mkdirSync(join(dir, "RE.msg.anexos"), { recursive: true });
+  mkdirSync(ex(dir, "RE.msg.anexos"), { recursive: true });
+  writeFileSync(ex(dir, "RE.msg.anexos", "a.txt"), "destino");
+  writeFileSync(ex(dir, "RE.msg.anexos", "a.conflito-migracao.txt"), "edição anterior");
+  writeFileSync(join(dir, "RE.msg.anexos", "a.txt"), "edição nova");
+  const m = migrarLayout(dir);
+  assert.deepEqual(m.conflitos, [{ rel: "RE.msg.anexos/a.txt", preservadoComo: "extracoes/RE.msg.anexos/a.conflito-migracao-2.txt" }]);
+  assert.equal(readFileSync(ex(dir, "RE.msg.anexos", "a.conflito-migracao.txt"), "utf-8"), "edição anterior");
+  // a mesma edição re-baixada: já preservada, o antigo só sai
+  mkdirSync(join(dir, "RE.msg.anexos"));
+  writeFileSync(join(dir, "RE.msg.anexos", "a.txt"), "edição nova");
+  const m2 = migrarLayout(dir);
+  assert.deepEqual([m2.conflitos, m2.removidos], [[], ["RE.msg.anexos/a.txt"]]);
+  assert.deepEqual(readdirSync(ex(dir, "RE.msg.anexos")).sort(), ["a.conflito-migracao-2.txt", "a.conflito-migracao.txt", "a.txt"]);
+});
+
+test("migrarLayout: sidecar órfão (original ausente ao lado) com o nosso frontmatter também vai para extracoes/", () => {
+  // o hub guarda sidecars de .msg/.eml/.xlsx sem o original (que não circula pelo pool)
+  const dir = casoTemp();
+  mkdirSync(join(dir, "emails"));
+  const sc = montarSidecar({ fonte: "RE.msg", md5: "0".repeat(32), bytes: 1, avisos: [], corpo: "e-mail\n" });
+  writeFileSync(join(dir, "emails", "RE.msg.md"), sc);
+  const m = migrarLayout(dir);
+  assert.deepEqual(m.movidos, ["emails/RE.msg.md"]);
+  assert.equal(readFileSync(ex(dir, "emails", "RE.msg.md"), "utf-8"), sc);
+  assert.deepEqual(readdirSync(join(dir, "emails")), []);
+});
+
+test("migrarLayout: sidecar .local do opt-out vai para extracoes/ com o mesmo nome", async () => {
+  const dir = casoTemp();
+  writeFileSync(join(dir, "x.local.docx"), DOCX);
+  const sc = montarSidecar({ fonte: "x.local.docx", md5: await md5de(DOCX), bytes: DOCX.length, avisos: [], corpo: "x\n" });
+  writeFileSync(join(dir, "x.local.docx.local.md"), sc);
+  const m = migrarLayout(dir);
+  assert.deepEqual(m.movidos, ["x.local.docx.local.md"]);
+  assert.equal(readFileSync(ex(dir, "x.local.docx.local.md"), "utf-8"), sc);
+  // em dia no lugar novo: nada a extrair
+  const r = await extrairCaso(dir);
+  assert.deepEqual([r.extraidos, r.pulados], [[], 1]);
+});
+
+test("migrarLayout: mescla com subpasta presente dos dois lados", () => {
+  const dir = casoTemp();
+  mkdirSync(join(dir, "fwd.eml.anexos", "interno.eml.anexos"), { recursive: true });
+  mkdirSync(ex(dir, "fwd.eml.anexos", "interno.eml.anexos"), { recursive: true });
+  writeFileSync(join(dir, "fwd.eml.anexos", "interno.eml.anexos", "so-antigo.txt"), "a");
+  writeFileSync(join(dir, "fwd.eml.anexos", "interno.eml.anexos", "igual.txt"), "i");
+  writeFileSync(ex(dir, "fwd.eml.anexos", "interno.eml.anexos", "igual.txt"), "i");
+  writeFileSync(ex(dir, "fwd.eml.anexos", "interno.eml.anexos", "so-novo.txt"), "n");
+  const m = migrarLayout(dir);
+  assert.deepEqual(m, { movidos: [], mesclados: ["fwd.eml.anexos"], removidos: ["fwd.eml.anexos/interno.eml.anexos/igual.txt"], conflitos: [], erros: [] });
+  assert.deepEqual(readdirSync(ex(dir, "fwd.eml.anexos", "interno.eml.anexos")).sort(), ["igual.txt", "so-antigo.txt", "so-novo.txt"]);
+  assert.ok(!existsSync(join(dir, "fwd.eml.anexos")));
 });
