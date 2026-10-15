@@ -23,6 +23,12 @@ import { defaultCasesBase } from "./memoria-context.mjs";
 
 const CASES_BASE = process.env.CASE_KNOWLEDGE_CASES_BASE || defaultCasesBase();
 export const ORCAMENTO_MS = 60_000;
+// Por arquivo: metade do timeout de 90 s do hooks.json, para um arquivo lento
+// não levar o orçamento inteiro; o tick (90 s por arquivo) cobre o que estourar.
+export const LIMITE_POR_ARQUIVO_MS = 45_000;
+// Original acima disto não é extraído no hook: a sessão esperaria por ele, e o
+// tick extrai sem ninguém esperando. Aparece em "Ficou para o sincronizador".
+export const MAX_BYTES_HOOK = 5 * 1024 * 1024;
 export const PREFIXO = "[textos-extraidos] ";
 
 const WIN_DRIVE = /^[a-z]:(\/|$)/i;
@@ -49,7 +55,15 @@ export async function resolverSaidaHook(cwd, base = CASES_BASE, deps = {}) {
     const importar = deps.importar ?? (() => import("../extrair.mjs"));
     const mod = await importar();
     const extrairCaso = deps.extrairCaso ?? mod.extrairCaso;
-    const r = await extrairCaso(dir, { orcamentoMs: ORCAMENTO_MS });
+    // O hook LÊ o cache negativo (arquivo que já falhou não custa 45 s a cada
+    // sessão) mas não o grava: falha por tempo aqui, com metade do teto do
+    // tick, não pode impedir o tick de tentar com o teto inteiro.
+    const r = await extrairCaso(dir, {
+      orcamentoMs: ORCAMENTO_MS,
+      limitePorArquivoMs: LIMITE_POR_ARQUIVO_MS,
+      maxBytesPorArquivo: MAX_BYTES_HOOK,
+      falhas: mod.carregarFalhas(base),
+    });
     const s = mod.formatarResumo(r);
     if (!s) return {};
     return { hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: PREFIXO + s } };

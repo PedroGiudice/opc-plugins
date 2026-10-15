@@ -149,3 +149,11 @@ test("lerXlsx: números sem ruído de ponto flutuante (15 dígitos, como o Excel
   assert.deepEqual(d.abas[0].linhas, [["4899.44", "16232.44", "0.3", "1234567", "1e+21", "4899.44", "-0.3"]]);
   assert.deepEqual(d.avisos, []);
 });
+
+test("lerXlsx: maxBytes (hook) não tenta abrir planilha maior: devolve grandeDemais sem ler", async () => {
+  const buf = await planilha(async (wb) => { wb.addWorksheet("A").addRow(["x"]); });
+  const d = await lerXlsx(buf, { maxBytes: buf.length - 1 });
+  assert.deepEqual(d, { abas: [], avisos: [], grandeDemais: true });
+  const ok = await lerXlsx(buf, { maxBytes: buf.length });
+  assert.equal(ok.abas.length, 1);
+});

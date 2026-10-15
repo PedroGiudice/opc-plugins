@@ -47,9 +47,9 @@ test("resolverSaidaHook: na raiz de ~/cases devolve {} (não é pasta de caso)",
 test("resolverSaidaHook: subpasta do caso resolve para a pasta do caso e embrulha o resumo", async () => {
   const chamadas = [];
   const out = await resolverSaidaHook("C:\\Users\\p\\cases\\meu-caso\\emails", "C:\\Users\\p\\cases", {
-    extrairCaso: async (dir, opts) => { chamadas.push([dir, opts.orcamentoMs]); return { extraidos: [{ rel: "a.docx", sidecar: "a.docx.md", detalhe: "0 revisores, 0 comentários" }], adiados: [], pulados: 0, naoTocados: [], erros: [] }; },
+    extrairCaso: async (dir, opts) => { chamadas.push([dir, opts.orcamentoMs, opts.limitePorArquivoMs, opts.maxBytesPorArquivo, typeof opts.falhas]); return { extraidos: [{ rel: "a.docx", sidecar: "a.docx.md", detalhe: "0 revisores, 0 comentários" }], adiados: [], pulados: 0, naoTocados: [], erros: [] }; },
   });
-  assert.deepEqual(chamadas, [["C:\\Users\\p\\cases\\meu-caso", 60000]]);
+  assert.deepEqual(chamadas, [["C:\\Users\\p\\cases\\meu-caso", 60000, 45000, 5 * 1024 * 1024, "object"]]);
   assert.equal(out.hookSpecificOutput.hookEventName, "SessionStart");
   assert.ok(out.hookSpecificOutput.additionalContext.startsWith(PREFIXO));
   assert.ok(out.hookSpecificOutput.additionalContext.includes("- a.docx.md (0 revisores, 0 comentários)"));

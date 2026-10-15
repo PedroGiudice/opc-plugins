@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { lerDocx } from "./docx.mjs";
+import { lerDocx, deveInflar } from "./docx.mjs";
 import { construirDocx, documento, paragrafo, tabela, numeracaoDecimal3Niveis, W } from "./fixtures/docx-builder.mjs";
 
 const textoDe = (bloco) => bloco.segmentos.map((s) => s.texto).join("");
@@ -332,4 +332,27 @@ test("lerDocx: bloco de tabela traz segmentos de todas as células, em ordem, co
     { texto: "[●]", marca: null },
     { texto: "", marca: null, nota: "1" },
   ]);
+});
+
+// ---------- zip: só as partes lidas são infladas, com teto por parte (R19) ----------
+
+test("deveInflar: só as partes que o leitor usa, e cada uma até o teto declarado", () => {
+  const ok = (name, originalSize = 10) => deveInflar({ name, originalSize }, 1000);
+  for (const n of ["word/document.xml", "word/numbering.xml", "word/styles.xml", "word/comments.xml", "word/footnotes.xml", "word/header1.xml", "word/footer12.xml", "word/header.xml"]) assert.equal(ok(n), true, n);
+  for (const n of ["word/media/x.bin", "word/media/image1.png", "[Content_Types].xml", "word/embeddings/oleObject1.bin", "word/document.xml.rels", "customXml/item1.xml", "word/settings.xml"]) assert.equal(ok(n), false, n);
+  assert.equal(ok("word/document.xml", 1001), false);
+});
+
+test("lerDocx: mídia grande no zip não é inflada; parte lida acima do teto vira aviso e o resto segue", async () => {
+  const { zipSync, unzipSync } = await import("fflate");
+  const base = unzipSync(new Uint8Array(construirDocx({
+    documentXml: documento(paragrafo("Corpo")),
+    headerXml: `<?xml version="1.0"?><w:hdr ${W}><w:p><w:r><w:t>${"c".repeat(2 * 1024 * 1024)}</w:t></w:r></w:p></w:hdr>`,
+  })));
+  base["word/media/x.bin"] = new Uint8Array(5 * 1024 * 1024);
+  const buf = Buffer.from(zipSync(base, { level: 6 }));
+  const d = lerDocx(buf, { maxParteBytes: 1024 * 1024 });
+  assert.deepEqual(d.blocos.map(textoDe), ["Corpo"]);
+  assert.deepEqual(d.cabecalhoRodape, []);
+  assert.deepEqual(d.avisos, ["parte word/header1.xml acima de 1 MiB não lida"]);
 });

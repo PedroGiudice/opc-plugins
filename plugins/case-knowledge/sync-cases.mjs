@@ -25,6 +25,9 @@ import { spawnSync } from "node:child_process";
 import { requestWithAuth, readCredential, decodeJwtAuthorDir } from "./auth.mjs";
 import { defaultMemApiBase } from "./memoria.mjs";
 import { isSafeScaffoldingPath, SETUP_PLUGINS } from "./setup.mjs";
+// só o formatador de tamanho: extracao.mjs é puro (builtins e workdocs.mjs); o
+// extrator em si entra por import dinâmico na fase de extração (ver main)
+import { tamanhoLegivel } from "./extracao.mjs";
 import {
   isWorkdocPath,
   isSafeRelPath,
@@ -2856,6 +2859,9 @@ async function main() {
           for (const e of r.extraidos) appendLog(casesBase, `extracao ${caso}: ${e.rel} -> ${e.sidecar}`);
           for (const a of r.adiados) if (a.motivo !== "orçamento de tempo esgotado") appendLog(casesBase, `extracao ${caso}: ${a.rel} adiado (${a.motivo})`);
           for (const x of r.erros) appendLog(casesBase, `extracao ${caso}: ${x.rel} erro (${x.erro})`);
+          // estes dois se repetiriam a cada 5 min: só o que o cache negativo não conhecia
+          for (const g of r.grandes) if (g.novo) appendLog(casesBase, `extracao ${caso}: ${g.rel} acima do teto de 50 MiB (${tamanhoLegivel(g.bytes)}), sem sidecar`);
+          for (const n of r.naoTocados) if (n.novo) appendLog(casesBase, `extracao ${caso}: ${n.sidecar} é do usuário, não tocado`);
           const esgotados = r.adiados.filter((a) => a.motivo === "orçamento de tempo esgotado").length;
           if (esgotados) appendLog(casesBase, `extracao ${caso}: ${esgotados} arquivo(s) ficaram para o próximo tick (orçamento)`);
         }

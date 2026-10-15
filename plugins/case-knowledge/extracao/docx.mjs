@@ -542,19 +542,42 @@ function partesCabecalhoRodape(zip) {
     });
 }
 
-export function abrirPacote(buffer) {
-  const zip = unzipSync(new Uint8Array(buffer));
-  const parte = (nome) => (zip[nome] ? parseXml(zip[nome]) : null);
-  return { zip, parte };
+// Partes que o leitor usa. O resto do pacote (mídia, objetos embutidos,
+// customXml) nunca é inflado: o unzipSync sem filtro descomprimia tudo, e um
+// .docx de 300 KB com uma entrada de 300 MiB de zeros virava 300 MiB de RAM.
+const PARTES_LIDAS = /^word\/(document|numbering|styles|comments|footnotes|header\d*|footer\d*)\.xml$/;
+// Teto por parte, pelo tamanho que o zip declara. O fflate infla no buffer do
+// tamanho declarado e para nele (sondado: entrada que declara 10 bytes e tem
+// 5 MiB devolve 10 bytes), então um tamanho mentiroso só trunca a parte (XML
+// malformado), não estoura a memória.
+export const MAX_PARTE_BYTES = 64 * 1024 * 1024;
+
+/** Filtro do unzip: parte lida pelo leitor e dentro do teto. */
+export function deveInflar(info, maxParteBytes = MAX_PARTE_BYTES) {
+  return PARTES_LIDAS.test(info.name) && info.originalSize <= maxParteBytes;
 }
 
-export function lerDocx(buffer) {
+export function abrirPacote(buffer, { maxParteBytes = MAX_PARTE_BYTES } = {}) {
+  const acimaDoTeto = [];
+  const zip = unzipSync(new Uint8Array(buffer), {
+    filter: (info) => {
+      if (deveInflar(info, maxParteBytes)) return true;
+      if (PARTES_LIDAS.test(info.name)) acimaDoTeto.push(info.name);
+      return false;
+    },
+  });
+  const parte = (nome) => (zip[nome] ? parseXml(zip[nome]) : null);
+  return { zip, parte, acimaDoTeto };
+}
+
+export function lerDocx(buffer, { maxParteBytes = MAX_PARTE_BYTES } = {}) {
   const saida = { blocos: [], comentarios: [], notas: [], cabecalhoRodape: [], avisos: [], temNumeracao: false, niveisNumeracao: 0 };
   let docXml, numeracao, estilos, comentariosXml, notasXml, cabecalhos;
   try {
     // O parse das partes fica dentro do try: XML malformado num zip íntegro
     // também é arquivo corrompido, e deve virar aviso, não exceção.
-    const pacote = abrirPacote(buffer);
+    const pacote = abrirPacote(buffer, { maxParteBytes });
+    for (const nome of pacote.acimaDoTeto) saida.avisos.push(`parte ${nome} acima de ${Math.round(maxParteBytes / (1024 * 1024))} MiB não lida`);
     if (!pacote.zip["word/document.xml"]) throw new Error("sem word/document.xml");
     docXml = pacote.parte("word/document.xml");
     numeracao = carregarNumeracao(pacote.parte("word/numbering.xml"));

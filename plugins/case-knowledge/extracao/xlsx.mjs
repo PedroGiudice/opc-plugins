@@ -68,7 +68,10 @@ function lerLinha(ws, r, colunas) {
   return { cels, conteudo, semCache };
 }
 
-export async function lerXlsx(buffer, { maxLinhasPorAba = 2000 } = {}) {
+// `maxBytes`: o hook não tenta planilha grande (o exceljs carrega o arquivo
+// inteiro em memória; quem espera é a sessão). Acima dele, nada é lido.
+export async function lerXlsx(buffer, { maxLinhasPorAba = 2000, maxBytes = Infinity } = {}) {
+  if (buffer.length > maxBytes) return { abas: [], avisos: [], grandeDemais: true };
   const saida = { abas: [], avisos: [] };
   const wb = new ExcelJS.Workbook();
   try {

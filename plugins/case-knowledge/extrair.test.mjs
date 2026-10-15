@@ -1,10 +1,11 @@
 // extrair.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { spawnSync as spawnSyncReal } from "node:child_process";
 import { join } from "node:path";
-import { extrairCaso, extrairTodos, formatarResumo, sanitizarNomeAnexo } from "./extrair.mjs";
+import { extrairCaso, extrairTodos, formatarResumo, sanitizarNomeAnexo, carregarFalhas, ARQUIVO_FALHAS } from "./extrair.mjs";
 import { lerFrontmatter } from "./extracao.mjs";
 import { construirDocx, documento, paragrafo, numeracaoDecimal3Niveis } from "./extracao/fixtures/docx-builder.mjs";
 
@@ -55,7 +56,7 @@ test("extrairCaso: sidecar do usuário com o mesmo nome não é tocado", async (
   writeFileSync(join(dir, "a.docx.md"), "# minhas notas\n");
   const r = await extrairCaso(dir);
   assert.deepEqual(r.extraidos, []);
-  assert.deepEqual(r.naoTocados, [{ rel: "a.docx", sidecar: "a.docx.md" }]);
+  assert.deepEqual(r.naoTocados, [{ rel: "a.docx", sidecar: "a.docx.md", novo: true }]);
   assert.equal(readFileSync(join(dir, "a.docx.md"), "utf-8"), "# minhas notas\n");
 });
 
@@ -70,11 +71,12 @@ test("extrairCaso: original que mudou reextrai e sobrescreve", async () => {
   assert.ok(readFileSync(join(dir, "a.docx.md"), "utf-8").includes("Novo texto"));
 });
 
-test("extrairCaso: original acima de 50 MiB é adiado com motivo, sem sidecar", async () => {
+test("extrairCaso: original acima de 50 MiB vai para `grandes`, sem sidecar e sem ser adiado", async () => {
   const dir = casoTemp();
   writeFileSync(join(dir, "grande.docx"), Buffer.alloc(1024));
   const r = await extrairCaso(dir, { maxOriginalBytes: 512 });
-  assert.deepEqual(r.adiados, [{ rel: "grande.docx", motivo: "acima do teto de 50 MiB (1,0 KiB)" }]);
+  assert.deepEqual(r.grandes, [{ rel: "grande.docx", bytes: 1024, novo: true }]);
+  assert.deepEqual(r.adiados, []);
   assert.ok(!existsSync(join(dir, "grande.docx.md")));
 });
 
@@ -144,7 +146,8 @@ test("extrairCaso: orçamento esgotado adia o restante em ordem de path", async 
   writeFileSync(join(dir, "c.docx"), DOCX);
   let t = 0;
   const agora = () => (t += 40); // cada chamada avança 40 ms
-  const r = await extrairCaso(dir, { orcamentoMs: 100, agora });
+  // em processo: com o filho, o relógio falso não governa o prazo real dele
+  const r = await extrairCaso(dir, { orcamentoMs: 100, agora, emProcesso: true });
   assert.ok(r.extraidos.length >= 1 && r.extraidos.length < 3);
   assert.ok(r.adiados.every((a) => a.motivo === "orçamento de tempo esgotado"));
   assert.equal(r.extraidos.length + r.adiados.length, 3);
@@ -220,7 +223,7 @@ test("extrairCaso: leitor que lança vai para erros, sem sidecar, e a varredura 
 
 test("extrairCaso: caso inexistente não lança", async () => {
   const r = await extrairCaso(join(casoTemp(), "nao-existe"));
-  assert.deepEqual(r, { extraidos: [], adiados: [], pulados: 0, naoTocados: [], erros: [] });
+  assert.deepEqual(r, { extraidos: [], adiados: [], grandes: [], pulados: 0, naoTocados: [], erros: [], falhasNovas: {}, falhasMantidas: [] });
 });
 
 test("extrairCaso: original ilegível no disco vai para erros, sem sidecar", { skip: process.getuid?.() === 0 }, async () => {
@@ -267,7 +270,7 @@ test("extrairCaso: .md do usuário com outra caixa conta como o sidecar (NTFS) e
   writeFileSync(join(dir, "A.DOCX.MD"), "# notas\n");
   const r = await extrairCaso(dir);
   assert.deepEqual(r.extraidos, []);
-  assert.deepEqual(r.naoTocados, [{ rel: "A.docx", sidecar: "A.docx.md" }]);
+  assert.deepEqual(r.naoTocados, [{ rel: "A.docx", sidecar: "A.docx.md", novo: true }]);
 });
 
 test("formatarResumo: erros viram a terceira lista; só erros já não é vazio", () => {
@@ -322,4 +325,183 @@ test("extrairCaso: detalhe do e-mail conta só anexos que vão ter sidecar", asy
   const r = await extrairCaso(dir);
   assert.equal(r.extraidos.find((e) => e.rel === "dois.eml").detalhe, "2 anexos, 1 extraído");
   assert.ok(existsSync(join(dir, "dois.eml.anexos", "Laudo.pdf")));
+});
+
+// ---------- processo filho, cache negativo e resumo (onda final, R18/R19) ----------
+
+// .eml que o postal-mime recusa (aninhamento acima do teto dele): falha
+// determinística do LEITOR, a que o cache negativo existe para lembrar
+function emlRecusado() {
+  let corpo = "fim";
+  for (let i = 300; i > 0; i--) corpo = `Content-Type: multipart/mixed; boundary="b${i}"\r\n\r\n--b${i}\r\n${corpo}\r\n--b${i}--`;
+  return `From: a@a\r\nTo: b@b\r\nSubject: fundo\r\n${corpo}\r\n`;
+}
+
+test("extrairCaso: o filho estoura o teto por arquivo -> erro 'tempo esgotado', entra no cache", async () => {
+  const dir = casoTemp();
+  writeFileSync(join(dir, "a.docx"), DOCX);
+  const r = await extrairCaso(dir, { limitePorArquivoMs: 1 });
+  assert.deepEqual(r.erros, [{ rel: "a.docx", erro: "tempo esgotado (0 s)" }]);
+  assert.ok(!existsSync(join(dir, "a.docx.md")));
+  const chave = `${dir.split(/[\\/]/).pop()}/a.docx`;
+  assert.equal(r.falhasNovas[chave].motivo, "tempo esgotado (0 s)");
+  assert.match(r.falhasNovas[chave].md5, /^[0-9a-f]{32}$/);
+});
+
+test("extrairCaso: filho cortado pelo resto do orçamento (não pelo teto) é adiado, fora do cache", async () => {
+  const dir = casoTemp();
+  writeFileSync(join(dir, "a.docx"), DOCX);
+  const r = await extrairCaso(dir, { orcamentoMs: 5, limitePorArquivoMs: 90_000 });
+  assert.deepEqual(r.erros, []);
+  assert.deepEqual(r.adiados, [{ rel: "a.docx", motivo: "orçamento de tempo esgotado" }]);
+  assert.deepEqual(r.falhasNovas, {});
+});
+
+test("extrairCaso: filho sem memória (heap pequeno de verdade) vira 'memória insuficiente' e o resto segue", async () => {
+  const dir = casoTemp();
+  const ExcelJS = (await import("exceljs")).default;
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("A");
+  for (let i = 0; i < 20000; i++) ws.addRow([`linha ${i}`, i, "x".repeat(40)]);
+  writeFileSync(join(dir, "a.xlsx"), Buffer.from(await wb.xlsx.writeBuffer()));
+  writeFileSync(join(dir, "b.eml"), EML);
+  const r = await extrairCaso(dir, { maxHeapFilhoMb: 24 });
+  assert.deepEqual(r.erros, [{ rel: "a.xlsx", erro: "memória insuficiente" }]);
+  assert.ok(!existsSync(join(dir, "a.xlsx.md")));
+});
+
+test("extrairCaso: morte do filho é traduzida pelo código, sinal e stderr (spawn simulado)", async () => {
+  const casos = [
+    [{ status: 134, signal: null, stderr: "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory" }, { erro: "memória insuficiente" }],
+    [{ status: 1, signal: null, stderr: "" }, { erro: "processo falhou (1)" }],
+    [{ status: null, signal: "SIGSEGV", stderr: "" }, { erro: "processo falhou (SIGSEGV)" }],
+    [{ status: 0, signal: null, stderr: "" }, { erro: "processo falhou (sem resultado)" }],
+    [{ error: Object.assign(new Error("spawnSync node ENOENT"), { code: "ENOENT" }), status: null }, { erro: "processo não iniciou (spawnSync node ENOENT)", transitorio: true }],
+  ];
+  for (const [saida, esperado] of casos) {
+    const dir = casoTemp();
+    writeFileSync(join(dir, "a.docx"), DOCX);
+    const r = await extrairCaso(dir, { spawn: () => ({ pid: 1, stdout: "", ...saida }) });
+    assert.deepEqual(r.erros, [{ rel: "a.docx", erro: esperado.erro }], JSON.stringify(saida));
+    // falha de ambiente (o filho nem subiu) não é defeito do arquivo
+    assert.equal(Object.keys(r.falhasNovas).length, esperado.transitorio ? 0 : 1);
+  }
+});
+
+test("extrairCaso: filho morto apaga os temporários de escrita dele (sufixo com o pid)", async () => {
+  const dir = casoTemp();
+  writeFileSync(join(dir, "x.eml"), EML);
+  mkdirSync(join(dir, "x.eml.anexos"));
+  writeFileSync(join(dir, "x.eml.md.extracao-tmp-4242"), "meio");
+  writeFileSync(join(dir, "x.eml.anexos", "Minuta.docx.extracao-tmp-4242"), "meio");
+  writeFileSync(join(dir, "x.eml.anexos", "Minuta.docx.extracao-tmp-77"), "de outro processo vivo");
+  const r = await extrairCaso(dir, { spawn: () => ({ pid: 4242, status: null, signal: "SIGKILL", stderr: "", error: Object.assign(new Error("ETIMEDOUT"), { code: "ETIMEDOUT" }) }), limitePorArquivoMs: 10 });
+  assert.equal(r.erros.length, 1);
+  assert.ok(!existsSync(join(dir, "x.eml.md.extracao-tmp-4242")));
+  assert.deepEqual(readdirSync(join(dir, "x.eml.anexos")), ["Minuta.docx.extracao-tmp-77"]);
+});
+
+test("extrairCaso: original acima de maxBytesPorArquivo (hook) fica para o sincronizador, sem filho", async () => {
+  const dir = casoTemp();
+  writeFileSync(join(dir, "a.docx"), DOCX);
+  writeFileSync(join(dir, "b.eml"), EML);
+  let filhos = 0;
+  const r = await extrairCaso(dir, { maxBytesPorArquivo: 200, spawn: (...a) => { filhos++; return spawnSyncReal(...a); } });
+  assert.deepEqual(r.adiados, [{ rel: "a.docx", motivo: `grande demais para extrair agora (${(DOCX.length / 1024).toFixed(1).replace(".", ",")} KiB)` }]);
+  assert.deepEqual(r.extraidos.map((e) => e.rel), ["b.eml"]);
+  assert.equal(filhos, 1);
+});
+
+test("extrairTodos: falha do leitor entra no cache; mesma versão do arquivo não é tentada nem logada de novo", async () => {
+  const base = casoTemp();
+  mkdirSync(join(base, "caso"));
+  writeFileSync(join(base, "caso", "a.eml"), emlRecusado());
+  const r1 = (await extrairTodos(base)).porCaso.caso;
+  assert.deepEqual(r1.erros.map((e) => e.rel), ["a.eml"]);
+  const cache = carregarFalhas(base);
+  assert.deepEqual(Object.keys(cache), ["caso/a.eml"]);
+  assert.equal(cache["caso/a.eml"].motivo, r1.erros[0].erro);
+  const r2 = (await extrairTodos(base)).porCaso.caso;
+  assert.deepEqual([r2.erros, r2.pulados], [[], 1]);
+  assert.deepEqual(Object.keys(carregarFalhas(base)), ["caso/a.eml"], "a entrada continua valendo");
+  // o arquivo mudou: tenta de novo (e agora extrai); a entrada velha cai
+  writeFileSync(join(base, "caso", "a.eml"), EML);
+  const r3 = (await extrairTodos(base)).porCaso.caso;
+  assert.deepEqual(r3.extraidos.map((e) => e.rel), ["a.eml"]);
+  assert.deepEqual(carregarFalhas(base), {});
+});
+
+test("extrairTodos: falha registrada por outra versão do plugin é tentada de novo", async () => {
+  const base = casoTemp();
+  mkdirSync(join(base, "caso"));
+  writeFileSync(join(base, "caso", "a.eml"), emlRecusado());
+  await extrairTodos(base);
+  const cache = carregarFalhas(base);
+  cache["caso/a.eml"].plugin = "0.0.1";
+  writeFileSync(join(base, ARQUIVO_FALHAS), JSON.stringify(cache));
+  const r = (await extrairTodos(base)).porCaso.caso;
+  assert.deepEqual(r.erros.map((e) => e.rel), ["a.eml"]);
+});
+
+test("extrairTodos: grande demais e sidecar do usuário são 'novos' uma vez só; entrada de arquivo apagado cai", async () => {
+  const base = casoTemp();
+  mkdirSync(join(base, "caso"));
+  writeFileSync(join(base, "caso", "grande.docx"), Buffer.alloc(8192));
+  writeFileSync(join(base, "caso", "a.docx"), DOCX);
+  writeFileSync(join(base, "caso", "a.docx.md"), "# notas\n");
+  const r1 = (await extrairTodos(base, { maxOriginalBytes: 4096 })).porCaso.caso;
+  assert.deepEqual(r1.grandes, [{ rel: "grande.docx", bytes: 8192, novo: true }]);
+  assert.deepEqual(r1.naoTocados, [{ rel: "a.docx", sidecar: "a.docx.md", novo: true }]);
+  assert.deepEqual(Object.keys(carregarFalhas(base)), ["caso/a.docx.md", "caso/grande.docx"]);
+  const r2 = (await extrairTodos(base, { maxOriginalBytes: 4096 })).porCaso.caso;
+  assert.deepEqual([r2.grandes[0].novo, r2.naoTocados[0].novo], [false, false]);
+  // o usuário editou as notas: avisa de novo; o grande sumiu: a entrada dele cai
+  writeFileSync(join(base, "caso", "a.docx.md"), "# notas novas\n");
+  unlinkSync(join(base, "caso", "grande.docx"));
+  const r3 = (await extrairTodos(base, { maxOriginalBytes: 4096 })).porCaso.caso;
+  assert.equal(r3.naoTocados[0].novo, true);
+  assert.deepEqual(Object.keys(carregarFalhas(base)), ["caso/a.docx.md"]);
+});
+
+test("extrairTodos: sem falhas não cria o arquivo de cache", async () => {
+  const base = casoTemp();
+  mkdirSync(join(base, "caso"));
+  writeFileSync(join(base, "caso", "a.eml"), EML);
+  await extrairTodos(base);
+  assert.ok(!existsSync(join(base, ARQUIVO_FALHAS)));
+});
+
+test("extrairCaso: falha conhecida do cache é pulada sem filho e sem log", async () => {
+  const dir = casoTemp();
+  writeFileSync(join(dir, "a.eml"), emlRecusado());
+  const r1 = await extrairCaso(dir);
+  const logs = [];
+  let filhos = 0;
+  const r2 = await extrairCaso(dir, { falhas: r1.falhasNovas, log: (l) => logs.push(l), spawn: () => { filhos++; return {}; } });
+  assert.deepEqual([r2.erros, r2.pulados, filhos, logs], [[], 1, 0, []]);
+  assert.deepEqual(r2.falhasMantidas, Object.keys(r1.falhasNovas));
+});
+
+test("formatarResumo: quarta lista para os grandes demais", () => {
+  const s = formatarResumo({ extraidos: [], adiados: [], pulados: 0, naoTocados: [], erros: [], grandes: [{ rel: "Relatório 2025.xlsx", bytes: 60 * 1024 * 1024, novo: false }] });
+  assert.equal(s, "Grandes demais para o extrator (leia o original):\n- Relatório 2025.xlsx (60,0 MiB)");
+});
+
+test("formatarResumo: teto de 40 linhas, '... e mais N' por lista cortada, lista curta inteira", () => {
+  const n = (k, f) => Array.from({ length: k }, (_, i) => f(i));
+  const r = {
+    extraidos: n(100, (i) => ({ rel: `e${i}.docx`, sidecar: `e${i}.docx.md`, detalhe: "x" })),
+    adiados: n(2, (i) => ({ rel: `a${i}.xlsx`, motivo: "m" })),
+    erros: n(50, (i) => ({ rel: `x${i}.eml`, erro: "e" })),
+    grandes: [],
+    pulados: 0, naoTocados: [],
+  };
+  const linhas = formatarResumo(r).split("\n");
+  assert.equal(linhas.length, 40);
+  assert.ok(linhas.includes("- a0.xlsx: m") && linhas.includes("- a1.xlsx: m"));
+  // 37 linhas de itens: 2 dos adiados, 35 repartidas (18 + 17) entre as duas grandes
+  assert.ok(linhas.includes("... e mais 83"), linhas.join("|"));
+  assert.ok(linhas.includes("... e mais 34"), linhas.join("|"));
+  // abaixo do teto: nada é cortado
+  assert.equal(formatarResumo({ ...r, extraidos: r.extraidos.slice(0, 3), erros: r.erros.slice(0, 3) }).split("\n").length, 11);
 });
