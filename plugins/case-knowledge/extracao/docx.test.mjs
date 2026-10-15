@@ -461,3 +461,26 @@ test("lerDocx: documento que abre sem texto nenhum ganha o aviso 'documento sem 
   assert.equal(d.ilegivel, undefined);
   assert.deepEqual(d.avisos, ["documento sem texto"]);
 });
+
+// ---------- teto do PACOTE, não só da parte (R23) ----------
+
+test("lerDocx: partes lidas que somam mais de 128 MiB tornam o pacote ilegível", async () => {
+  const { zipSync, strToU8 } = await import("fflate");
+  const zeros = new Uint8Array(50 * 1024 * 1024);
+  const arquivos = { "word/document.xml": strToU8(documento(paragrafo("x"))) };
+  for (const n of [1, 2, 3]) arquivos[`word/header${n}.xml`] = zeros;
+  const d = lerDocx(Buffer.from(zipSync(arquivos, { level: 1 })));
+  assert.deepEqual([d.ilegivel, d.motivo], [true, "partes do pacote somam mais de 128 MiB"]);
+});
+
+test("lerDocx: mais de 20 partes de cabeçalho/rodapé tornam o pacote ilegível; documento normal não muda", async () => {
+  const { zipSync, unzipSync, strToU8 } = await import("fflate");
+  const normal = construirDocx({ documentXml: documento(paragrafo("Corpo")), headerXml: `<?xml version="1.0"?><w:hdr ${W}><w:p><w:r><w:t>Cab</w:t></w:r></w:p></w:hdr>` });
+  const arquivos = unzipSync(new Uint8Array(normal));
+  for (let n = 2; n <= 25; n++) arquivos[`word/footer${n}.xml`] = strToU8(`<?xml version="1.0"?><w:ftr ${W}/>`);
+  const d = lerDocx(Buffer.from(zipSync(arquivos)));
+  assert.deepEqual([d.ilegivel, d.motivo], [true, "mais de 20 partes de cabeçalho/rodapé"]);
+  const ok = lerDocx(normal);
+  assert.equal(ok.ilegivel, undefined);
+  assert.deepEqual([ok.blocos.map(textoDe), ok.cabecalhoRodape, ok.avisos], [["Corpo"], ["Cab"], []]);
+});

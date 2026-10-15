@@ -204,3 +204,35 @@ test("normalizarMsg: aviso de anexo ilegível usa o nome sem separadores de cami
   assert.deepEqual(e.avisos, ["anexo pasta_x.pdf não pôde ser lido (ruim)"]);
   assert.equal(e.anexos[0].erroLeitura, true);
 });
+
+// ---------- R25: .msg com corpo só em HTML (PR_HTML), sem body nem RTF ----------
+
+const semCorpo = { subject: "s", senderEmail: "a@a", recipients: [], body: "", attachments: [] };
+
+test("normalizarMsg: corpo só em `html` (bytes) é decodificado pelo internetCodepage e vira texto", () => {
+  const html = new Uint8Array(Buffer.from("<p>Ação concluída</p>", "latin1")); // cp1252 cobre esses acentos como o latin1
+  const e = normalizarMsg({ ...semCorpo, html, internetCodepage: 1252 }, () => null);
+  assert.equal(e.corpo, "Ação concluída");
+  assert.deepEqual(e.avisos, []);
+  // 65001 é utf-8
+  const u = normalizarMsg({ ...semCorpo, html: new Uint8Array(Buffer.from("<p>Ação</p>", "utf-8")), internetCodepage: 65001 }, () => null);
+  assert.deepEqual([u.corpo, u.avisos], ["Ação", []]);
+});
+
+test("normalizarMsg: corpo só em `bodyHtml` (string) vira texto", () => {
+  const e = normalizarMsg({ ...semCorpo, bodyHtml: "<div>Segue a <b>minuta</b>.</div>" }, () => null);
+  assert.deepEqual([e.corpo, e.avisos], ["Segue a minuta.", []]);
+});
+
+test("normalizarMsg: codepage desconhecido ou ausente decodifica como utf-8 e avisa", () => {
+  const html = new Uint8Array(Buffer.from("<p>Ação</p>", "utf-8"));
+  const e = normalizarMsg({ ...semCorpo, html, internetCodepage: 99999 }, () => null);
+  assert.deepEqual([e.corpo, e.avisos], ["Ação", ["corpo HTML decodificado como utf-8 (codepage desconhecido 99999)"]]);
+  const sem = normalizarMsg({ ...semCorpo, html }, () => null);
+  assert.deepEqual(sem.avisos, ["corpo HTML decodificado como utf-8 (codepage desconhecido ausente)"]);
+});
+
+test("normalizarMsg: sem texto, RTF nem HTML, o aviso diz os três", () => {
+  const e = normalizarMsg(semCorpo, () => null);
+  assert.deepEqual([e.corpo, e.avisos], ["", ["e-mail sem corpo legível (nem texto, nem RTF, nem HTML)"]]);
+});

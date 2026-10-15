@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync as spawnSyncReal } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { extrairCaso, extrairTodos, formatarResumo, sanitizarNomeAnexo, carregarFalhas, ARQUIVO_FALHAS } from "./extrair.mjs";
 import { lerFrontmatter } from "./extracao.mjs";
@@ -232,7 +233,8 @@ test("extrairCaso: caso inexistente não lança", async () => {
   assert.deepEqual(r, { extraidos: [], adiados: [], grandes: [], pulados: 0, naoTocados: [], erros: [], falhasNovas: {}, falhasMantidas: [] });
 });
 
-test("extrairCaso: original ilegível no disco vai para erros, sem sidecar", { skip: process.getuid?.() === 0 }, async () => {
+// chmod não tira a leitura no Windows; o ramo coberto é código independente de plataforma
+test("extrairCaso: original ilegível no disco vai para erros, sem sidecar", { skip: process.getuid?.() === 0 || process.platform === "win32" }, async () => {
   const { chmodSync } = await import("node:fs");
   const dir = casoTemp();
   writeFileSync(join(dir, "trancado.docx"), DOCX);
@@ -383,6 +385,8 @@ test("extrairCaso: morte do filho é traduzida pelo código, sinal e stderr (spa
     [{ status: null, signal: "SIGSEGV", stderr: "" }, { erro: "processo falhou (SIGSEGV)" }],
     [{ status: 0, signal: null, stderr: "" }, { erro: "processo falhou (sem resultado)" }],
     [{ error: Object.assign(new Error("spawnSync node ENOENT"), { code: "ENOENT" }), status: null }, { erro: "processo não iniciou (spawnSync node ENOENT)", transitorio: true }],
+    // o filho extraiu mas não gravou o resultado (tmp cheio): transitório, fora do cache
+    [{ status: 3, signal: null, stderr: "" }, { erro: "sem resultado (falha ao gravar)", transitorio: true }],
   ];
   for (const [saida, esperado] of casos) {
     const dir = casoTemp();
@@ -596,4 +600,11 @@ test("extrairCaso: imagem inline (cid) do .eml é listada como inline e não gra
   const md = readFileSync(join(dir, "RE.eml.md"), "utf-8");
   assert.ok(md.includes("- image001.png (3 B) -> (inline, não gravado)"), md);
   assert.ok(md.includes("- proposta.pdf (4 B) -> RE.eml.anexos/proposta.pdf"));
+});
+
+test("filho: resultado que não pode ser gravado sai com exit 3 (o pai trata como transitório)", () => {
+  const dir = casoTemp();
+  writeFileSync(join(dir, "a.eml"), EML);
+  const r = spawnSyncReal(process.execPath, [fileURLToPath(new URL("./extrair.mjs", import.meta.url)), "--arquivo", join(dir, "a.eml"), "--caso", dir, "--resultado", join(dir, "nao-existe", "r.json")], { encoding: "utf-8" });
+  assert.equal(r.status, 3, r.stderr);
 });

@@ -2,7 +2,8 @@
  * Leitores de e-mail -> {cabecalhos, corpo, anexos, avisos}.
  * .eml: postal-mime (puro). .msg: @kenjiuno/msgreader; corpo em texto quando
  * o Outlook gravou PR_BODY, senão RTF comprimido -> decompressRTF ->
- * deEncapsulateSync (HTML ou texto encapsulado) -> htmlParaTexto. O
+ * deEncapsulateSync (HTML ou texto encapsulado) -> htmlParaTexto, senão o
+ * PR_HTML decodificado pelo codepage -> htmlParaTexto. O
  * desencapsulador é injetável para o teste não depender de um .msg real
  * (dado de caso não entra no git); o teste com .msg reais é o benchmark.
  *
@@ -89,6 +90,35 @@ function desencapsularPadrao(compressedRtf, avisar) {
   return deEncapsulateSync(Buffer.from(rtf), { decode: iconv.decode, warn: avisar });
 }
 
+// Codepage do Windows (número) -> nome do iconv-lite. Os que não seguem o
+// padrão cp<N>/windows-<N> vão explícitos.
+const CODEPAGES_ESPECIAIS = { 65001: "utf-8", 1200: "utf-16le", 1201: "utf-16be", 20127: "ascii" };
+
+function codificacaoDoCodepage(n) {
+  if (CODEPAGES_ESPECIAIS[n]) return CODEPAGES_ESPECIAIS[n];
+  for (const nome of [`cp${n}`, `windows-${n}`]) if (Number.isInteger(n) && iconv.encodingExists(nome)) return nome;
+  return null;
+}
+
+/**
+ * HTML do corpo do .msg como string, ou null quando não há. `bodyHtml` já vem
+ * decodificado; `html` são bytes no codepage de PR_INTERNET_CPID
+ * (`internetCodepage`), com PR_MESSAGE_CODEPAGE como reserva. Codepage
+ * ausente ou desconhecido decodifica como utf-8 e avisa: o texto pode sair com
+ * acento trocado, e quem lê precisa saber.
+ */
+function corpoHtmlDoMsg(fileData, avisos) {
+  if (typeof fileData.bodyHtml === "string" && fileData.bodyHtml.trim()) return fileData.bodyHtml;
+  if (!fileData.html || !fileData.html.length) return null;
+  const cp = fileData.internetCodepage ?? fileData.messageCodepage;
+  let cod = cp === undefined || cp === null ? null : codificacaoDoCodepage(Number(cp));
+  if (!cod) {
+    avisos.push(`corpo HTML decodificado como utf-8 (codepage desconhecido ${cp ?? "ausente"})`);
+    cod = "utf-8";
+  }
+  return iconv.decode(Buffer.from(fileData.html), cod);
+}
+
 export function normalizarMsg(fileData, pegarAnexo, { desencapsular = desencapsularPadrao } = {}) {
   const avisos = [];
   // senderEmail/email vêm como DN do Exchange ("/O=EXCHANGELABS/...") quando o
@@ -106,7 +136,15 @@ export function normalizarMsg(fileData, pegarAnexo, { desencapsular = desencapsu
     } catch (err) {
       avisos.push(`corpo em RTF não pôde ser convertido (${err.message})`);
     }
-  } else avisos.push("e-mail sem corpo legível (nem texto nem RTF)");
+  }
+  // Terceira fonte (R25): o .msg salvo de e-mail HTML pode não ter PR_BODY nem
+  // RTF, só PR_HTML (bytes no codepage da mensagem). No ensaio no parque real,
+  // 9 de 66 .msg eram assim e saíam "sem corpo legível".
+  if (!corpo) {
+    const html = corpoHtmlDoMsg(fileData, avisos);
+    if (html !== null) corpo = htmlParaTexto(html);
+    else if (!fileData.compressedRtf) avisos.push("e-mail sem corpo legível (nem texto, nem RTF, nem HTML)");
+  }
   const anexos = [];
   for (const att of fileData.attachments ?? []) {
     // .msg aninhado não tem fileName: o msgreader o serializa de novo como

@@ -409,6 +409,8 @@ function limparTemporarios(caseDir, rel, pid) {
 }
 
 let contadorFilho = 0;
+// Exit code do filho que extraiu mas não conseguiu gravar o arquivo de resultado.
+const EXIT_SEM_RESULTADO = 3;
 
 /**
  * Roda extrairUm num processo filho (este arquivo em modo `--arquivo`) e traduz
@@ -444,6 +446,9 @@ function extrairEmFilho(caseDir, rel, limites, { prazoMs, limitePorArquivoMs, di
     }
     if (r.error && r.error.code !== "ENOBUFS") {
       return { ok: false, erro: `processo não iniciou (${r.error.message})`, transitorio: true };
+    }
+    if (!r.error && r.status === EXIT_SEM_RESULTADO) {
+      return { ok: false, erro: "sem resultado (falha ao gravar)", transitorio: true };
     }
     if (r.error || r.status !== 0) {
       limparTemporarios(caseDir, rel, r.pid);
@@ -797,8 +802,14 @@ async function mainArquivo(val) {
   };
   const rel = relative(caseDir, val("--arquivo")).split(sep).join("/");
   const r = await extrairUmSeguro(caseDir, rel, limites);
-  // se nem isto gravar, o exit code != 0 diz ao pai que não houve resultado
-  writeFileSync(val("--resultado"), JSON.stringify(r));
+  try {
+    writeFileSync(val("--resultado"), JSON.stringify(r));
+  } catch {
+    // tmp cheio ou sem permissão: problema da máquina, não do arquivo. O código
+    // próprio deixa o pai distinguir isto de uma morte do filho (que vai para o
+    // cache negativo) e tratar como transitório.
+    process.exitCode = EXIT_SEM_RESULTADO;
+  }
 }
 
 async function main() {

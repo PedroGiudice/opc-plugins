@@ -604,17 +604,42 @@ export function deveInflar(info, maxParteBytes = MAX_PARTE_BYTES) {
   return PARTES_LIDAS.test(info.name) && info.originalSize <= maxParteBytes;
 }
 
+// Tetos do PACOTE (R23): o teto por parte sozinho deixava 40 partes de
+// cabeçalho de 64 MiB cada passarem (sondado pelo revisor: um .docx de 2,6 MB
+// levou o filho a 3,4 GB em 33 s). Um contrato real tem poucos cabeçalhos e
+// rodapés (3 por seção, raramente mais de 6) e partes somando poucos MiB.
+export const MAX_PACOTE_BYTES = 128 * 1024 * 1024;
+export const MAX_PARTES_CABECALHO = 20;
+
 export function abrirPacote(buffer, { maxParteBytes = MAX_PARTE_BYTES } = {}) {
   const acimaDoTeto = [];
+  let soma = 0;
+  let cabecalhos = 0;
+  let excesso = null;
+  // O filtro roda entrada a entrada, antes de inflar cada uma: o primeiro
+  // estouro marca o pacote e recusa todo o resto, então o que chega a ser
+  // inflado fica abaixo dos tetos.
   const zip = unzipSync(new Uint8Array(buffer), {
     filter: (info) => {
-      if (deveInflar(info, maxParteBytes)) return true;
-      if (PARTES_LIDAS.test(info.name)) acimaDoTeto.push(info.name);
-      return false;
+      if (excesso || !PARTES_LIDAS.test(info.name)) return false;
+      if (/^word\/(header|footer)\d*\.xml$/.test(info.name) && (cabecalhos += 1) > MAX_PARTES_CABECALHO) {
+        excesso = `mais de ${MAX_PARTES_CABECALHO} partes de cabeçalho/rodapé`;
+        return false;
+      }
+      if (!deveInflar(info, maxParteBytes)) {
+        acimaDoTeto.push(info.name);
+        return false;
+      }
+      soma += info.originalSize;
+      if (soma > MAX_PACOTE_BYTES) {
+        excesso = `partes do pacote somam mais de ${MAX_PACOTE_BYTES / (1024 * 1024)} MiB`;
+        return false;
+      }
+      return true;
     },
   });
   const parte = (nome) => (zip[nome] ? parseXml(zip[nome]) : null);
-  return { zip, parte, acimaDoTeto };
+  return { zip, parte, acimaDoTeto, excesso };
 }
 
 // .docx cifrado (senha de abertura) é um contêiner OLE/CFB, não zip; o .doc
@@ -644,6 +669,7 @@ export function lerDocx(buffer, { maxParteBytes = MAX_PARTE_BYTES } = {}) {
   } catch (err) {
     return ilegivel(ehCfb(buffer) ? "protegido por senha (ou .doc antigo renomeado)" : `zip inválido (${primeiraLinha(err.message)})`);
   }
+  if (pacote.excesso) return ilegivel(pacote.excesso);
   const mib = Math.round(maxParteBytes / (1024 * 1024));
   if (pacote.acimaDoTeto.includes("word/document.xml")) return ilegivel(`parte word/document.xml acima de ${mib} MiB`);
   for (const nome of pacote.acimaDoTeto) saida.avisos.push(`parte ${nome} acima de ${mib} MiB não lida`);
