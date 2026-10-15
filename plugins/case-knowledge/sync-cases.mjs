@@ -25,6 +25,7 @@ import { spawnSync } from "node:child_process";
 import { requestWithAuth, readCredential, decodeJwtAuthorDir } from "./auth.mjs";
 import { defaultMemApiBase } from "./memoria.mjs";
 import { isSafeScaffoldingPath, SETUP_PLUGINS } from "./setup.mjs";
+import { extrairTodos } from "./extrair.mjs";
 import {
   isWorkdocPath,
   isSafeRelPath,
@@ -2878,6 +2879,25 @@ async function main() {
     await syncTranscripts(memApiBase, casesBase);
   } catch (err) {
     appendLog(casesBase, `transcripts: erro inesperado: ${err.message}`);
+  }
+
+  // CMR-303: extrai o texto dos workdocs (.docx/.xlsx/.msg/.eml) para um .md ao
+  // lado do original. Roda ANTES do syncWorkdocs para o arquivo que nasceu
+  // nesta máquina ser extraído e subir no mesmo tick; o .docx que desceu do hub
+  // agora é extraído no tick seguinte. Orçamento de 120 s (a tarefa do Windows
+  // tem ExecutionTimeLimit de 5 min). extrairTodos nunca lança; try/catch é a
+  // última linha de defesa. Linhas de log por arquivo extraído/adiado/erro.
+  try {
+    const { porCaso } = await extrairTodos(casesBase, { orcamentoMs: 120_000 });
+    for (const [caso, r] of Object.entries(porCaso)) {
+      for (const e of r.extraidos) appendLog(casesBase, `extracao ${caso}: ${e.rel} -> ${e.sidecar}`);
+      for (const a of r.adiados) if (a.motivo !== "orçamento de tempo esgotado") appendLog(casesBase, `extracao ${caso}: ${a.rel} adiado (${a.motivo})`);
+      for (const x of r.erros) appendLog(casesBase, `extracao ${caso}: ${x.rel} erro (${x.erro})`);
+      const esgotados = r.adiados.filter((a) => a.motivo === "orçamento de tempo esgotado").length;
+      if (esgotados) appendLog(casesBase, `extracao ${caso}: ${esgotados} arquivo(s) ficaram para o próximo tick (orçamento)`);
+    }
+  } catch (err) {
+    appendLog(casesBase, `extracao: erro inesperado: ${err.message}`);
   }
 
   // CMR-161: espelha os workdocs (.md/.py/.docx) da pasta do caso — pool comum do

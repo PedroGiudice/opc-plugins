@@ -131,6 +131,32 @@ Seguranca: o perimetro continua sendo o tenant do Bearer. Roots so governam
 a higiene do lado do cliente. Regra pura em `casos.mjs` (testes em
 `casos.test.mjs`, incluindo guards estruturais sobre o `server.mjs`).
 
+## Extração automática de texto dos workdocs (0.29.0, CMR-303)
+
+Cada `.docx`, `.xlsx`, `.msg` e `.eml` dentro de uma pasta de caso ganha um
+sidecar `<original>.md` ao lado (ex.: `contrato.docx.md`), com o texto,
+revisões e comentários do Word, as abas das planilhas, ou o cabeçalho, o corpo e
+os anexos do e-mail. O sidecar é um workdoc comum: sobe e desce pelo pool como
+qualquer `.md`, então o Claude de qualquer colega lê o texto sem abrir o binário.
+A extração é idempotente por md5 do original (guardado no cabeçalho do sidecar):
+original inalterado não reescreve nada, e um `.md` com esse nome que não leva o
+cabeçalho do extrator é tratado como arquivo do usuário e nunca é sobrescrito.
+Original com opt-out pessoal (`x.local.docx`) gera sidecar também `.local`, que
+o pool ignora.
+
+Há dois gatilhos. O tick do sincronizador (`sync-cases.mjs`) roda a extração em
+todos os casos antes do espelho de workdocs, com orçamento de 120 s, e registra
+uma linha `extracao ...` no log por arquivo extraído, adiado ou com erro. O hook
+`SessionStart` (`hooks/extracao-sessao.mjs`) extrai a pasta da sessão antes do
+primeiro prompt, com orçamento de 60 s, e injeta no contexto a lista do que foi
+extraído, do que ficou para o sincronizador e do que não foi possível extrair.
+Fora de `~/cases` ele devolve `{}`.
+
+Uso manual: `node extrair.mjs --caso <pasta> [--orcamento <s>] [--resumo]` ou
+`node extrair.mjs --todos <cases> [--orcamento <s>]`. Regras, limites e formato
+do sidecar estão na spec
+`case-docs/docs/superpowers/specs/2026-10-15-extracao-automatica-workdocs-design.md`.
+
 ## Variaveis de ambiente
 
 | Var | Default | Funcao |

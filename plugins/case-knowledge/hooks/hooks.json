@@ -23,6 +23,11 @@
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/handoff-digest.mjs\"",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/extracao-sessao.mjs\"",
+            "timeout": 90
           }
         ]
       }
