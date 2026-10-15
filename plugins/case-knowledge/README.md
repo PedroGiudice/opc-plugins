@@ -131,18 +131,48 @@ Seguranca: o perimetro continua sendo o tenant do Bearer. Roots so governam
 a higiene do lado do cliente. Regra pura em `casos.mjs` (testes em
 `casos.test.mjs`, incluindo guards estruturais sobre o `server.mjs`).
 
-## Extração automática de texto dos workdocs (0.29.0, CMR-303)
+## Extração automática de texto dos workdocs (0.29.0; layout `extracoes/` desde 0.30.0, CMR-303)
 
 Cada `.docx`, `.xlsx`, `.msg` e `.eml` dentro de uma pasta de caso ganha um
-sidecar `<original>.md` ao lado (ex.: `contrato.docx.md`), com o texto,
-revisões e comentários do Word, as abas das planilhas, ou o cabeçalho, o corpo e
-os anexos do e-mail. O sidecar é um workdoc comum: sobe e desce pelo pool como
-qualquer `.md`, então o Claude de qualquer colega lê o texto sem abrir o binário.
+sidecar `.md` com o texto, revisões e comentários do Word, as abas das
+planilhas, ou o cabeçalho, o corpo e os anexos do e-mail. Os sidecars moram em
+`extracoes/`, na raiz do caso, espelhando a árvore dele: `a/b/contrato.docx`
+ganha `extracoes/a/b/contrato.docx.md`, e a pasta do advogado fica só com os
+documentos dele (nome sem acento de propósito: acento em nome de pasta quebra
+pandoc, `Copy-Item` e caminho UNC). Os anexos de um e-mail `a/RE.msg` são
+gravados em `extracoes/a/RE.msg.anexos/`, e o sidecar de cada anexo fica ao
+lado dele ali dentro (`extracoes/a/RE.msg.anexos/Minuta.docx.md`). Dentro de
+`extracoes/` só o que está numa pasta `.anexos/` é extraído; o resto é saída do
+extrator. O sidecar é um workdoc comum: sobe e desce pelo pool como qualquer
+`.md`, então o Claude de qualquer colega lê o texto sem abrir o binário.
 A extração é idempotente por md5 do original (guardado no cabeçalho do sidecar):
-original inalterado não reescreve nada, e um `.md` com esse nome que não leva o
-cabeçalho do extrator é tratado como arquivo do usuário e nunca é sobrescrito.
-Original com opt-out pessoal (`x.local.docx`) gera sidecar também `.local`, que
-o pool ignora.
+original inalterado não reescreve nada, e um `.md` no lugar do sidecar que não
+leva o cabeçalho do extrator é tratado como arquivo do usuário e nunca é
+sobrescrito. Original com opt-out pessoal (`x.local.docx`) gera sidecar também
+`.local` (`extracoes/x.local.docx.local.md`), que o pool ignora.
+
+Migração do layout 0.29 (sidecar ao lado do original): `migrarLayout`
+(`extrair.mjs`) roda no início de toda extração de caso, no tick e no hook. Ela
+move para `extracoes/` cada `<original>.md` que tenha o cabeçalho do extrator e
+cada pasta `<e-mail>.anexos/`; se o destino já existe, o destino fica e o antigo
+sai (pasta é mesclada arquivo a arquivo). `.md` do usuário, mesmo com nome
+parecido, não é tocado. A migração é idempotente porque o pool re-baixa o `.md`
+que some localmente enquanto o hub ainda o tem: até o hub ser migrado, um tick
+pode trazer de volta o arquivo no lugar antigo e o seguinte o move de novo. Por
+isso, logo após publicar a 0.30.0, migrar o hub na VM (não extrai nada; o hub
+monta o manifest de workdocs varrendo o disco, então a mudança vale no próximo
+tick de cada máquina). O argumento é a base de casos do hub, a mesma do
+`CASE_KNOWLEDGE_CASES_BASE` da VM (`tenants/1/cases`):
+
+```bash
+node ~/opc-plugins/plugins/case-knowledge/extrair.mjs --migrar /home/opc/case-docs/tenants/1/cases
+```
+
+Cada migração com efeito vira a linha `extracao <caso>: migração: ...` no log do
+tick (e cada falha, `extracao <caso>: migração: <caminho> erro (...)`). O
+`EXTRATOR_VERSAO` não mudou: o conteúdo do sidecar é o mesmo byte a byte (o
+caminho do anexo listado no sidecar do e-mail é relativo a `extracoes/`), então o
+sidecar migrado continua em dia e nada é reextraído.
 
 Há dois gatilhos. O tick do sincronizador (`sync-cases.mjs`) roda a extração em
 todos os casos antes da busca do manifest (a fase é local: máquina offline também
@@ -179,10 +209,12 @@ diferentes para o mesmo original, cada máquina regrava o sidecar da outra e o p
 produz cópias `.conflito-`. Com a versão nova, a máquina atualizada regrava uma vez
 e a desatualizada não toca sidecar de versão maior.
 
-Uso manual: `node extrair.mjs --caso <pasta> [--orcamento <s>] [--resumo]` ou
-`node extrair.mjs --todos <cases> [--orcamento <s>]`. Regras, limites e formato
-do sidecar estão na spec
-`case-docs/docs/superpowers/specs/2026-10-15-extracao-automatica-workdocs-design.md`.
+Uso manual: `node extrair.mjs --caso <pasta> [--orcamento <s>] [--resumo]`,
+`node extrair.mjs --todos <cases> [--orcamento <s>]` ou
+`node extrair.mjs --migrar <cases>` (só a migração de layout, em todos os casos).
+Regras, limites e formato do sidecar estão na spec
+`case-docs/docs/superpowers/specs/2026-10-15-extracao-automatica-workdocs-design.md`
+(a decisão "sidecar ao lado" dela foi substituída pelo layout `extracoes/`).
 
 ## Variaveis de ambiente
 
