@@ -214,3 +214,27 @@ test("formatContext: instrui citacao de autor/data no cabecalho do bloco", () =>
   const out = formatContext("caso-x", [{ score: 0.5, content: "c" }]);
   assert.match(out, /cite autor e data/i);
 });
+
+// --- CMR-319: segunda tentativa em corte de rede, dentro do mesmo orcamento ---
+
+test("fetchContext: fetch rejeitado por rede na 1a e ok na 2a -> chunks", async (t) => {
+  credFixture(t, { access_jwt: "a.b.c", refresh: "r1" });
+  let n = 0;
+  const fakeFetch = async () => {
+    n++;
+    if (n === 1) throw new TypeError("fetch failed");
+    return { ok: true, json: async () => ({ status: "ok", chunks: [{ score: 1, content: "x" }] }) };
+  };
+  const chunks = await fetchContext("prompt de teste valido", "/x/cases/y", fakeFetch);
+  assert.equal(chunks.length, 1);
+  assert.equal(n, 2);
+});
+
+test("fetchContext: duas falhas de rede -> null, sem lancar", async (t) => {
+  credFixture(t, { access_jwt: "a.b.c", refresh: "r1" });
+  let n = 0;
+  const fakeFetch = async () => { n++; throw new TypeError("fetch failed"); };
+  const chunks = await fetchContext("prompt de teste valido", "/x/cases/y", fakeFetch);
+  assert.equal(chunks, null);
+  assert.equal(n, 2);
+});

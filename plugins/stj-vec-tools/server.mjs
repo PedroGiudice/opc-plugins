@@ -65,6 +65,9 @@ async function fetchWithRetry(url, options = {}) {
 
       // Only retry on connection errors, not on aborts
       if (err.name === "AbortError" || attempt >= MAX_RETRIES) {
+        // Ja repetiu aqui (3x com backoff): marca para o comSegundaTentativa
+        // do requestWithAuth nao abrir outro ciclo (CMR-319).
+        if (err && typeof err === "object") err.tentativasEsgotadas = true;
         throw err;
       }
 

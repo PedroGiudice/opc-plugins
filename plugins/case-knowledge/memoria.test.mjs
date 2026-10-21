@@ -255,3 +255,27 @@ test("tool memoria_search declara a_partir", async () => {
   const tool = src.slice(src.indexOf('"memoria_search",'), src.indexOf("// Tool: contexto"));
   assert.match(tool, /a_partir:\s*z\.number\(\)\.int\(\)\.min\(1\)/);
 });
+
+// --- CMR-319: segunda tentativa em corte de rede (passa pelo requestWithAuth) ---
+
+test("memoriaSearch: fetch rejeitado por rede na 1a e ok na 2a -> resultado normal", async (t) => {
+  credFixture(t);
+  let n = 0;
+  const fakeFetch = async () => {
+    n++;
+    if (n === 1) throw new TypeError("fetch failed");
+    return { ok: true, json: async () => ({ status: "ok", chunks: [{ score: 0.5, content: "recuperado" }] }) };
+  };
+  const out = await memoriaSearch({ query: "q de teste valida" }, { dir: "/x/cases/y", name: "y" }, fakeFetch);
+  assert.ok(out.includes("recuperado"));
+  assert.equal(n, 2);
+});
+
+test("memoriaSearch: duas falhas de rede -> 'memoria indisponivel: fetch failed' (mensagem inalterada)", async (t) => {
+  credFixture(t);
+  let n = 0;
+  const fakeFetch = async () => { n++; throw new TypeError("fetch failed"); };
+  const out = await memoriaSearch({ query: "q de teste valida" }, { dir: "/x/cases/y", name: "y" }, fakeFetch);
+  assert.equal(out, "memoria indisponivel: fetch failed");
+  assert.equal(n, 2);
+});

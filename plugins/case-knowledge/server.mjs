@@ -71,7 +71,12 @@ async function fetchWithRetry(url, options = {}) {
     } catch (err) {
       clearTimeout(timer);
       lastError = err;
-      if (err.name === "AbortError" || attempt >= MAX_RETRIES) throw err;
+      if (err.name === "AbortError" || attempt >= MAX_RETRIES) {
+        // Ja repetiu aqui (3x com backoff): marca para o comSegundaTentativa
+        // do requestWithAuth nao abrir outro ciclo (CMR-319).
+        if (err && typeof err === "object") err.tentativasEsgotadas = true;
+        throw err;
+      }
       await sleep(RETRY_DELAYS[attempt] || 3000);
     }
   }

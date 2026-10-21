@@ -451,10 +451,79 @@ export async function getFreshAccessToken(fetchImpl = fetch) {
   return token;
 }
 
+// --- Segunda tentativa em corte de rede (CMR-319) ---
+//
+// Em 21/10/2026, na rede do escritorio (proxy Squid), o fetch do memoria_search
+// REJEITOU com "fetch failed" em 1,5 s por um corte pontual: um minuto antes o
+// hook alcancava o mesmo servidor e as sondas logo depois passaram todas. Para
+// esse caso, UMA segunda tentativa depois de 300 ms resolve; mais que isso
+// so adia o erro. O ajudante repete apenas quando o fetch rejeitou por rede;
+// qualquer resposta HTTP (401 inclusive) e devolvida como veio, e o
+// requestWithAuth segue avaliando o 401 e renovando o token exatamente como
+// antes: a repeticao fica DENTRO da chamada que ele ja faz, nunca gera uma
+// segunda renovacao.
+
+/** Espera entre a primeira e a segunda tentativa. */
+export const ESPERA_SEGUNDA_TENTATIVA_MS = 300;
+
+/**
+ * `cause.code` do TypeError "fetch failed" (undici) que caracteriza corte de
+ * rede recuperavel. Fora da lista (ENOTFOUND, certificado, etc.) nao se repete:
+ * o erro e de configuracao, nao de instante.
+ */
+const CODIGOS_DE_REDE = new Set([
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "ENETUNREACH",
+  "EPIPE",
+  "UND_ERR_SOCKET",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
+
+/**
+ * Fetch REJEITADO por rede: TypeError (o "fetch failed" do undici) com
+ * `cause.code` na lista ou sem `cause`. Abort/timeout (AbortError,
+ * TimeoutError) NAO e rede: o chamador escolheu o prazo e ele venceu.
+ */
+export function erroDeRede(err) {
+  if (!err || typeof err !== "object") return false;
+  if (err.name !== "TypeError") return false;
+  const cause = err.cause;
+  if (cause === undefined || cause === null) return true;
+  return CODIGOS_DE_REDE.has(cause && cause.code);
+}
+
+function esperar(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Chama `doFetch()`; se REJEITAR por rede, espera e chama UMA vez mais.
+ * Resposta HTTP de qualquer status volta na hora. Erro com a marca
+ * `tentativasEsgotadas` (o fetchWithRetry do server.mjs ja repetiu 3x) e
+ * propagado sem nova tentativa, para nao dobrar o ciclo. `opcoes.esperaMs` e
+ * `opcoes.esperar` existem para os testes.
+ */
+export async function comSegundaTentativa(doFetch, opcoes = {}) {
+  const esperaMs = opcoes.esperaMs ?? ESPERA_SEGUNDA_TENTATIVA_MS;
+  const dormir = opcoes.esperar ?? esperar;
+  try {
+    return await doFetch();
+  } catch (err) {
+    if (!erroDeRede(err) || (err && err.tentativasEsgotadas)) throw err;
+    await dormir(esperaMs);
+    return await doFetch();
+  }
+}
+
 /**
  * Executa uma request com Bearer injetado, refresh PROATIVO (best-effort) e
  * refresh REATIVO em 401 (1 retry). `doFetch(authHeaders)` recebe os headers
- * de auth a mesclar e retorna a Response (ja com retry de rede do server).
+ * de auth a mesclar e retorna a Response. Cada chamada de `doFetch` passa por
+ * `comSegundaTentativa` (CMR-319): fetch rejeitado por rede e repetido 1x
+ * apos 300 ms com os MESMOS cabecalhos, antes de qualquer avaliacao de 401.
  *
  * Semantica:
  *  - Sem credencial -> segue SEM Bearer (compat tailnet require_bearer=false);
@@ -470,7 +539,7 @@ export async function getFreshAccessToken(fetchImpl = fetch) {
  *  - Outros status nao-ok: retorna a Response; o caller mantem o comportamento
  *    atual (lanca "API <status>: <body>").
  */
-export async function requestWithAuth(doFetch, fetchImpl = fetch) {
+export async function requestWithAuth(doFetch, fetchImpl = fetch, opcoes = {}) {
   let token = null;
   try {
     token = await getFreshAccessToken(fetchImpl);
@@ -484,7 +553,7 @@ export async function requestWithAuth(doFetch, fetchImpl = fetch) {
   }
 
   const authHeaders = token ? { Authorization: `Bearer ${token}` } : {};
-  let res = await doFetch(authHeaders);
+  let res = await comSegundaTentativa(() => doFetch(authHeaders), opcoes);
 
   if (res.status === 401) {
     let newToken;
@@ -496,7 +565,7 @@ export async function requestWithAuth(doFetch, fetchImpl = fetch) {
       if (err && err.code === "NETWORK") throw err;
       throw new Error(MSG_UNAUTHORIZED_AFTER_REFRESH);
     }
-    res = await doFetch({ Authorization: `Bearer ${newToken}` });
+    res = await comSegundaTentativa(() => doFetch({ Authorization: `Bearer ${newToken}` }), opcoes);
     if (res.status === 401) throw new Error(MSG_UNAUTHORIZED_AFTER_REFRESH);
   }
 

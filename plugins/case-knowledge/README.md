@@ -285,6 +285,12 @@ account `default`). `auth.mjs` e uma copia byte-identica nos 3 (teste de
 paridade `auth.parity.test.mjs`, dev-clone-only). O login e no app publico
 `https://app.aidvlabs.com`; as tools batem nas APIs Rust.
 
+Toda chamada que passa pelo `requestWithAuth` (tools, `memoria_search`,
+`sync-cases.mjs`, `setup.mjs`) e o hook `memoria-context.mjs` ganham UMA
+segunda tentativa 300 ms depois quando o `fetch` rejeita por corte de rede
+(`comSegundaTentativa`, 0.30.1, CMR-319); resposta HTTP, 401 inclusive, nao se
+repete por ai, e a renovacao do token segue uma por chamada.
+
 ### Smoke test (manual)
 
 1. Login (grava a credencial compartilhada `aidvlabs-mcp`):

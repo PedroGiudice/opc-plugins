@@ -100,7 +100,8 @@ export async function memoriaSearch(params, caseInfo, fetchImpl = fetch) {
   try {
     // requestWithAuth injeta o Bearer quando ha credencial (mesmo login dos
     // demais MCPs, keychain aidvlabs-mcp), refresca proativo (<60s) e reativo
-    // (401 -> refresh -> 1 retry). SEM credencial segue SEM Bearer — preserva
+    // (401 -> refresh -> 1 retry) e repete 1x apos 300 ms se o fetch rejeitar
+    // por rede (CMR-319). SEM credencial segue SEM Bearer — preserva
     // o uso tailnet enquanto o daemon aceita fallback. Erro de auth cai no
     // catch abaixo e vira "memoria indisponivel: ..."; a tool nunca lanca.
     const res = await requestWithAuth((authHeaders) =>

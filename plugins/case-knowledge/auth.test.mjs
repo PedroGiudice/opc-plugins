@@ -578,3 +578,121 @@ test("requestWithAuth: 401 -> refresh ok -> API ainda 401 mantem 'Nao autorizado
     },
   );
 });
+
+// --- Segunda tentativa em corte de rede (CMR-319, 21/10/2026) ---
+// Na cmr-002 (proxy Squid) o fetch do memoria_search rejeitou com "fetch failed"
+// num corte pontual de 1,5 s. UMA repeticao depois de 300 ms, so quando o fetch
+// REJEITA por rede; resposta HTTP nunca se repete por aqui.
+
+import { comSegundaTentativa, erroDeRede, ESPERA_SEGUNDA_TENTATIVA_MS } from "./auth.mjs";
+
+const falhaDeRede = (code) => {
+  const e = new TypeError("fetch failed");
+  if (code) e.cause = Object.assign(new Error(code), { code });
+  return e;
+};
+
+test("erroDeRede: TypeError fetch failed com cause da lista ou sem cause; abort/DNS/HTTP nao", () => {
+  assert.equal(erroDeRede(falhaDeRede()), true);
+  for (const c of ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN", "ENETUNREACH", "EPIPE", "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT"]) {
+    assert.equal(erroDeRede(falhaDeRede(c)), true, c);
+  }
+  assert.equal(erroDeRede(falhaDeRede("ENOTFOUND")), false);
+  assert.equal(erroDeRede(falhaDeRede("CERT_HAS_EXPIRED")), false);
+  const abort = new Error("aborted"); abort.name = "AbortError";
+  assert.equal(erroDeRede(abort), false);
+  assert.equal(erroDeRede(new Error("API 500")), false);
+  assert.equal(erroDeRede(null), false);
+});
+
+test("comSegundaTentativa: rede na 1a, resposta na 2a -> devolve a resposta apos esperar 300 ms", async () => {
+  let n = 0;
+  const esperas = [];
+  const doFetch = async () => { n++; if (n === 1) throw falhaDeRede("ECONNRESET"); return { ok: true, status: 200 }; };
+  const res = await comSegundaTentativa(doFetch, { esperar: async (ms) => esperas.push(ms) });
+  assert.equal(res.status, 200);
+  assert.equal(n, 2);
+  assert.deepEqual(esperas, [ESPERA_SEGUNDA_TENTATIVA_MS]);
+  assert.equal(ESPERA_SEGUNDA_TENTATIVA_MS, 300);
+});
+
+test("comSegundaTentativa: duas falhas de rede -> propaga o erro da 2a, sem 3a tentativa", async () => {
+  let n = 0;
+  const doFetch = async () => { n++; throw falhaDeRede(n === 1 ? "ECONNRESET" : "ECONNREFUSED"); };
+  await assert.rejects(
+    () => comSegundaTentativa(doFetch, { esperaMs: 0 }),
+    (err) => { assert.equal(err.message, "fetch failed"); assert.equal(err.cause.code, "ECONNREFUSED"); return true; },
+  );
+  assert.equal(n, 2);
+});
+
+test("comSegundaTentativa: resposta HTTP (401) na 1a nao se repete", async () => {
+  let n = 0;
+  const res = await comSegundaTentativa(async () => { n++; return { ok: false, status: 401 }; }, { esperaMs: 0 });
+  assert.equal(res.status, 401);
+  assert.equal(n, 1);
+});
+
+test("comSegundaTentativa: abort por timeout, erro fora da lista e tentativasEsgotadas nao se repetem", async () => {
+  for (const err of [
+    Object.assign(new Error("aborted"), { name: "AbortError" }),
+    falhaDeRede("ENOTFOUND"),
+    Object.assign(falhaDeRede("ECONNRESET"), { tentativasEsgotadas: true }),
+  ]) {
+    let n = 0;
+    await assert.rejects(() => comSegundaTentativa(async () => { n++; throw err; }, { esperaMs: 0 }), err);
+    assert.equal(n, 1, err.message);
+  }
+});
+
+test("requestWithAuth: rede na 1a, 200 na 2a -> mesmos cabecalhos, NENHUM refresh", async (t) => {
+  freshCred(t);
+  const jwt = makeJwt(nowSec() + 3600);
+  writeCredential({ access_jwt: jwt, refresh: "r1" });
+  let refreshCalls = 0;
+  const fakeFetch = async () => { refreshCalls++; return { ok: true, status: 200, json: async () => ({ access_jwt: "jwt2", refresh: "r2" }) }; };
+  const seen = [];
+  const doFetch = async (h) => { seen.push(h); if (seen.length === 1) throw falhaDeRede(); return { ok: true, status: 200 }; };
+  const res = await requestWithAuth(doFetch, fakeFetch, { esperaMs: 0 });
+  assert.equal(res.status, 200);
+  assert.equal(refreshCalls, 0);
+  assert.equal(seen.length, 2);
+  assert.deepEqual(seen[0], seen[1]);
+  assert.equal(seen[1].Authorization, `Bearer ${jwt}`);
+  assert.deepEqual(readCredential(), { access_jwt: jwt, refresh: "r1" });
+});
+
+test("requestWithAuth: duas falhas de rede -> erro propagado como antes (fetch failed), sem refresh", async (t) => {
+  freshCred(t);
+  writeCredential({ access_jwt: makeJwt(nowSec() + 3600), refresh: "r1" });
+  let refreshCalls = 0;
+  const fakeFetch = async () => { refreshCalls++; return { ok: true, status: 200, json: async () => ({}) }; };
+  let n = 0;
+  await assert.rejects(
+    () => requestWithAuth(async () => { n++; throw falhaDeRede("UND_ERR_SOCKET"); }, fakeFetch, { esperaMs: 0 }),
+    /^TypeError: fetch failed$/,
+  );
+  assert.equal(n, 2);
+  assert.equal(refreshCalls, 0);
+});
+
+test("requestWithAuth: rede na 1a, 401 na 2a -> UMA renovacao e repete; a renovacao nao dobra", async (t) => {
+  freshCred(t);
+  const jwt = makeJwt(nowSec() + 3600);
+  writeCredential({ access_jwt: jwt, refresh: "r1" });
+  let refreshCalls = 0;
+  const fakeFetch = async () => { refreshCalls++; return { ok: true, status: 200, json: async () => ({ access_jwt: "jwt2", refresh: "r2" }) }; };
+  const seen = [];
+  const doFetch = async (h) => {
+    seen.push(h);
+    if (seen.length === 1) throw falhaDeRede("ECONNRESET");
+    if (seen.length === 2) return { ok: false, status: 401 };
+    return { ok: true, status: 200 };
+  };
+  const res = await requestWithAuth(doFetch, fakeFetch, { esperaMs: 0 });
+  assert.equal(res.status, 200);
+  assert.equal(refreshCalls, 1);
+  assert.equal(seen.length, 3);
+  assert.equal(seen[1].Authorization, `Bearer ${jwt}`);
+  assert.equal(seen[2].Authorization, "Bearer jwt2");
+});

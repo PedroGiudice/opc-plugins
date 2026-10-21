@@ -14,7 +14,7 @@ import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { readCredential } from "../auth.mjs";
+import { readCredential, comSegundaTentativa } from "../auth.mjs";
 
 /**
  * Base default do legal-cogmem por PLATAFORMA (CMR-135 Task 6b).
@@ -175,12 +175,17 @@ export async function fetchContext(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const res = await fetchImpl(`${MEM_API_BASE}/context`, {
-      method: "POST",
-      headers: contextHeaders(cred),
-      body: JSON.stringify({ prompt, repo_path: repoPath }),
-      signal: controller.signal,
-    });
+    // Corte de rede pontual (fetch rejeitado) ganha UMA segunda tentativa
+    // apos 300 ms (CMR-319), sob o MESMO timer: o orcamento de 2,5 s nao
+    // cresce. Resposta HTTP (401 inclusive) nao se repete: segue sem refresh.
+    const res = await comSegundaTentativa(() =>
+      fetchImpl(`${MEM_API_BASE}/context`, {
+        method: "POST",
+        headers: contextHeaders(cred),
+        body: JSON.stringify({ prompt, repo_path: repoPath }),
+        signal: controller.signal,
+      }),
+    );
     if (!res.ok) return null;
     const json = await res.json();
     if (json.status !== "ok") return null;
