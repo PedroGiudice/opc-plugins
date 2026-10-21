@@ -286,10 +286,14 @@ paridade `auth.parity.test.mjs`, dev-clone-only). O login e no app publico
 `https://app.aidvlabs.com`; as tools batem nas APIs Rust.
 
 Toda chamada que passa pelo `requestWithAuth` (tools, `memoria_search`,
-`sync-cases.mjs`, `setup.mjs`) e o hook `memoria-context.mjs` ganham UMA
-segunda tentativa 300 ms depois quando o `fetch` rejeita por corte de rede
-(`comSegundaTentativa`, 0.30.1, CMR-319); resposta HTTP, 401 inclusive, nao se
-repete por ai, e a renovacao do token segue uma por chamada.
+`sync-cases.mjs`, `setup.mjs`), o hook `memoria-context.mjs` e o proprio POST
+de renovacao do token ganham UMA segunda tentativa 300 ms depois quando o
+`fetch` rejeita por corte de rede (`comSegundaTentativa`, 0.30.1 e 0.30.2,
+CMR-319); resposta HTTP, 401 inclusive, nao se repete por ai, e a renovacao
+segue uma por chamada. A renovacao proativa acontece a menos de 5 min do
+vencimento (`MARGEM_RENOVACAO_S`; era 60 s), para o corte ter de durar mais
+de 5 min cravado na janela para derrubar as tools. Espelhado no `auth.rs` do
+AiDV; a regra da trava esta em `case-docs/.claude/rules/auth-mcp.md`.
 
 ### Smoke test (manual)
 

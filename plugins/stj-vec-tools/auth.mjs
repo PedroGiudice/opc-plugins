@@ -28,6 +28,18 @@ export const APP_BASE =
 const REFRESH_TIMEOUT_MS = 60_000;
 
 /**
+ * Renovacao PROATIVA quando faltam menos que isto para o `exp` (em segundos).
+ * Era 60 s; em 21/10/2026 (CMR-319) dois cortes de ~2 min na rede do
+ * escritorio cairam cravados no vencimento do access de 15 min e todo
+ * processo da maquina precisou renovar sem conseguir. Com 5 min de folga o
+ * sync (tick de ~2,5 min) renova antes, e o corte precisa durar mais de
+ * 5 min dentro da janela para derrubar as tools. Espelhado em
+ * `desktop/src-tauri/src/auth.rs` (MARGEM_VALIDADE_S): mudar aqui exige
+ * mudar la (regra em .claude/rules/auth-mcp.md do case-docs).
+ */
+export const MARGEM_RENOVACAO_S = 300;
+
+/**
  * Comando de login concreto. Em runtime do MCP server, CLAUDE_PLUGIN_ROOT esta
  * no env (set pelo Claude Code) -> caminho absoluto do server.mjs; fora dele
  * (shell do usuario, testes) cai num placeholder claro. O subcomando real e
@@ -387,7 +399,7 @@ function releaseLock(fd, token) {
  *       com o caminho de re-login (AiDV, ou o comando);
  *   (c) 2xx -> grava { access_jwt, refresh } e retorna o novo access_jwt.
  */
-export async function refreshOnce(fetchImpl = fetch) {
+export async function refreshOnce(fetchImpl = fetch, opcoes = {}) {
   const before = readCredential();
   if (!before || !before.refresh) throw noCredentialError();
 
@@ -406,12 +418,21 @@ export async function refreshOnce(fetchImpl = fetch) {
     const timer = setTimeout(() => controller.abort(), REFRESH_TIMEOUT_MS);
     let res;
     try {
-      res = await fetchImpl(`${APP_BASE}/cli/token/refresh`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ refresh }),
-        signal: controller.signal,
-      });
+      // Fetch REJEITADO por rede ganha UMA segunda tentativa apos 300 ms
+      // (CMR-319). Segura por construcao: se a 1a chegou ao servidor e so a
+      // resposta se perdeu, o /cli/token/refresh devolve o MESMO par dentro
+      // da grace de 10 s (cli_grace_seconds), entao repetir e idempotente.
+      // Resposta HTTP (401 inclusive) nunca se repete.
+      res = await comSegundaTentativa(
+        () =>
+          fetchImpl(`${APP_BASE}/cli/token/refresh`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ refresh }),
+            signal: controller.signal,
+          }),
+        opcoes,
+      );
     } catch (err) {
       // (a) REDE: fetch rejeitado ("fetch failed", ENOTFOUND, TLS) ou abortado
       // pelo timeout. Nao ha resposta do servidor -> nada se sabe sobre a sessao.
@@ -438,15 +459,16 @@ export async function refreshOnce(fetchImpl = fetch) {
 }
 
 /**
- * Token usavel: o atual, mas se expira em <60s (ou ja expirou) refresca antes
- * (refresh PROATIVO). Lanca NO_CREDENTIAL se nao ha credencial.
+ * Token usavel: o atual, mas se expira em menos de MARGEM_RENOVACAO_S (5 min)
+ * ou ja expirou, refresca antes (refresh PROATIVO). Lanca NO_CREDENTIAL se
+ * nao ha credencial.
  */
-export async function getFreshAccessToken(fetchImpl = fetch) {
+export async function getFreshAccessToken(fetchImpl = fetch, opcoes = {}) {
   const token = getAccessToken();
   const exp = decodeJwtExp(token);
   const now = Math.floor(Date.now() / 1000);
-  if (exp !== null && exp - now < 60) {
-    return await refreshOnce(fetchImpl);
+  if (exp !== null && exp - now < MARGEM_RENOVACAO_S) {
+    return await refreshOnce(fetchImpl, opcoes);
   }
   return token;
 }
@@ -523,7 +545,8 @@ export async function comSegundaTentativa(doFetch, opcoes = {}) {
  * refresh REATIVO em 401 (1 retry). `doFetch(authHeaders)` recebe os headers
  * de auth a mesclar e retorna a Response. Cada chamada de `doFetch` passa por
  * `comSegundaTentativa` (CMR-319): fetch rejeitado por rede e repetido 1x
- * apos 300 ms com os MESMOS cabecalhos, antes de qualquer avaliacao de 401.
+ * apos 300 ms com os MESMOS cabecalhos, antes de qualquer avaliacao de 401;
+ * o POST do refresh tem a mesma segunda tentativa (ver refreshOnce).
  *
  * Semantica:
  *  - Sem credencial -> segue SEM Bearer (compat tailnet require_bearer=false);
@@ -542,7 +565,7 @@ export async function comSegundaTentativa(doFetch, opcoes = {}) {
 export async function requestWithAuth(doFetch, fetchImpl = fetch, opcoes = {}) {
   let token = null;
   try {
-    token = await getFreshAccessToken(fetchImpl);
+    token = await getFreshAccessToken(fetchImpl, opcoes);
   } catch (err) {
     if (err && err.code === "NO_CREDENTIAL") {
       token = null; // degrade: sem credencial -> sem Bearer
@@ -558,7 +581,7 @@ export async function requestWithAuth(doFetch, fetchImpl = fetch, opcoes = {}) {
   if (res.status === 401) {
     let newToken;
     try {
-      newToken = await refreshOnce(fetchImpl);
+      newToken = await refreshOnce(fetchImpl, opcoes);
     } catch (err) {
       // Refresh que nem chegou ao servidor: e falta de rede, nao de sessao.
       // Propaga a mensagem de rede (code NETWORK) em vez de mandar relogar.

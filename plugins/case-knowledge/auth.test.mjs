@@ -194,7 +194,7 @@ test("getFreshAccessToken: token longe de expirar nao refresca", async (t) => {
   assert.equal(refreshCalls, 0);
 });
 
-test("getFreshAccessToken: token expirando (<60s) refresca proativamente", async (t) => {
+test("getFreshAccessToken: token expirando (<5 min) refresca proativamente", async (t) => {
   freshCred(t);
   writeCredential({ access_jwt: makeJwt(nowSec() + 10), refresh: "r1" });
   const fakeFetch = async () => ({ ok: true, status: 200, json: async () => ({ access_jwt: "fresh", refresh: "r2" }) });
@@ -695,4 +695,83 @@ test("requestWithAuth: rede na 1a, 401 na 2a -> UMA renovacao e repete; a renova
   assert.equal(seen.length, 3);
   assert.equal(seen[1].Authorization, `Bearer ${jwt}`);
   assert.equal(seen[2].Authorization, "Bearer jwt2");
+});
+
+// --- CMR-319 (21/10/2026): folga de 5 min na renovacao proativa e 2a tentativa no refresh ---
+
+import { MARGEM_RENOVACAO_S } from "./auth.mjs";
+
+test("MARGEM_RENOVACAO_S e 300 s: 299 s renova, 300 s e 301 s usam o token atual", async (t) => {
+  freshCred(t);
+  assert.equal(MARGEM_RENOVACAO_S, 300);
+  let refreshCalls = 0;
+  const fakeFetch = async () => { refreshCalls++; return { ok: true, status: 200, json: async () => ({ access_jwt: "fresh", refresh: "r2" }) }; };
+  for (const [folga, esperado] of [[301, "atual"], [300, "atual"], [299, "fresh"]]) {
+    const jwt = makeJwt(nowSec() + folga);
+    writeCredential({ access_jwt: jwt, refresh: "r1" });
+    const out = await getFreshAccessToken(fakeFetch);
+    assert.equal(out, esperado === "atual" ? jwt : "fresh", `folga ${folga}`);
+  }
+  assert.equal(refreshCalls, 1);
+});
+
+test("refreshOnce: fetch rejeitado por rede na 1a e 2xx na 2a -> renova (uma unica rotacao no servidor)", async (t) => {
+  freshCred(t);
+  writeCredential({ access_jwt: "old", refresh: "r-old" });
+  let n = 0;
+  const fakeFetch = async () => {
+    n++;
+    if (n === 1) throw Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("ECONNRESET"), { code: "ECONNRESET" }) });
+    return { ok: true, status: 200, json: async () => ({ access_jwt: "novo", refresh: "r-novo" }) };
+  };
+  const out = await refreshOnce(fakeFetch, { esperaMs: 0 });
+  assert.equal(out, "novo");
+  assert.equal(n, 2);
+  assert.deepEqual(readCredential(), { access_jwt: "novo", refresh: "r-novo" });
+});
+
+test("refreshOnce: duas falhas de rede -> code NETWORK, credencial intacta, sem 3a tentativa", async (t) => {
+  freshCred(t);
+  writeCredential({ access_jwt: "old", refresh: "r-old" });
+  let n = 0;
+  const fakeFetch = async () => { n++; throw new TypeError("fetch failed"); };
+  await assert.rejects(() => refreshOnce(fakeFetch, { esperaMs: 0 }), (err) => { assert.equal(err.code, "NETWORK"); return true; });
+  assert.equal(n, 2);
+  assert.deepEqual(readCredential(), { access_jwt: "old", refresh: "r-old" });
+});
+
+test("refreshOnce: 401 na 1a nao se repete (sessao expirada, uma unica chamada)", async (t) => {
+  freshCred(t);
+  writeCredential({ access_jwt: "old", refresh: "r-old" });
+  let n = 0;
+  const fakeFetch = async () => { n++; return { ok: false, status: 401, text: async () => "revoked" }; };
+  await assert.rejects(() => refreshOnce(fakeFetch, { esperaMs: 0 }), (err) => { assert.equal(err.code, "SESSION_EXPIRED"); return true; });
+  assert.equal(n, 1);
+});
+
+test("refreshOnce: abort por timeout nao se repete (code NETWORK, uma chamada)", async (t) => {
+  freshCred(t);
+  writeCredential({ access_jwt: "old", refresh: "r-old" });
+  let n = 0;
+  const fakeFetch = async () => { n++; const e = new Error("aborted"); e.name = "AbortError"; throw e; };
+  await assert.rejects(() => refreshOnce(fakeFetch, { esperaMs: 0 }), (err) => { assert.equal(err.code, "NETWORK"); return true; });
+  assert.equal(n, 1);
+});
+
+test("requestWithAuth: 401 -> refresh com rede na 1a e 2xx na 2a -> repete a API com o token novo (uma renovacao)", async (t) => {
+  freshCred(t);
+  writeCredential({ access_jwt: makeJwt(nowSec() + 3600), refresh: "r1" });
+  let n = 0;
+  const fakeFetch = async () => {
+    n++;
+    if (n === 1) throw new TypeError("fetch failed");
+    return { ok: true, status: 200, json: async () => ({ access_jwt: "jwt2", refresh: "r2" }) };
+  };
+  const seen = [];
+  const doFetch = async (h) => { seen.push(h); return seen.length === 1 ? { ok: false, status: 401 } : { ok: true, status: 200 }; };
+  const res = await requestWithAuth(doFetch, fakeFetch, { esperaMs: 0 });
+  assert.equal(res.status, 200);
+  assert.equal(n, 2);
+  assert.equal(seen[1].Authorization, "Bearer jwt2");
+  assert.deepEqual(readCredential(), { access_jwt: "jwt2", refresh: "r2" });
 });
