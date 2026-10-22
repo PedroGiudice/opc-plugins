@@ -1,0 +1,7 @@
+{
+  "name": "matt-skills",
+  "version": "1.0.0",
+  "description": "Skills de engenharia do Matt Pocock (mattpocock/skills, MIT) adaptadas: grilling, glossario e ADRs, spec e tickets em markdown no repo, TDD, diagnostico de bugs, code review, retro. Substitui o Superpowers.",
+  "author": { "name": "opc" },
+  "license": "MIT"
+}

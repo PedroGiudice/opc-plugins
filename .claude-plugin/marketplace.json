@@ -86,6 +86,15 @@
       },
       "source": "./plugins/aidv-caso",
       "category": "productivity"
+    },
+    {
+      "name": "matt-skills",
+      "description": "Skills de engenharia do Matt Pocock adaptadas (grilling, glossario e ADRs, spec e tickets, TDD, diagnostico, code review). Substitui o Superpowers.",
+      "author": {
+        "name": "opc"
+      },
+      "source": "./plugins/matt-skills",
+      "category": "development"
     }
   ]
 }
