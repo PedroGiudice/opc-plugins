@@ -20,6 +20,13 @@ vive aqui numa regra global única: `~/.claude/rules/matt-skills.md`.
   `/setup-matt-pocock-skills`" virou ponteiro para a regra global.
 - `ask-matt`: sem a entrada de `/triage`; a precondição aponta a regra global.
 
+## O que foi acrescentado
+
+- `hooks/lembrete.mjs` (1.1.0, 23/10/2026, pedido do CEO): gancho de início de sessão
+  (`startup|clear|compact`) que só aponta a regra global. O Superpowers se ativava
+  assim (injetava `using-superpowers` inteira); o plugin do Matt não tem gancho.
+  O texto não repete a tabela da regra, para não divergir dela.
+
 ## Como trazer atualização do Matt
 
 ```bash
