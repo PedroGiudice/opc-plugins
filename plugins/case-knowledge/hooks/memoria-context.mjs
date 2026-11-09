@@ -35,7 +35,12 @@ const MEM_API_BASE =
   process.env.LEGAL_COGMEM_API_BASE || defaultMemApiBase();
 const FETCH_TIMEOUT_MS = 2500;
 const MIN_PROMPT_LENGTH = 15;
-const DISPLAY_MAX_CHARS = 1500; // truncamento de EXIBICAO (storage e integral)
+// Truncamento de EXIBICAO (o storage e integral). O bloco entra em TODA pergunta e fica na conversa para sempre:
+// cada resposta seguinte o rele e cada retomada o regrava. Medido na maquina de uma advogada (CSV de 06 e
+// 09/11/2026): ~1,5 mil tokens a mais por pergunta com 5 trechos de 1.500. Com 3 de 800, cerca da metade
+// (CMR-337).
+const DISPLAY_MAX_CHARS = 800;
+const MAX_TRECHOS = 3;
 
 const TRIVIAL = new Set([
   "ok", "sim", "nao", "não", "yes", "no", "continua", "continue",
@@ -112,7 +117,7 @@ export function formatContext(slug, chunks) {
       "escritorio. Ao usar um trecho, cite autor e data.",
     "",
   ];
-  for (const c of chunks) {
+  for (const c of chunks.slice(0, MAX_TRECHOS)) {
     const score = typeof c.score === "number" ? c.score.toFixed(2) : "?";
     const origem = originLabel(c.repo_path);
     const data =

@@ -69,9 +69,16 @@ test("formatContext: bloco com slug, score e conteudo truncado na exibicao", () 
   assert.ok(out.startsWith("MEMORIA DO CASO [caso-x]"));
   assert.ok(out.includes("[0.71]"));
   assert.ok(out.includes("decidimos sobre prescricao"));
-  // truncamento de EXIBICAO em 1500 chars por chunk
-  assert.ok(!out.includes("A".repeat(1501)));
-  assert.ok(out.includes("A".repeat(1500)));
+  // truncamento de EXIBICAO em 800 chars por chunk (CMR-337: o bloco entra em toda pergunta e fica na conversa)
+  assert.ok(!out.includes("A".repeat(801)));
+  assert.ok(out.includes("A".repeat(800)));
+});
+
+test("formatContext: no maximo 3 trechos, os de maior nota primeiro como vieram (CMR-337)", () => {
+  const out = formatContext("caso-x", [1, 2, 3, 4, 5].map((n) => ({ score: 1 - n / 10, content: `trecho ${n}` })));
+  assert.ok(out.includes("trecho 3"));
+  assert.ok(!out.includes("trecho 4"));
+  assert.ok(!out.includes("trecho 5"));
 });
 
 test("formatContext: chunks vazios -> null", () => {
