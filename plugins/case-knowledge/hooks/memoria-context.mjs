@@ -117,7 +117,11 @@ export function formatContext(slug, chunks) {
       "escritorio. Ao usar um trecho, cite autor e data.",
     "",
   ];
-  for (const c of chunks.slice(0, MAX_TRECHOS)) {
+  // Os de maior nota primeiro: o corte não depende da ordem em que o servidor devolveu.
+  const melhores = [...chunks]
+    .sort((x, y) => (typeof y.score === "number" ? y.score : -1) - (typeof x.score === "number" ? x.score : -1))
+    .slice(0, MAX_TRECHOS);
+  for (const c of melhores) {
     const score = typeof c.score === "number" ? c.score.toFixed(2) : "?";
     const origem = originLabel(c.repo_path);
     const data =
