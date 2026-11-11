@@ -27,6 +27,13 @@ vive aqui numa regra global única: `~/.claude/rules/matt-skills.md`.
   assim (injetava `using-superpowers` inteira); o plugin do Matt não tem gancho.
   O texto não repete a tabela da regra, para não divergir dela.
 
+- Invocação pelo modelo (1.2.0, 11/11/2026, pedido do CEO): `grill-with-docs`, `to-spec`,
+  `to-tickets`, `implement`, `implement-spec`, `wayfinder` e `improve-codebase-architecture`
+  perderam o `disable-model-invocation: true` do Matt. O CEO não lembra de digitar os
+  comandos, e a cadeia sabatina -> spec -> tickets -> implementação deixava de rodar. As
+  demais (`grill-me`, `retro`, `handoff`, `teach`, `wait-what`, `to-questionnaire`,
+  `ask-matt`) seguem só digitadas. Ao trazer atualização do Matt, reaplicar.
+
 ## Como trazer atualização do Matt
 
 ```bash
